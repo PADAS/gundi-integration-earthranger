@@ -10,6 +10,11 @@ class ActionConfiguration(UISchemaModelMixin, BaseModel):
     pass
 
 
+# ToDo: Move this into the template
+class ExecutableActionMixin:
+    pass
+
+
 class PullActionConfiguration(ActionConfiguration):
     pass
 

@@ -4,11 +4,10 @@ from typing import List, Optional
 
 from pydantic import Field
 
-from .core import AuthActionConfiguration, PullActionConfiguration
+from .core import AuthActionConfiguration, PullActionConfiguration, ExecutableActionMixin
 
 
-
-class AuthenticateConfig(AuthActionConfiguration):
+class AuthenticateConfig(AuthActionConfiguration, ExecutableActionMixin):
     username: Optional[str] = Field(
         "",
         example="user@pamdas.org",
