@@ -6,12 +6,13 @@ from urllib.parse import urlparse
 import httpx
 import stamina
 from erclient import AsyncERClient, ERClientException
-from gundi_client_v2.client import GundiClient, GundiDataSenderClient
+from gundi_client_v2.client import GundiClient
 from gundi_core.schemas.v2 import Integration
 from app.services.utils import find_config_for_action
 from app.services.state import IntegrationStateManager
 from .configurations import AuthenticateConfig, PullObservationsConfig, PullEventsConfig
 from ..services.activity_logger import activity_logger
+from ..services.gundi import send_events_to_gundi, send_observations_to_gundi
 
 logger = logging.getLogger(__name__)
 
@@ -44,8 +45,9 @@ async def action_auth(integration: Integration, action_config: AuthenticateConfi
 
 @activity_logger()
 async def action_pull_events(integration: Integration, action_config: PullEventsConfig):
+    integration_id = str(integration.id)
     logger.info(
-        f"Extracting events for integration {str(integration.id)}, with config {action_config}",
+        f"Extracting events for integration {integration_id}, with config {action_config}",
     )
     total_events = 0
     execution_timestamp = datetime.datetime.now(tz=datetime.timezone.utc).isoformat()
@@ -63,17 +65,12 @@ async def action_pull_events(integration: Integration, action_config: PullEvents
         client_id="das_web_client",
         connect_timeout=DEFAULT_CONNECT_TIMEOUT_SECONDS,
     )
-    # Prepare the Gundi client to push data to Gundi API
-    gundi_api_key = await get_gundi_api_key(integration_id=str(integration.id))
-    sensors_api_client = GundiDataSenderClient(
-        integration_api_key=gundi_api_key
-    )
     # Prepare filters to extract Data Since last execution
     state = await state_manager.get_state(
-        integration_id=str(integration.id), action_id="pull_events"
+        integration_id=integration_id, action_id="pull_events"
     )
     logger.debug(
-        f"State retrieved for integration {str(integration.id)}, action pull_events:\n{state}",
+        f"State retrieved for integration {integration_id}, action pull_events:\n{state}",
     )
     last_execution = state.get("last_execution")
     if not last_execution or pull_config.force_run_since_start:
@@ -96,13 +93,13 @@ async def action_pull_events(integration: Integration, action_config: PullEvents
             if not transformed_events:
                 continue  # No data to send
             logger.info(f"Sending {len(transformed_events)} events to Gundi...")
-            await send_events_to_gundi(events=transformed_events, client=sensors_api_client)
+            await send_events_to_gundi(events=transformed_events, integration_id=integration_id)
             total_events += len(transformed_events)
     # Update state
     state = {"last_execution": execution_timestamp}
     logger.debug(f"Saving state for integration {integration}, action pull_events:\n{state}")
     await state_manager.set_state(
-        integration_id=str(integration.id),
+        integration_id=integration_id,
         action_id="pull_events",
         state=state
     )
@@ -112,8 +109,9 @@ async def action_pull_events(integration: Integration, action_config: PullEvents
 
 @activity_logger()
 async def action_pull_observations(integration: Integration, action_config: PullObservationsConfig):
+    integration_id = str(integration.id)
     logger.info(
-        f"Extracting observations for integration {str(integration.id)}, with config {action_config}",
+        f"Extracting observations for integration {integration_id}, with config {action_config}",
     )
     total_observations = 0
     execution_timestamp = datetime.datetime.now(tz=datetime.timezone.utc).isoformat()
@@ -131,17 +129,12 @@ async def action_pull_observations(integration: Integration, action_config: Pull
         client_id="das_web_client",
         connect_timeout=DEFAULT_CONNECT_TIMEOUT_SECONDS,
     )
-    # Prepare the Gundi client to push data to Gundi API
-    gundi_api_key = await get_gundi_api_key(integration_id=str(integration.id))
-    sensors_api_client = GundiDataSenderClient(
-        integration_api_key=gundi_api_key
-    )
     # Prepare filters to extract Data Since last execution
     state = await state_manager.get_state(
-        integration_id=str(integration.id), action_id="pull_observations"
+        integration_id=integration_id, action_id="pull_observations"
     )
     logger.debug(
-        f"State retrieved for integration {str(integration.id)}, action pull_observations:\n{state}"
+        f"State retrieved for integration {integration_id}, action pull_observations:\n{state}"
     )
     last_execution = state.get("last_execution")
     if not last_execution or pull_config.force_run_since_start:
@@ -162,13 +155,13 @@ async def action_pull_observations(integration: Integration, action_config: Pull
             if not transformed_observations:
                 continue  # No data to send
             logger.info(f"Sending {len(transformed_observations)} observations to Gundi...")
-            await send_observations_to_gundi(observations=transformed_observations, client=sensors_api_client)
+            await send_observations_to_gundi(observations=transformed_observations, integration_id=integration_id)
             total_observations += len(transformed_observations)
     # Update state
     state = {"last_execution": execution_timestamp}
     logger.debug(f"Saving state for integration {integration}, action pull_observations:\n{state}")
     await state_manager.set_state(
-        integration_id=str(integration.id),
+        integration_id=integration_id,
         action_id="pull_observations",
         state=state
     )
@@ -258,21 +251,3 @@ def transform_observations_to_gundi_schema(observations):
             transformed_data.append(transformed_observation)
     return transformed_data
 
-
-@stamina.retry(on=httpx.HTTPError, attempts=3, wait_initial=datetime.timedelta(seconds=1), wait_max=datetime.timedelta(seconds=10))
-async def get_gundi_api_key(integration_id):
-    async with GundiClient() as gundi_client:
-        return await gundi_client.get_integration_api_key(
-            integration_id=integration_id
-        )
-
-
-@stamina.retry(on=httpx.HTTPError, attempts=3, wait_initial=datetime.timedelta(seconds=1), wait_max=datetime.timedelta(seconds=10))
-async def send_events_to_gundi(events, client):
-    # Push events to Gundi API v2
-    return await client.post_events(data=events)
-
-
-@stamina.retry(on=httpx.HTTPError, attempts=3, wait_initial=datetime.timedelta(seconds=1), wait_max=datetime.timedelta(seconds=10))
-async def send_observations_to_gundi(observations, client):
-    return await client.post_observations(data=observations)
