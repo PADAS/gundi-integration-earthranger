@@ -2,7 +2,7 @@ from datetime import datetime
 from enum import Enum
 from typing import List, Optional
 
-from pydantic import Field
+from pydantic import Field, SecretStr
 
 from .core import AuthActionConfiguration, PullActionConfiguration, ExecutableActionMixin
 
@@ -13,10 +13,11 @@ class AuthenticateConfig(AuthActionConfiguration, ExecutableActionMixin):
         example="user@pamdas.org",
         description="Username used to authenticate against Earth Ranger API",
     )
-    password: Optional[str] = Field(
+    password: Optional[SecretStr] = Field(
         "",
         example="passwd1234abc",
         description="Password used to authenticate against Earth Ranger API",
+        format="password"
     )
     token: Optional[str] = Field(
         "",
