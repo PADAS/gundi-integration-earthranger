@@ -26,7 +26,7 @@ async def action_auth(integration: Integration, action_config: AuthenticateConfi
     auth_config = action_config
     url_parse = urlparse(integration.base_url)
     async with AsyncERClient(
-            service_root=f"{integration.base_url}/api/v1.0",
+            service_root=f"{url_parse.scheme}://{url_parse.hostname}/api/v1.0",
             username=auth_config.username,
             password=auth_config.password,
             token=auth_config.token,
@@ -57,7 +57,7 @@ async def action_pull_events(integration: Integration, action_config: PullEvents
     # Prepare the ER client to extract events
     url_parse = urlparse(integration.base_url)
     er_client = AsyncERClient(
-        service_root=f"{integration.base_url}/api/v1.0",
+        service_root=f"{url_parse.scheme}://{url_parse.hostname}/api/v1.0",
         username=auth_config.username or None,
         password=auth_config.password or None,
         token=auth_config.token,
@@ -121,7 +121,7 @@ async def action_pull_observations(integration: Integration, action_config: Pull
     # Prepare the ER client to extract events
     url_parse = urlparse(integration.base_url)
     er_client = AsyncERClient(
-        service_root=f"{integration.base_url}/api/v1.0",
+        service_root=f"{url_parse.scheme}://{url_parse.hostname}/api/v1.0",
         username=auth_config.username or None,
         password=auth_config.password or None,
         token=auth_config.token,
