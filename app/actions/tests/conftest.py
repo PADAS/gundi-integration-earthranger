@@ -66,6 +66,7 @@ def mock_gundi_client_v2(
     mock_client.__aenter__.return_value = mock_client
     return mock_client
 
+
 @pytest.fixture
 def mock_state_manager(mocker):
     mock_state_manager = mocker.MagicMock()
@@ -75,16 +76,21 @@ def mock_state_manager(mocker):
     mock_state_manager.set_state.return_value = async_return(None)
     return mock_state_manager
 
+
 @pytest.fixture
 def mock_erclient_class(
         mocker,
         auth_headers_response,
+        get_me_response,
         get_events_response,
         get_observations_response,
         er_client_close_response
 ):
     mocked_erclient_class = mocker.MagicMock()
     erclient_mock = mocker.MagicMock()
+    erclient_mock.get_me.return_value = async_return(
+        get_me_response
+    )
     erclient_mock.auth_headers.return_value = async_return(
         auth_headers_response
     )
@@ -126,6 +132,7 @@ def events_created_response():
         }
     ]
 
+
 @pytest.fixture
 def observations_created_response():
     return [
@@ -148,6 +155,136 @@ def auth_headers_response():
     }
 
 
+@pytest.fixture
+def get_me_response():
+    return {
+        'username': 'gundi_serviceaccount',
+        'email': None,
+        'first_name': 'Gundi',
+        'last_name': 'Service Account',
+        'role': '',
+        'is_staff': False,
+        'is_superuser': True,
+        'date_joined': '2022-08-31T03:21:05.891041-07:00',
+        'id': 'ebd8ef0f-8b86-4e0f-8b34-b55a575e476f',
+        'is_active': True,
+        'last_login': '2024-08-28T15:16:55.894706-07:00',
+        'pin': None,
+        'subject': None,
+        'permissions': {
+            'wildlife_resourceuse': ['view', 'delete', 'add', 'change'],
+            'patrolconfiguration': ['view', 'change', 'delete', 'add'],
+            'uwa_hdq': ['view', 'add', 'change', 'delete'],
+            'eventclassfactor': ['delete', 'view', 'add', 'change'],
+            'kvca_eland_monitoring_-2023': ['delete', 'change', 'add', 'view'],
+            'ilegal-activities': ['delete', 'add', 'change', 'view'],
+            'karamagi_patrol2': ['change', 'add', 'delete', 'view'],
+            'eventdetails': ['view', 'delete', 'change', 'add'], 'monitoring': ['change', 'view', 'delete', 'add'],
+            'community': ['view', 'view', 'delete', 'add', 'change', 'delete', 'change', 'add'],
+            'wildlife_rangers': ['delete', 'add', 'view', 'change'], 'meetings': ['change', 'view', 'add', 'delete'],
+            'murchison_falls_cc_unit': ['change', 'delete', 'add', 'view'],
+            'patroltype': ['view', 'add', 'change', 'delete'], 'human_injury_mfca': ['delete', 'view', 'change', 'add'],
+            'noaa_edgtech_geo': ['delete', 'change', 'view', 'add'],
+            'problem-animal': ['delete', 'view', 'change', 'add'],
+            'kvca_monitoring_eland': ['delete', 'change', 'add', 'view'], 'patrol': ['view', 'add', 'change', 'delete'],
+            'hwc_puwr': ['change', 'delete', 'view', 'add'], 'zoologico': ['delete', 'view', 'add', 'change'],
+            'crop_raid_rep': ['view', 'change', 'add', 'delete'], 'teammembership': ['view', 'delete', 'add', 'change'],
+            'human_injury-1234': ['delete', 'change', 'add', 'view'],
+            'hwc_monitoring': ['add', 'delete', 'change', 'view'],
+            'vulture_clusters': ['add', 'delete', 'view', 'change'],
+            'noaa_ashored_events': ['add', 'delete', 'change', 'view'],
+            'patrol-teams': ['delete', 'change', 'view', 'add'], 'message': ['view', 'change', 'delete', 'add'],
+            'eventfactor': ['view', 'change', 'delete', 'add'], 'eventcategory': ['add', 'view', 'change', 'delete'],
+            'apitests': ['view', 'add', 'change', 'delete'], 'eventclass': ['add', 'view', 'delete', 'change'],
+            'noaa_gearmanufacturer_events': ['change', 'view', 'delete', 'add'],
+            'hwc_monitoring-bmca': ['add', 'change', 'view', 'delete'],
+            'noaa_devocean_events': ['delete', 'add', 'change', 'view'],
+            'tsvectormodel': ['view', 'change', 'delete', 'add'], 'smart_reports': ['add', 'view', 'change', 'delete'],
+            'eventfilter': ['view', 'change', 'add', 'delete'], 'standard__deprecated': ['view', 'change'],
+            'eventgeometry': ['delete', 'view', 'add', 'change'], 'hwc_incidences': ['add', 'view', 'change', 'delete'],
+            'easterisland_monitoring': ['add', 'view', 'delete', 'change'],
+            'patrol-3': ['delete', 'add', 'change', 'view'],
+            'patrolconfigurationsubjectgroup': ['change', 'add', 'view', 'delete'],
+            'bmca_training': ['change', 'view', 'delete', 'add'], 'security': ['change', 'view', 'add', 'delete'],
+            'crop_raid_lmca1': ['delete', 'add', 'change', 'view'],
+            'eventrelatedsubject': ['delete', 'change', 'view', 'add'],
+            'patrolmen1': ['view', 'add', 'delete', 'change'], 'analyzer_event': ['change', 'delete', 'view', 'add'],
+            'refreshrecreateeventdetailview': ['change', 'delete', 'view', 'add'],
+            'security__deprecated': ['view', 'change'], 'kzn_vulturemonitoring': ['view', 'add', 'delete', 'change'],
+            'sfg_rnd': ['change', 'delete', 'view', 'add'], 'qeca_monitoring_team': ['view', 'delete', 'change', 'add'],
+            'eventrelatedsegments': ['delete', 'add', 'change', 'view'],
+            'vcc_vcc_vulture_clusters': ['change', 'add', 'delete', 'view'],
+            'alertrule': ['change', 'delete', 'view', 'add'],
+            'shift_rangers_staff': ['view', 'change', 'add', 'delete'],
+            'community-conservation': ['delete', 'view', 'change', 'add'],
+            'eventsourceevent': ['delete', 'change', 'view', 'add'],
+            'wildlife_reserve': ['delete', 'change', 'add', 'view'],
+            'communty_rangers': ['change', 'delete', 'add', 'view'],
+            'uwa-hdqs-team': ['add', 'view', 'change', 'delete'],
+            'baotree_reports': ['change', 'add', 'delete', 'view'], 'test_cat': ['add', 'view', 'change', 'delete'],
+            'guido': ['delete', 'add', 'view', 'change'], 'animal_census': ['add', 'change', 'delete', 'view'],
+            'eventrelationship': ['view', 'change', 'delete', 'add'], 'eventphoto': ['add', 'view', 'change', 'delete'],
+            'alertruleeventtype': ['add', 'view', 'delete', 'change'],
+            'eventnotification': ['add', 'view', 'delete', 'change'], 'ecology': ['view', 'change', 'add', 'delete'],
+            'wildlife_scouts': ['add', 'delete', 'view', 'change'], 'eventsource': ['view', 'change', 'add', 'delete'],
+            'person': ['delete', 'add', 'view', 'change'], 'easterisland_security': ['change', 'delete', 'view', 'add'],
+            'extended-patrols': ['delete', 'view', 'change', 'add'],
+            'noaa_smelts_geo': ['view', 'delete', 'change', 'add'], 'eventfile': ['view', 'delete', 'change', 'add'],
+            'easterisland_analyzer_event': ['change', 'delete', 'add', 'view'],
+            'invasive_monitoring': ['change', 'delete', 'add', 'view'],
+            'livestock_predation': ['add', 'change', 'view', 'delete'],
+            'kasese_monitoring_crop_raid': ['view', 'delete', 'change', 'add'],
+            'monitoring_and_research': ['add', 'view', 'change', 'delete'],
+            'queen_elizabeth_np': ['view', 'add', 'delete', 'change'],
+            'wildlife_resourceuse-1': ['add', 'delete', 'view', 'change'],
+            'research_lmca': ['view', 'change', 'add', 'delete'], 'kvca_uwa': ['view', 'add', 'change', 'delete'],
+            'law-enforcement': ['change', 'delete', 'view', 'add'], 'hwc': ['add', 'change', 'delete', 'view'],
+            'vcc_vulture_clusters': ['view', 'change', 'add', 'delete'],
+            'event': ['export', 'add', 'change', 'view', 'delete'],
+            'easterisland_logistics': ['view', 'change', 'add', 'delete'],
+            'logistics': ['add', 'view', 'delete', 'change'], 'uwrti_scouts': ['delete', 'add', 'view', 'change'],
+            'patrol_men': ['delete', 'view', 'add', 'change'], 'animal_disposal2': ['change', 'add', 'delete', 'view'],
+            'hidden': ['add', 'view', 'delete', 'change'], 'membershiptype': ['view', 'change', 'delete', 'add'],
+            'problem_animal': ['delete', 'change', 'add', 'view'],
+            'human_injury_rep': ['add', 'delete', 'view', 'change'], 'rangers': ['add', 'change', 'delete', 'view'],
+            'mount_elgon_conservation_area': ['change', 'view', 'delete', 'add'],
+            'ougen': ['view', 'delete', 'add', 'change'], 'hwc_allan': ['view', 'delete', 'change', 'add'],
+            'animal_details': ['delete', 'view', 'change', 'add'],
+            'monitoring_research': ['delete', 'change', 'add', 'view'],
+            'qeca_community_conservation': ['view', 'delete', 'change', 'add'],
+            'string': ['delete', 'change', 'add', 'view'], 'kabibi-general': ['view', 'change', 'add', 'delete'],
+            'mornitoring': ['delete', 'change', 'add', 'view'], 'eventnote': ['add', 'change', 'view', 'delete'],
+            'kakamega_test': ['change', 'delete', 'add', 'view'], 'emr-staff-qeca': ['add', 'change', 'view', 'delete'],
+            'human_wildlif_conflict': ['view', 'change', 'add', 'delete'],
+            'notificationmethod': ['add', 'delete', 'view', 'change'], 'eventtype': ['change', 'view', 'delete', 'add'],
+            'team': ['add', 'delete', 'view', 'change'], 'eventattachment': ['delete', 'view', 'change', 'add'],
+            'noaa_bog_geo': ['view', 'change', 'add', 'delete'],
+            'hwc_monitoring_g5': ['delete', 'view', 'add', 'change'],
+            'wildlife-monitoring': ['delete', 'add', 'view', 'change'],
+            'community_conservations': ['delete', 'change', 'add', 'view'],
+            'accident_couse': ['view', 'change', 'add', 'delete'],
+            'eventrelationshiptype': ['delete', 'change', 'view', 'add'],
+            'alertrulenotificationmethod': ['add', 'change', 'delete', 'view'],
+            'trails': ['change', 'add', 'delete', 'view'], 'hwc-mitigation': ['view', 'change', 'delete', 'add'],
+            'monitoring-puwr': ['delete', 'view', 'add', 'change'], 'hwc-mfca': ['add', 'view', 'delete', 'change'],
+            'everywhere_comms': ['add', 'view', 'delete', 'change'],
+            'easterisland_demo': ['change', 'add', 'view', 'delete'], 'ecology2': ['change', 'delete', 'add', 'view'],
+            'mgnp_hugo': ['delete', 'view', 'change', 'add'], 'crop_raid_adriano': ['change', 'view', 'add', 'delete'],
+            'kvca_hwc': ['delete', 'add', 'view', 'change'], 'observation': ['export'],
+            'event_for_eventsource': ['add'], 'angiswa_staffs': ['add', 'change', 'view', 'delete'],
+            'team_work': ['change', 'view', 'delete', 'add'], 'crop_raid_lmca': ['delete', 'change', 'add', 'view'],
+            'group_two': ['add', 'delete', 'change', 'view'], 'hwc_-mfca': ['view', 'delete', 'add', 'change'],
+            'mburo_staff': ['add', 'view', 'change', 'delete'],
+            'community_conservation': ['change', 'add', 'delete', 'view'], 'meca': ['add', 'delete', 'change', 'view'],
+            'mirembe_lmca': ['delete', 'change', 'add', 'view'], 'eventprovider': ['delete', 'view', 'add', 'change'],
+            'kvca_pangolin_monitoring': ['delete', 'view', 'add', 'change'],
+            'ropelessgear': ['change', 'delete', 'view', 'add'], 'karamagi-patrol': ['delete', 'view', 'change', 'add'],
+            'lion_monitoring': ['view', 'delete', 'add', 'change'], 'porters': ['change', 'add', 'delete', 'view'],
+            'hotleerymes': ['view', 'delete', 'change', 'add']
+        }
+    }
+
+
 class AsyncIterator:
     def __init__(self, seq):
         self.iter = iter(seq)
@@ -160,6 +297,7 @@ class AsyncIterator:
             return next(self.iter)
         except StopIteration:
             raise StopAsyncIteration
+
 
 @pytest.fixture
 def get_events_response(events_batch_one, events_batch_two):
@@ -309,14 +447,12 @@ def mock_get_gundi_api_key(mocker, mock_api_key):
     mock.return_value = async_return(mock_api_key)
     return mock
 
+
 @pytest.fixture
 def mock_api_key():
     return "MockAP1K3y"
 
+
 @pytest.fixture
 def er_client_close_response():
     return {}
-
-
-
-

@@ -18,7 +18,7 @@ async def test_execute_auth_action(
     )
 
     assert mock_gundi_client_v2.get_integration_details.called
-    assert mock_erclient_class.return_value.auth_headers.called
+    assert mock_erclient_class.return_value.get_me.called
     assert response == {"valid_credentials": True}
 
 
