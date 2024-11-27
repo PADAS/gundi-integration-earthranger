@@ -35,11 +35,16 @@ async def action_auth(integration: Integration, action_config: AuthenticateConfi
             connect_timeout=DEFAULT_CONNECT_TIMEOUT_SECONDS,
     ) as er_client:
         try:
-            result = await er_client.auth_headers()
+            if auth_config.token:
+                result = await er_client.get_me()
+                # ToDo: Support doing a deeper check on permissions here or in a separate handler
+                valid_credentials = result.get('is_active', False)
+            elif auth_config.username and auth_config.password:
+                valid_credentials = await er_client.login()
+            else:
+                return {"valid_credentials": False, "error": "Please provide either a token or username/password."}
         except ERClientException:
             valid_credentials = False
-        else:
-            valid_credentials = result is not None
         return {"valid_credentials": valid_credentials}
 
 
