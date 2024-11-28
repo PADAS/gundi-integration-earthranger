@@ -28,7 +28,7 @@ async def action_auth(integration: Integration, action_config: AuthenticateConfi
     async with AsyncERClient(
             service_root=f"{url_parse.scheme}://{url_parse.hostname}/api/v1.0",
             username=auth_config.username,
-            password=auth_config.password,
+            password=auth_config.password.get_secret_value() if auth_config.password else None,
             token=auth_config.token,
             token_url=f"{url_parse.scheme}://{url_parse.hostname}/oauth2/token",
             client_id="das_web_client",
