@@ -43,8 +43,9 @@ async def action_auth(integration: Integration, action_config: AuthenticateConfi
                 valid_credentials = await er_client.login()
             else:
                 return {"valid_credentials": False, "error": "Please provide either a token or username/password."}
-        except ERClientException:
-            valid_credentials = False
+        except ERClientException as e:
+            # ToDo. Differentiate ER errors from invalid credentials
+            return {"valid_credentials": False, "error": f"Error trying to check credentials: {e}"}
         return {"valid_credentials": valid_credentials}
 
 
