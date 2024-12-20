@@ -7,15 +7,24 @@ from pydantic import Field, SecretStr
 from .core import AuthActionConfiguration, PullActionConfiguration, ExecutableActionMixin
 
 
+class ERAuthenticationType(str, Enum):
+    TOKEN = "token"
+    USERNAME_PASSWORD = "username_password"
+
+
 class AuthenticateConfig(AuthActionConfiguration, ExecutableActionMixin):
+    authentication_type: ERAuthenticationType = Field(
+        ERAuthenticationType.TOKEN,
+        description="Type of authentication to use."
+    )
     username: Optional[str] = Field(
         "",
-        example="user@pamdas.org",
+        example="myuser",
         description="Username used to authenticate against Earth Ranger API",
     )
     password: Optional[SecretStr] = Field(
         "",
-        example="passwd1234abc",
+        example="mypasswd1234abc",
         description="Password used to authenticate against Earth Ranger API",
         format="password"
     )
@@ -25,6 +34,29 @@ class AuthenticateConfig(AuthActionConfiguration, ExecutableActionMixin):
         description="Token used to authenticate against Earth Ranger API",
     )
 
+    class Config:
+        schema_extra = {
+            "if": {
+                "properties": {"authentication_type": {"const": "token"}}
+            },
+            "then": {
+                "required": ["token"],
+                "properties": {
+                    "token": {"type": "string", "description": "Token is required if authentication_type is 'token'."}
+                },
+            },
+            "else": {
+                "required": ["username", "password"],
+                "properties": {
+                    "username": {"type": "string",
+                                 "description": "Username is required if authentication_type is 'username_password'."},
+                    "password": {"type": "string", "format": "password",
+                                 "description": "Password is required if authentication_type is 'username_password'."},
+                },
+            },
+        }
+
+print(AuthenticateConfig.schema_json(indent=2))
 
 class PullObservationsConfig(PullActionConfiguration):
     start_datetime: str
