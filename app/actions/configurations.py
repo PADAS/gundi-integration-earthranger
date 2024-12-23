@@ -4,6 +4,7 @@ from typing import List, Optional
 
 from pydantic import Field, SecretStr
 
+from app.services.utils import GlobalUISchemaOptions
 from .core import AuthActionConfiguration, PullActionConfiguration, ExecutableActionMixin
 
 
@@ -34,37 +35,76 @@ class AuthenticateConfig(AuthActionConfiguration, ExecutableActionMixin):
         description="Token used to authenticate against Earth Ranger API",
     )
 
-    class Config:
-        schema_extra = {
-            "if": {
-                "properties": {"authentication_type": {"const": "token"}}
-            },
-            "then": {
-                "required": ["token"],
-                "properties": {
-                    "token": {"type": "string", "description": "Token is required if authentication_type is 'token'."}
-                },
-            },
-            "else": {
-                "required": ["username", "password"],
-                "properties": {
-                    "username": {"type": "string",
-                                 "description": "Username is required if authentication_type is 'username_password'."},
-                    "password": {"type": "string", "format": "password",
-                                 "description": "Password is required if authentication_type is 'username_password'."},
-                },
-            },
-        }
+    ui_global_options: GlobalUISchemaOptions = GlobalUISchemaOptions(
+        order=["authentication_type", "token", "username", "password"],
+    )
 
-print(AuthenticateConfig.schema_json(indent=2))
+    class Config:
+        @staticmethod
+        def schema_extra(schema: dict):
+            # Remove token, username, and password from the root properties
+            schema["properties"].pop("token", None)
+            schema["properties"].pop("username", None)
+            schema["properties"].pop("password", None)
+
+            # Show token OR username & password based on authentication_type
+            schema.update({
+                "if": {
+                    "properties": {
+                        "authentication_type": {"const": "token"}
+                    }
+                },
+                "then": {
+                    "required": ["token"],
+                    "properties": {
+                        "token": {
+                            "title": "Token",
+                            "description": "Token used to authenticate against Earth Ranger API",
+                            "default": "",
+                            "example": "1b4c1e9c-5ee0-44db-c7f1-177ede2f854a",
+                            "type": "string"
+                        }
+                    }
+                },
+                "else": {
+                    "required": ["username", "password"],
+                    "properties": {
+                        "username": {
+                            "title": "Username",
+                            "description": "Username used to authenticate against Earth Ranger API",
+                            "default": "",
+                            "example": "myuser",
+                            "type": "string"
+                        },
+                        "password": {
+                            "title": "Password",
+                            "description": "Password used to authenticate against Earth Ranger API",
+                            "default": "",
+                            "example": "mypasswd1234abc",
+                            "format": "password",
+                            "type": "string",
+                            "writeOnly": True
+                        }
+                    }
+                }
+            })
+
 
 class PullObservationsConfig(PullActionConfiguration):
     start_datetime: str
     end_datetime: Optional[str] = None
     force_run_since_start: bool = False
 
+    ui_global_options: GlobalUISchemaOptions = GlobalUISchemaOptions(
+        order=["start_datetime", "end_datetime", "force_run_since_start"],
+    )
+
 
 class PullEventsConfig(PullActionConfiguration):
     start_datetime: str
     end_datetime: Optional[str] = None
     force_run_since_start: bool = False
+
+    ui_global_options: GlobalUISchemaOptions = GlobalUISchemaOptions(
+        order=["start_datetime", "end_datetime", "force_run_since_start"],
+    )
