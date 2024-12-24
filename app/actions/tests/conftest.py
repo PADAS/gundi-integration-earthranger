@@ -1,5 +1,6 @@
 import asyncio
 import pytest
+from erclient import ERClientException
 from gundi_core.schemas.v2 import Integration
 
 
@@ -96,6 +97,106 @@ def mock_erclient_class(
     )
     erclient_mock.get_events.return_value = AsyncIterator(get_events_response)
     erclient_mock.get_observations.return_value = AsyncIterator(get_observations_response)
+    erclient_mock.close.return_value = async_return(
+        er_client_close_response
+    )
+    erclient_mock.__aenter__.return_value = erclient_mock
+    erclient_mock.__aexit__.return_value = er_client_close_response
+    mocked_erclient_class.return_value = erclient_mock
+    return mocked_erclient_class
+
+
+
+@pytest.fixture
+def er_401_exception():
+    return ERClientException(
+        'Failed to GET to ER web service. provider_key: None, service: https://gundi-dev.staging.pamdas.org/api/v1.0, path: user/me,\n\t 401 from ER. Message: Authentication credentials were not provided. {"status":{"code":401,"message":"Unauthorized","detail":"Authentication credentials were not provided."}}'
+    )
+
+
+@pytest.fixture
+def er_500_exception():
+    return ERClientException(
+        'Failed to GET to ER web service. provider_key: None, service: https://gundi-dev.staging.pamdas.org/api/v1.0, path: user/me,\n\t 500 from ER. Message: duplicate key value violates unique constraint "observations_observation_tenant_source_at_unique"'
+    )
+
+
+@pytest.fixture
+def er_generic_exception():
+    return ERClientException(
+        'Failed to GET to ER web service. provider_key: None, service: https://gundi-dev.staging.pamdas.org/api/v1.0, path: user/me,\n\t Error from ER. Message: Something went wrong'
+    )
+
+
+@pytest.fixture
+def mock_erclient_class_with_error(
+    request,
+    mocker,
+    er_401_exception,
+    er_500_exception,
+    er_generic_exception,
+    er_client_close_response
+):
+
+    if request.param == "er_401_exception":
+        er_error = er_401_exception
+    elif request.param == "er_500_exception":
+        er_error = er_500_exception
+    else:
+        er_error = er_generic_exception
+    mocked_erclient_class = mocker.MagicMock()
+    erclient_mock = mocker.MagicMock()
+    erclient_mock.get_me.side_effect = er_error
+    erclient_mock.auth_headers.side_effect = er_error
+    erclient_mock.get_events.side_effect = er_error
+    erclient_mock.get_observations.side_effect = er_error
+    erclient_mock.close.return_value = async_return(
+        er_client_close_response
+    )
+    erclient_mock.__aenter__.return_value = erclient_mock
+    erclient_mock.__aexit__.return_value = er_client_close_response
+    mocked_erclient_class.return_value = erclient_mock
+    return mocked_erclient_class
+
+
+
+@pytest.fixture
+def mock_erclient_class_with_auth_401(
+        mocker,
+        auth_headers_response,
+        er_401_exception,
+
+):
+    mocked_erclient_class = mocker.MagicMock()
+    erclient_mock = mocker.MagicMock()
+    erclient_mock.get_me.side_effect = er_401_exception
+    erclient_mock.auth_headers.side_effect = er_401_exception
+    erclient_mock.get_events.side_effect = er_401_exception
+    erclient_mock.get_observations.side_effect = er_401_exception
+    erclient_mock.close.return_value = async_return(
+        er_client_close_response
+    )
+    erclient_mock.__aenter__.return_value = erclient_mock
+    erclient_mock.__aexit__.return_value = er_client_close_response
+    mocked_erclient_class.return_value = erclient_mock
+    return mocked_erclient_class
+
+
+@pytest.fixture
+def mock_erclient_class_with_auth_500(
+        mocker,
+        auth_headers_response,
+        er_500_exception,
+        get_events_response,
+        get_observations_response,
+        er_client_close_response
+):
+    mocked_erclient_class = mocker.MagicMock()
+    erclient_mock = mocker.MagicMock()
+    erclient_mock.get_me.side_effect = er_500_exception
+    erclient_mock.auth_headers.side_effect = er_500_exception
+    erclient_mock.get_events.side_effect = er_500_exception
+    erclient_mock.get_observations.side_effect = er_500_exception
     erclient_mock.close.return_value = async_return(
         er_client_close_response
     )
