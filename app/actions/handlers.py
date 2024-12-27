@@ -25,6 +25,8 @@ state_manager = IntegrationStateManager()
 async def action_auth(integration: Integration, action_config: AuthenticateConfig):
     auth_config = action_config
     url_parse = urlparse(integration.base_url)
+    if not url_parse.hostname:
+        return {"valid_credentials": False, "error": f"Site URL is empty or invalid: '{integration.base_url}'"}
     async with AsyncERClient(
             service_root=f"{url_parse.scheme}://{url_parse.hostname}/api/v1.0",
             username=auth_config.username,
@@ -46,6 +48,8 @@ async def action_auth(integration: Integration, action_config: AuthenticateConfi
         except ERClientException as e:
             # ToDo. Differentiate ER errors from invalid credentials in the ER client
             return {"valid_credentials": False, "error": str(e)}
+        except httpx.HTTPError as e:
+            return {"valid_credentials": False, "error": f"HTTP error: {e}"}
         return {"valid_credentials": valid_credentials}
 
 
