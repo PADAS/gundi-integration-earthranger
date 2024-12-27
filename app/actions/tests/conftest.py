@@ -1,4 +1,6 @@
 import asyncio
+
+import httpx
 import pytest
 from erclient import ERClientException
 from gundi_core.schemas.v2 import Integration
@@ -14,6 +16,51 @@ def async_return(result):
 def er_integration_v2():
     return Integration.parse_obj(
         {'id': '779ff3ab-5589-4f4c-9e0a-ae8d6c9edff0', 'name': 'Gundi ER', 'base_url': 'https://gundi-er.pamdas.org',
+         'enabled': True,
+         'type': {'id': '50229e21-a9fe-4caa-862c-8592dfb2479b', 'name': 'EarthRanger', 'value': 'earth_ranger',
+                  'description': 'Integration type for Earth Ranger Sites', 'actions': [
+                 {'id': '80448d1c-4696-4b32-a59f-f3494fc949ac', 'type': 'auth', 'name': 'Authenticate', 'value': 'auth',
+                  'description': 'Authenticate against Earth Ranger',
+                  'schema': {'type': 'object', 'required': ['token'], 'properties': {'token': {'type': 'string'}}}},
+                 {'id': '4b721b37-f4ca-4f20-b07c-2caadb095ecb', 'type': 'pull', 'name': 'Pull Events',
+                  'value': 'pull_events', 'description': 'Extract events from EarthRanger sites',
+                  'schema': {'type': 'object', 'title': 'PullObservationsConfig', 'required': ['start_datetime'],
+                             'properties': {'start_datetime': {'type': 'string', 'title': 'Start Datetime'}}}},
+                 {'id': '75b3040f-ab1f-42e7-b39f-8965c088b154', 'type': 'pull', 'name': 'Pull Observations',
+                  'value': 'pull_observations', 'description': 'Extract observations from an EarthRanger Site',
+                  'schema': {'type': 'object', 'title': 'PullObservationsConfig', 'required': ['start_datetime'],
+                             'properties': {'start_datetime': {'type': 'string', 'title': 'Start Datetime'}}}},
+                 {'id': '425a2e2f-ae71-44fb-9314-bc0116638e4f', 'type': 'push', 'name': 'Push Event Attachments',
+                  'value': 'push_event_attachments',
+                  'description': 'EarthRanger sites support adding attachments to events', 'schema': {}},
+                 {'id': '8e101f31-e693-404c-b6ee-20fde6019f16', 'type': 'push', 'name': 'Push Events',
+                  'value': 'push_events', 'description': 'EarthRanger sites support sending Events (a.k.a Reports)',
+                  'schema': {}}]},
+         'owner': {'id': 'a91b400b-482a-4546-8fcb-ee42b01deeb6', 'name': 'Test Org', 'description': ''},
+         'configurations': [
+             {'id': '5577c323-b961-4277-9047-b1f27fd6a1b7', 'integration': '779ff3ab-5589-4f4c-9e0a-ae8d6c9edff0',
+              'action': {'id': '75b3040f-ab1f-42e7-b39f-8965c088b154', 'type': 'pull', 'name': 'Pull Observations',
+                         'value': 'pull_observations'},
+              'data': {'end_datetime': '2023-11-10T06:00:00-00:00', 'start_datetime': '2023-11-10T05:30:00-00:00',
+                       'force_run_since_start': False}},
+             {'id': '431af42b-c431-40af-8b57-a349253e15df', 'integration': '779ff3ab-5589-4f4c-9e0a-ae8d6c9edff0',
+              'action': {'id': '4b721b37-f4ca-4f20-b07c-2caadb095ecb', 'type': 'pull', 'name': 'Pull Events',
+                         'value': 'pull_events'}, 'data': {'start_datetime': '2023-11-16T00:00:00-03:00'}},
+             {'id': '30f8878c-4a98-4c95-88eb-79f73c40fb2f', 'integration': '779ff3ab-5589-4f4c-9e0a-ae8d6c9edff0',
+              'action': {'id': '80448d1c-4696-4b32-a59f-f3494fc949ac', 'type': 'auth', 'name': 'Authenticate',
+                         'value': 'auth'}, 'data': {'token': 'testtoken2a97022f21732461ee103a08fac8a35'}}],
+         'additional': {'topic': 'gundi-er-dispatcher-iD9M1ON-topic', 'broker': 'gcp_pubsub'},
+         'default_route': {'id': '5abf3845-7c9f-478a-bc0f-b24d87038c4b', 'name': 'Gundi ER Provider - Default Route'},
+         'status': 'healthy',
+         'status_details': ''
+         }
+    )
+
+
+@pytest.fixture
+def er_integration_v2_with_empty_url():
+    return Integration.parse_obj(
+        {'id': '779ff3ab-5589-4f4c-9e0a-ae8d6c9edff0', 'name': 'Gundi ER', 'base_url': 'https:///',
          'enabled': True,
          'type': {'id': '50229e21-a9fe-4caa-862c-8592dfb2479b', 'name': 'EarthRanger', 'value': 'earth_ranger',
                   'description': 'Integration type for Earth Ranger Sites', 'actions': [
@@ -129,12 +176,24 @@ def er_generic_exception():
 
 
 @pytest.fixture
+def er_connect_error():
+    return httpx.ConnectError("[Errno -3] Temporary failure in name resolution")
+
+
+@pytest.fixture
+def er_read_timeout_error():
+    return httpx.ReadTimeout("Read timeout")
+
+
+@pytest.fixture
 def mock_erclient_class_with_error(
     request,
     mocker,
     er_401_exception,
     er_500_exception,
     er_generic_exception,
+    er_connect_error,
+    er_read_timeout_error,
     er_client_close_response
 ):
 
@@ -142,6 +201,10 @@ def mock_erclient_class_with_error(
         er_error = er_401_exception
     elif request.param == "er_500_exception":
         er_error = er_500_exception
+    elif request.param == "er_connect_error":
+        er_error = er_connect_error
+    elif request.param == "er_read_timeout_error":
+        er_error = er_read_timeout_error
     else:
         er_error = er_generic_exception
     mocked_erclient_class = mocker.MagicMock()
