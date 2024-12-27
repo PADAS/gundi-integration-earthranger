@@ -1,4 +1,6 @@
 import pytest
+
+from app.conftest import async_return
 from app.services.action_runner import execute_action
 
 
@@ -28,6 +30,8 @@ async def test_execute_auth_action_with_valid_credentials(
         "er_401_exception",
         "er_500_exception",
         "er_generic_exception",
+        "er_connect_error",
+        "er_read_timeout_error",
     ],
     indirect=["mock_erclient_class_with_error"])
 @pytest.mark.asyncio
@@ -103,3 +107,27 @@ async def test_execute_pull_observations_action(
     assert mock_erclient_class.return_value.get_observations.called
     assert mock_gundi_sensors_client_class.return_value.post_observations.call_count == 2
     assert response == {"observations_extracted": len(observations_batch_one) + len(observations_batch_one)}
+
+
+@pytest.mark.asyncio
+async def test_execute_auth_action_with_invalid_url(
+        mocker, mock_gundi_client_v2, mock_erclient_class,
+        er_integration_v2_with_empty_url, mock_publish_event
+):
+    mock_gundi_client_v2.get_integration_details.return_value = async_return(
+        er_integration_v2_with_empty_url
+    )
+    mocker.patch("app.services.action_runner._portal", mock_gundi_client_v2)
+    mocker.patch("app.services.activity_logger.publish_event", mock_publish_event)
+    mocker.patch("app.services.action_runner.publish_event", mock_publish_event)
+    mocker.patch("app.actions.handlers.AsyncERClient", mock_erclient_class)
+
+    response = await execute_action(
+        integration_id=str(er_integration_v2_with_empty_url.id),
+        action_id="auth"
+    )
+
+    assert mock_gundi_client_v2.get_integration_details.called
+    assert not mock_erclient_class.return_value.get_me.called
+    assert response.get("valid_credentials") == False
+    assert "error" in response
