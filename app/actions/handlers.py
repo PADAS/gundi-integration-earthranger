@@ -10,7 +10,7 @@ from gundi_client_v2.client import GundiClient
 from gundi_core.schemas.v2 import Integration
 from app.services.utils import find_config_for_action
 from app.services.state import IntegrationStateManager
-from .configurations import AuthenticateConfig, PullObservationsConfig, PullEventsConfig
+from .configurations import AuthenticateConfig, PullObservationsConfig, PullEventsConfig, ERAuthenticationType
 from ..services.activity_logger import activity_logger
 from ..services.gundi import send_events_to_gundi, send_observations_to_gundi
 
@@ -37,14 +37,18 @@ async def action_auth(integration: Integration, action_config: AuthenticateConfi
             connect_timeout=DEFAULT_CONNECT_TIMEOUT_SECONDS,
     ) as er_client:
         try:
-            if auth_config.token:
+            if auth_config.authentication_type == ERAuthenticationType.TOKEN:
+                if not auth_config.token:
+                    return {"valid_credentials": False, "error": "Please provide a token."}
                 result = await er_client.get_me()
                 # ToDo: Support doing a deeper check on permissions here or in a separate handler
                 valid_credentials = result.get('is_active', False)
-            elif auth_config.username and auth_config.password:
+            elif auth_config.authentication_type == ERAuthenticationType.USERNAME_PASSWORD:
+                if not auth_config.username or not auth_config.password:
+                    return {"valid_credentials": False, "error": "Please provide both a username and a password."}
                 valid_credentials = await er_client.login()
             else:
-                return {"valid_credentials": False, "error": "Please provide either a token or username/password."}
+                return {"valid_credentials": False, "error": "Please select an valid authentication method."}
         except ERClientException as e:
             # ToDo. Differentiate ER errors from invalid credentials in the ER client
             return {"valid_credentials": False, "error": str(e)}

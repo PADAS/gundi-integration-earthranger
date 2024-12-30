@@ -131,3 +131,54 @@ async def test_execute_auth_action_with_invalid_url(
     assert not mock_erclient_class.return_value.get_me.called
     assert response.get("valid_credentials") == False
     assert "error" in response
+
+
+@pytest.mark.asyncio
+async def test_execute_auth_action_with_empty_token(
+        mocker, mock_gundi_client_v2, mock_erclient_class,
+        er_integration_v2, mock_publish_event
+):
+    mocker.patch("app.services.action_runner._portal", mock_gundi_client_v2)
+    mocker.patch("app.services.activity_logger.publish_event", mock_publish_event)
+    mocker.patch("app.services.action_runner.publish_event", mock_publish_event)
+    mocker.patch("app.actions.handlers.AsyncERClient", mock_erclient_class)
+
+    response = await execute_action(
+        integration_id=str(er_integration_v2.id),
+        action_id="auth",
+        config_overrides={
+            "authentication_type": "token",
+            "token": ""
+        }
+    )
+
+    assert mock_gundi_client_v2.get_integration_details.called
+    assert not mock_erclient_class.return_value.get_me.called
+    assert response.get("valid_credentials") == False
+    assert "error" in response
+
+
+@pytest.mark.asyncio
+async def test_execute_auth_action_with_empty_user(
+        mocker, mock_gundi_client_v2, mock_erclient_class,
+        er_integration_v2, mock_publish_event
+):
+    mocker.patch("app.services.action_runner._portal", mock_gundi_client_v2)
+    mocker.patch("app.services.activity_logger.publish_event", mock_publish_event)
+    mocker.patch("app.services.action_runner.publish_event", mock_publish_event)
+    mocker.patch("app.actions.handlers.AsyncERClient", mock_erclient_class)
+
+    response = await execute_action(
+        integration_id=str(er_integration_v2.id),
+        action_id="auth",
+        config_overrides={
+            "authentication_type": "username_password",
+            "username": "",
+            "password": "password"
+        }
+    )
+
+    assert mock_gundi_client_v2.get_integration_details.called
+    assert not mock_erclient_class.return_value.get_me.called
+    assert response.get("valid_credentials") == False
+    assert "error" in response
