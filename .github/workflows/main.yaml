@@ -4,6 +4,7 @@ on:
     branches:
       - main
       - 'release-**'
+      - gundi-3989-hide-er-token
 
 jobs:
   vars:
@@ -39,7 +40,7 @@ jobs:
 
   deploy_dev:
     uses: PADAS/gundi-workflows/.github/workflows/update_hcl.yml@v2
-    if: startsWith(github.ref, 'refs/heads/main')
+    if: startsWith(github.ref, 'refs/heads/gundi-3989-hide-er-token')
     needs: [vars, build]
     with:
       git_repository: PADAS/gundi-integrations-v2-infra
