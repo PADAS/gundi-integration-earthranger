@@ -29,10 +29,11 @@ class AuthenticateConfig(AuthActionConfiguration, ExecutableActionMixin):
         description="Password used to authenticate against Earth Ranger API",
         format="password"
     )
-    token: Optional[str] = Field(
+    token: Optional[SecretStr] = Field(
         "",
         example="1b4c1e9c-5ee0-44db-c7f1-177ede2f854a",
         description="Token used to authenticate against Earth Ranger API",
+        format="password"
     )
 
     ui_global_options: GlobalUISchemaOptions = GlobalUISchemaOptions(
@@ -62,7 +63,9 @@ class AuthenticateConfig(AuthActionConfiguration, ExecutableActionMixin):
                             "description": "Token used to authenticate against Earth Ranger API",
                             "default": "",
                             "example": "1b4c1e9c-5ee0-44db-c7f1-177ede2f854a",
-                            "type": "string"
+                            "format": "password",
+                            "type": "string",
+                            "writeOnly": True
                         }
                     }
                 },
