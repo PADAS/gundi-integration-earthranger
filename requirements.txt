@@ -70,7 +70,7 @@ gpxpy==1.6.2
     # via earthranger-client
 gundi-client-v2==2.3.8
     # via -r requirements-base.in
-gundi-core==1.7.1
+gundi-core==1.9.1
     # via
     #   -r requirements-base.in
     #   gundi-client-v2
