@@ -6,11 +6,13 @@ from urllib.parse import urlparse
 import httpx
 import stamina
 from erclient import AsyncERClient, ERClientException
+from erclient.er_errors import ERClientBadCredentials
 from gundi_client_v2.client import GundiClient
 from gundi_core.schemas.v2 import Integration
 from app.services.utils import find_config_for_action
 from app.services.state import IntegrationStateManager
-from .configurations import AuthenticateConfig, PullObservationsConfig, PullEventsConfig, ERAuthenticationType
+from .configurations import AuthenticateConfig, PullObservationsConfig, PullEventsConfig, ERAuthenticationType, \
+    ShowPermissionsConfig
 from ..services.activity_logger import activity_logger
 from ..services.gundi import send_events_to_gundi, send_observations_to_gundi
 
@@ -49,12 +51,125 @@ async def action_auth(integration: Integration, action_config: AuthenticateConfi
                 valid_credentials = await er_client.login()
             else:
                 return {"valid_credentials": False, "error": "Please select an valid authentication method."}
+        except ERClientBadCredentials:
+            return {"valid_credentials": False, "error": "Invalid credentials"}
         except ERClientException as e:
             # ToDo. Differentiate ER errors from invalid credentials in the ER client
             return {"valid_credentials": False, "error": str(e)}
         except httpx.HTTPError as e:
             return {"valid_credentials": False, "error": f"HTTP error: {e}"}
         return {"valid_credentials": valid_credentials}
+
+
+def _extract_user_details(er_user_details):
+    """
+    ER API sample user details:
+        {
+            "username": "gundi_service_account",
+            "email": null,
+            "first_name": "Gundi Service Account",
+            "last_name": "",
+            "role": "",
+            "is_staff": false,
+            "is_superuser": false,
+            ...
+        }
+    """
+    return {
+        "Full Name": f"{er_user_details.get('first_name', '')} {er_user_details.get('last_name', '')}".strip(),
+        "Username": er_user_details.get("username", ""),
+        "Is Superuser": er_user_details.get("is_superuser", False),
+    }
+
+
+def _extract_global_permissions(er_user_permissions):
+    """
+    ER API sample permissions:
+        {
+            "eventcategory": [
+                "view",
+                "add",
+                "change"
+            ],
+            "eventtype": [
+                "change",
+                "view",
+                "add"
+            ],
+            "event": [
+                "change",
+                "add",
+                "view"
+            ],
+            "message": [
+                "add",
+                "view",
+                "change"
+            ],
+            "observation": [
+                "delete",
+                "view",
+                "change",
+                "add"
+            ],
+            ...
+        }
+    """
+    permissions = {}
+    if event_category_perm := er_user_permissions.get("eventcategory", []):
+        permissions["Event Category"] = event_category_perm
+    if event_type_perm := er_user_permissions.get("eventtype", []):
+        permissions["Event Type"] = event_type_perm
+    if event_perm := er_user_permissions.get("event", []):
+        permissions["Event"] = event_perm
+    if message_perm := er_user_permissions.get("message", []):
+        permissions["Message"] = message_perm
+    if observation_perm := er_user_permissions.get("observation", []):
+        permissions["Observation"] = observation_perm
+    return permissions
+
+
+async def action_show_permissions(integration: Integration, action_config: ShowPermissionsConfig):
+    response = {
+      "ui": {
+        "widget": "DynamicJSONCard"
+      },
+      "data": {
+          "User Details": {},
+          "Global Permissions": {},
+          "Event Categories": {},
+          "Subject Groups": {}
+      }
+    }
+    auth_config = get_authentication_config(integration=integration)
+    url_parse = urlparse(integration.base_url)
+    if not url_parse.hostname:
+        response["data"]["User Details"]["error"] = f"Site URL is empty or invalid: '{integration.base_url}'"
+        return response
+    if auth_config.authentication_type != ERAuthenticationType.TOKEN or not auth_config.token:
+        response["data"]["User Details"]["error"] = "Please provide a valid token in the authentication config."
+        return response
+    async with AsyncERClient(
+            service_root=f"{url_parse.scheme}://{url_parse.hostname}/api/v1.0",
+            username=auth_config.username,
+            password=auth_config.password.get_secret_value() if auth_config.password else None,
+            token=auth_config.token.get_secret_value() if auth_config.token else None,
+            token_url=f"{url_parse.scheme}://{url_parse.hostname}/oauth2/token",
+            client_id="das_web_client",
+            connect_timeout=DEFAULT_CONNECT_TIMEOUT_SECONDS,
+    ) as er_client:
+        try:  # Get user details and global permissions from the users/me endpoint
+            user_me_response = await er_client.get_me()
+        except ERClientBadCredentials:
+            response["data"]["User Details"]["error"] = "Invalid credentials. Please provide a valid token in the authentication config."
+            return response
+        except Exception as e:
+            response["data"]["User Details"]["error"] = f"Error retrieving user details: {type(e).__name__}:{e}"
+        else:
+            response["data"]["User Details"] = _extract_user_details(er_user_details=user_me_response)
+            response["data"]["Global Permissions"] = _extract_global_permissions(er_user_permissions=user_me_response.get("permissions", {}))
+        #ToDo: Get event categories and Subject Groups from their respective endpoints
+    return response
 
 
 @activity_logger()

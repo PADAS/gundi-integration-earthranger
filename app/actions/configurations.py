@@ -5,7 +5,7 @@ from typing import List, Optional
 from pydantic import Field, SecretStr
 
 from app.services.utils import GlobalUISchemaOptions
-from .core import AuthActionConfiguration, PullActionConfiguration, ExecutableActionMixin
+from .core import AuthActionConfiguration, GenericActionConfiguration, PullActionConfiguration, ExecutableActionMixin
 
 
 class ERAuthenticationType(str, Enum):
@@ -93,6 +93,10 @@ class AuthenticateConfig(AuthActionConfiguration, ExecutableActionMixin):
             })
 
 
+class ShowPermissionsConfig(GenericActionConfiguration, ExecutableActionMixin):
+    pass
+
+
 class PullObservationsConfig(PullActionConfiguration):
     start_datetime: str
     end_datetime: Optional[str] = None
@@ -111,3 +115,4 @@ class PullEventsConfig(PullActionConfiguration):
     ui_global_options: GlobalUISchemaOptions = GlobalUISchemaOptions(
         order=["start_datetime", "end_datetime", "force_run_since_start"],
     )
+
