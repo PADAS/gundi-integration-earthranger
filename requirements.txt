@@ -68,9 +68,9 @@ gcloud-aio-pubsub==6.0.1
     # via -r requirements-base.in
 gpxpy==1.6.2
     # via earthranger-client
-gundi-client-v2==2.3.8
+gundi-client-v2==2.4.0
     # via -r requirements-base.in
-gundi-core==1.9.1
+gundi-core==1.11.2
     # via
     #   -r requirements-base.in
     #   gundi-client-v2
@@ -94,7 +94,9 @@ idna==3.10
 iniconfig==2.0.0
     # via pytest
 marshmallow==3.22.0
-    # via environs
+    # via
+    #   -r requirements-base.in
+    #   environs
 multidict==6.1.0
     # via
     #   aiohttp
