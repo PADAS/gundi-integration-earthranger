@@ -1,6 +1,7 @@
 import json
 import datetime
 import logging
+from collections import defaultdict
 from urllib.parse import urlparse
 
 import httpx
@@ -117,16 +118,131 @@ def _extract_global_permissions(er_user_permissions):
     """
     permissions = {}
     if event_category_perm := er_user_permissions.get("eventcategory", []):
-        permissions["Event Category"] = event_category_perm
+        permissions["Event Category"] = sorted(event_category_perm)
     if event_type_perm := er_user_permissions.get("eventtype", []):
-        permissions["Event Type"] = event_type_perm
+        permissions["Event Type"] = sorted(event_type_perm)
     if event_perm := er_user_permissions.get("event", []):
-        permissions["Event"] = event_perm
+        permissions["Event"] = sorted(event_perm)
     if message_perm := er_user_permissions.get("message", []):
-        permissions["Message"] = message_perm
+        permissions["Message"] = sorted(message_perm)
     if observation_perm := er_user_permissions.get("observation", []):
-        permissions["Observation"] = observation_perm
+        permissions["Observation"] = sorted(observation_perm)
     return permissions
+
+
+def _extract_category_permissions(er_user_permissions):
+    categories = {}
+    not_categories = ["eventcategory", "eventtype", "event", "message", "observation", 'patrol', 'patrolconfiguration', 'tsvectormodel', 'community', 'patroltype', 'team', 'eventsource', 'person', 'notificationmethod', 'teammembership', 'eventphoto', 'eventclassfactor', 'eventdetails', 'patrolconfigurationsubjectgroup', 'eventclass', 'eventrelationshiptype', 'eventnotification', 'eventprovider', 'alertrulenotificationmethod', 'eventnote', 'eventrelatedsubject', 'alertruleeventtype', 'membershiptype', 'refreshrecreateeventdetailview', 'dummy_events', 'eventfactor', 'eventrelatedsegments', 'eventsourceevent', 'formbuilderproxy', 'eventgeometry', 'eventfilter', 'smart', 'eventattachment', 'alertrule', 'eventfile', 'eventrelationship', 'event_for_eventsource']
+    for key, perms in er_user_permissions.items():
+        if key not in not_categories:
+            # Assume other keys are event categories
+            categories[key] = sorted(perms)
+    return categories
+
+
+def _merge_event_categories_and_type_perms(global_category_permissions, er_event_types):
+    """
+        ER API sample event types:
+            [
+                {
+                    "id": "c119f06d-a0e4-485a-af1c-af165c62317c",
+                    "has_events_assigned": true,
+                    "icon": "",
+                    "value": "accident_rep",
+                    "display": "Accident Report",
+                    "ordernum": 0.0001220703125,
+                    "is_collection": false,
+                    "category": {
+                        "id": "6b359461-aa53-4116-bf2c-04cc580de4ef",
+                        "value": "monitoring",
+                        "display": "Monitoring",
+                        "is_active": true,
+                        "ordernum": 6.0,
+                        "flag": "user",
+                        "permissions": [
+                            "delete",
+                            "read",
+                            "update",
+                            "create"
+                        ]
+                    },
+                    "icon_id": "accident_rep",
+                    "is_active": true,
+                    "default_priority": 0,
+                    "default_state": "new",
+                    "geometry_type": "Point",
+                    "resolve_time": null,
+                    "auto_resolve": false,
+                    "url": "https://gundi-dev.staging.pamdas.org/api/v1.0/activity/events/eventtypes/c119f06d-a0e4-485a-af1c-af165c62317c"
+                },
+                ...
+            ]
+        """
+    categories = defaultdict(lambda: {
+        "Event Types": set(),
+        "Permissions": set()
+    })
+    for event_type in er_event_types:
+        category_info = event_type.get("category", {})
+        if not category_info or not category_info.get("is_active", False):
+            continue  # Skip event types without a valid category
+        category_name = category_info.get("display")
+        category_value = category_info.get("value")
+        event_type_name = event_type.get("display")
+        if not category_name or not category_value or not event_type_name:
+            continue  # Skip incomplete entries
+        if category_value in global_category_permissions:
+            if not categories[category_name]["Permissions"]:
+                # Copy category permissions from global permissions
+                categories[category_name]["Permissions"].update(global_category_permissions[category_value])
+        else:  # If we got the event type then it has view permission at least
+            categories[category_name]["Permissions"].update(["view"])
+        # Add event type name to the set
+        categories[category_name]["Event Types"].add(event_type_name)
+
+    # Convert sets to lists for final output
+    return {
+        key: {
+            "Event Types": sorted(list(value["Event Types"])),
+            "Permissions": sorted(list(value["Permissions"]))
+        }
+        for key, value in categories.items()
+    }
+
+
+def _extract_subject_groups(er_subject_groups):
+    result = {}
+
+    def process_group(group, parent_groups=None):
+        if parent_groups is None:
+            parent_groups = []
+
+        group_name = group['name']
+        subject_names = [subject['name'] for subject in group['subjects']]
+
+        # Add subjects to current group
+        if group_name not in result:
+            result[group_name] = set(subject_names)
+        else:
+            result[group_name].update(subject_names)
+
+        # Add subjects to all parent groups
+        for parent_group in parent_groups:
+            if parent_group not in result:
+                result[parent_group] = set(subject_names)
+            else:
+                result[parent_group].update(subject_names)
+
+        # Process subgroups recursively
+        for subgroup in group['subgroups']:
+            process_group(subgroup, parent_groups + [group_name])
+
+    # Process each top-level group
+    for group in er_subject_groups:
+        process_group(group)
+
+    # Convert sets to sorted lists for final output
+    return {key: sorted(list(value)) for key, value in result.items()}
 
 
 async def action_show_permissions(integration: Integration, action_config: ShowPermissionsConfig):
@@ -165,10 +281,29 @@ async def action_show_permissions(integration: Integration, action_config: ShowP
             return response
         except Exception as e:
             response["data"]["User Details"]["error"] = f"Error retrieving user details: {type(e).__name__}:{e}"
+            return response  # Cannot continue without a valid user/token
+        response["data"]["User Details"] = _extract_user_details(er_user_details=user_me_response)
+        user_global_permissions = user_me_response.get("permissions", {})
+        response["data"]["Global Permissions"] = _extract_global_permissions(er_user_permissions=user_global_permissions)
+        global_category_permissions = _extract_category_permissions(er_user_permissions=user_global_permissions)
+        try:  # Get event categories and types from the activity/events/eventtypes endpoint
+            event_types_response = await er_client.get_event_types()
+        except Exception as e:
+            response["data"]["Event Categories"]["error"] = f"Error retrieving event categories: {type(e).__name__}:{e}"
         else:
-            response["data"]["User Details"] = _extract_user_details(er_user_details=user_me_response)
-            response["data"]["Global Permissions"] = _extract_global_permissions(er_user_permissions=user_me_response.get("permissions", {}))
-        #ToDo: Get event categories and Subject Groups from their respective endpoints
+            response["data"]["Event Categories"] = _merge_event_categories_and_type_perms(
+                global_category_permissions=global_category_permissions,
+                er_event_types=event_types_response
+            )
+        try:  # Get Subject Groups from the subjectgroups/ endpoint
+            include_subjects_from_subgroups_in_parent = action_config.include_subjects_from_subgroups_in_parent
+            subject_groups_response = await er_client.get_subjectgroups(
+                flat=not include_subjects_from_subgroups_in_parent
+            )
+        except Exception as e:
+            response["data"]["Subject Groups"]["error"] = f"Error retrieving subject groups: {type(e).__name__}:{e}"
+        else:
+            response["data"]["Subject Groups"] = _extract_subject_groups(er_subject_groups=subject_groups_response)
     return response
 
 

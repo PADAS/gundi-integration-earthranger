@@ -94,7 +94,11 @@ class AuthenticateConfig(AuthActionConfiguration, ExecutableActionMixin):
 
 
 class ShowPermissionsConfig(GenericActionConfiguration, ExecutableActionMixin):
-    pass
+    include_subjects_from_subgroups_in_parent: bool = Field(
+        True,
+        title="Include Subjects from Subgroups in Parent Group",
+        description="When showing subjects from a group, include subjects from its subgroups as well."
+    )
 
 
 class PullObservationsConfig(PullActionConfiguration):
