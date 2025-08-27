@@ -287,6 +287,14 @@ async def action_show_permissions(integration: Integration, action_config: ShowP
         except ERClientBadCredentials:
             response["data"]["User Details"]["error"] = "Invalid credentials. Please provide a valid credentials in the authentication config."
             return response
+        except httpx.HTTPStatusError as e:
+            try:  # ToDo: Handle this inside the er-client and raise ERClientBadCredentials
+                json_response = e.response.json()
+            except (ValueError, AttributeError):
+                json_response = {}
+            error_details = json_response.get("error_description") or response.text
+            response["data"]["User Details"]["error"] = f"ER status {e.response.status_code}: {error_details}"
+            return response
         except Exception as e:
             response["data"]["User Details"]["error"] = f"Error retrieving user details: {type(e).__name__}:{e}"
             return response  # Cannot continue without a valid user/token
