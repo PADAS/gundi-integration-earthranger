@@ -273,15 +273,25 @@ async def action_show_permissions(integration: Integration, action_config: ShowP
             connect_timeout=DEFAULT_CONNECT_TIMEOUT_SECONDS,
     ) as er_client:
         try:  # Get user details and global permissions from the users/me endpoint
-            user_me_response = await er_client.get_me()
+            if auth_config.authentication_type == ERAuthenticationType.TOKEN:
+                er_user_details = await er_client.get_me()
+            elif auth_config.authentication_type == ERAuthenticationType.USERNAME_PASSWORD:
+                token_retrieved = await er_client.login()
+                if not token_retrieved:
+                    response["data"]["User Details"]["error"] = "Invalid credentials. Please provide a valid username and password in the authentication config."
+                    return response
+                er_user_details = await er_client.get_me()
+            else:
+                response["data"]["User Details"]["error"] = "Please select an valid authentication method."
+                return response
         except ERClientBadCredentials:
             response["data"]["User Details"]["error"] = "Invalid credentials. Please provide a valid credentials in the authentication config."
             return response
         except Exception as e:
             response["data"]["User Details"]["error"] = f"Error retrieving user details: {type(e).__name__}:{e}"
             return response  # Cannot continue without a valid user/token
-        response["data"]["User Details"] = _extract_user_details(er_user_details=user_me_response)
-        user_global_permissions = user_me_response.get("permissions", {})
+        response["data"]["User Details"] = _extract_user_details(er_user_details=er_user_details)
+        user_global_permissions = er_user_details.get("permissions", {})
         response["data"]["Global Permissions"] = _extract_global_permissions(er_user_permissions=user_global_permissions)
         global_category_permissions = _extract_category_permissions(er_user_permissions=user_global_permissions)
         try:  # Get event categories and types from the activity/events/eventtypes endpoint
