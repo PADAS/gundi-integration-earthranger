@@ -283,6 +283,7 @@ def mock_erclient_class(
         get_me_response,
         get_event_types_response,
         get_subjectgroups_response,
+        get_subjectgroups_flat_response,
         get_events_response,
         get_observations_response,
         er_client_close_response
@@ -293,7 +294,11 @@ def mock_erclient_class(
         get_me_response
     )
     erclient_mock.get_event_types.return_value = async_return(get_event_types_response)
-    erclient_mock.get_subjectgroups.return_value = async_return(get_subjectgroups_response)
+
+    async def mock_get_subjectgroups(flat=False):
+        return get_subjectgroups_flat_response if flat else get_subjectgroups_response
+
+    erclient_mock.get_subjectgroups.side_effect = mock_get_subjectgroups
     erclient_mock.auth_headers.return_value = async_return(
         auth_headers_response
     )
@@ -1898,8 +1903,8 @@ def get_subjectgroups_response():
                         "geometry": {
                             "type": "Point",
                             "coordinates": [
-                                -122.5,
-                                48.5
+                                -123.456,
+                                47.123
                             ]
                         },
                         "properties": {
@@ -2149,8 +2154,8 @@ def get_subjectgroups_response():
                         "geometry": {
                             "type": "Point",
                             "coordinates": [
-                                -122.5,
-                                48.5
+                                -123.456,
+                                47.123
                             ]
                         },
                         "properties": {
@@ -2221,8 +2226,8 @@ def get_subjectgroups_response():
                         "geometry": {
                             "type": "Point",
                             "coordinates": [
-                                34.742224,
-                                -15.901174
+                                -123.456,
+                                47.123
                             ]
                         },
                         "properties": {
@@ -2252,6 +2257,437 @@ def get_subjectgroups_response():
         }
     ]
 
+@pytest.fixture
+def get_subjectgroups_flat_response():
+    return [
+        {
+            "id": "07200222-9f6b-49ed-b390-c3c903948702",
+            "name": "Telonics",
+            "subjects": [
+
+            ],
+            "subgroups": []
+        },
+        {
+            "id": "286fc226-095d-407f-9b17-b715761abdca",
+            "name": "Stevens Connect",
+            "subjects": [
+
+            ],
+            "subgroups": []
+        },
+        {
+            "id": "28e5d22d-dc91-4160-9328-d5e5cd768ec6",
+            "name": "Vital Weather",
+            "subjects": [],
+            "subgroups": []
+        },
+        {
+            "id": "3ae98788-ee22-4283-bbd1-683872008f83",
+            "name": "AWT",
+            "subjects": [
+                {
+                    "content_type": "observations.subject",
+                    "id": "bc410952-86f0-4de6-93f6-e4b2c548872c",
+                    "name": "00001",
+                    "subject_type": "wildlife",
+                    "subject_subtype": "giraffe",
+                    "common_name": "None",
+                    "additional": {
+
+                    },
+                    "created_at": "2025-08-25T15:28:29.717747-07:00",
+                    "updated_at": "2025-08-25T15:30:46.181921-07:00",
+                    "is_active": True,
+                    "user": "None",
+                    "tracks_available": True,
+                    "image_url": "/static/giraffe-male.svg",
+                    "last_position_status": {
+                        "last_voice_call_start_at": "None",
+                        "radio_state_at": "None",
+                        "radio_state": "na"
+                    },
+                    "last_position_date": "2025-08-23T15:01:02+00:00",
+                    "last_position": {
+                        "type": "Feature",
+                        "geometry": {
+                            "type": "Point",
+                            "coordinates": [
+                                -123.456,
+                                47.123
+                            ]
+                        },
+                        "properties": {
+                            "title": "00001",
+                            "subject_type": "wildlife",
+                            "subject_subtype": "giraffe",
+                            "id": "bc410952-86f0-4de6-93f6-e4b2c548872c",
+                            "stroke": "#FFFF00",
+                            "stroke-opacity": 1.0,
+                            "stroke-width": 2,
+                            "image": "https://gundi-dev.staging.pamdas.org/static/giraffe-male.svg",
+                            "last_voice_call_start_at": "None",
+                            "location_requested_at": "None",
+                            "radio_state_at": "1970-01-01T00:00:00+00:00",
+                            "radio_state": "na",
+                            "coordinateProperties": {
+                                "time": "2025-08-23T15:01:02+00:00"
+                            },
+                            "DateTime": "2025-08-23T15:01:02+00:00"
+                        }
+                    },
+                    "device_status_properties": [
+                        {
+                            "label": "activity",
+                            "units": "None",
+                            "value": 7
+                        },
+                        {
+                            "label": "location_accuracy",
+                            "units": "None",
+                            "value": 3
+                        },
+                        {
+                            "label": "temperature",
+                            "units": "C",
+                            "value": 15
+                        },
+                        {
+                            "label": "battery",
+                            "units": "V",
+                            "value": 32
+                        }
+                    ],
+                    "url": "https://gundi-dev.staging.pamdas.org/api/v1.0/subject/bc410952-86f0-4de6-93f6-e4b2c548872c"
+                }
+            ],
+            "subgroups": []
+        },
+        {
+            "id": "a9672a01-c05a-4081-932f-4178c6124899",
+            "name": "Seattle Radios",
+            "subjects": [
+
+            ],
+            "subgroups": []
+        },
+        {
+            "id": "b36ccafa-6651-4346-96b5-374b2b7b8166",
+            "name": "DigitAnimal (Sintra Cascais Ambiente)",
+            "subjects": [
+
+            ],
+            "subgroups": []
+        },
+        {
+            "id": "bc8f7652-31e3-47fe-a185-060a18a23059",
+            "name": "MMSubjectsWithSubGroup",
+            "subjects": [
+
+            ],
+            "subgroups": []
+        },
+        {
+            "id": "ca482c7a-f4c9-419a-9499-f107cc217c7c",
+            "name": "Marine Monitor",
+            "subjects": [
+
+            ],
+            "subgroups": []
+        },
+        {
+            "id": "ccf85a2b-2e2e-4015-a2ff-135cf1e166c8",
+            "name": "MMSubjectsSub",
+            "subjects": [
+                {
+                    "content_type": "observations.subject",
+                    "id": "51170be3-0ec1-4838-be07-ca9ad9954cbe",
+                    "name": "MM Truck",
+                    "subject_type": "unassigned",
+                    "subject_subtype": "vehicle",
+                    "common_name": "None",
+                    "additional": {
+
+                    },
+                    "created_at": "2025-08-26T10:53:23.705391-07:00",
+                    "updated_at": "2025-08-26T10:53:23.705428-07:00",
+                    "is_active": True,
+                    "user": "None",
+                    "tracks_available": False,
+                    "image_url": "/static/pin-black.svg",
+                    "last_position_status": {
+                        "last_voice_call_start_at": "None",
+                        "radio_state_at": "None",
+                        "radio_state": "na"
+                    },
+                    "device_status_properties": "None",
+                    "url": "https://gundi-dev.staging.pamdas.org/api/v1.0/subject/51170be3-0ec1-4838-be07-ca9ad9954cbe"
+                },
+                {
+                    "content_type": "observations.subject",
+                    "id": "b9893e89-71c0-4d99-bff2-50e25eec2fe5",
+                    "name": "Jeep X",
+                    "subject_type": "unassigned",
+                    "subject_subtype": "vehicle",
+                    "common_name": "None",
+                    "additional": {
+
+                    },
+                    "created_at": "2025-08-26T10:52:58.292713-07:00",
+                    "updated_at": "2025-08-26T10:52:58.292740-07:00",
+                    "is_active": True,
+                    "user": "None",
+                    "tracks_available": False,
+                    "image_url": "/static/pin-black.svg",
+                    "last_position_status": {
+                        "last_voice_call_start_at": "None",
+                        "radio_state_at": "None",
+                        "radio_state": "na"
+                    },
+                    "device_status_properties": "None",
+                    "url": "https://gundi-dev.staging.pamdas.org/api/v1.0/subject/b9893e89-71c0-4d99-bff2-50e25eec2fe5"
+                }
+            ],
+            "subgroups": []
+        },
+        {
+            "id": "f776fed7-0666-4146-a405-b2a0bd3ea274",
+            "name": "MMSubjectsSubSub",
+            "subjects": [
+                {
+                    "content_type": "observations.subject",
+                    "id": "f8cb9fa2-55cb-4ef7-b2f6-2044d60c7606",
+                    "name": "Mariano",
+                    "subject_type": "person",
+                    "subject_subtype": "ranger",
+                    "common_name": "None",
+                    "additional": {
+
+                    },
+                    "created_at": "2025-08-26T10:53:44.452504-07:00",
+                    "updated_at": "2025-08-26T10:53:44.452534-07:00",
+                    "is_active": True,
+                    "user": "None",
+                    "tracks_available": False,
+                    "image_url": "/static/ranger-black.svg",
+                    "last_position_status": {
+                        "last_voice_call_start_at": "None",
+                        "radio_state_at": "None",
+                        "radio_state": "na"
+                    },
+                    "device_status_properties": "None",
+                    "url": "https://gundi-dev.staging.pamdas.org/api/v1.0/subject/f8cb9fa2-55cb-4ef7-b2f6-2044d60c7606"
+                }
+            ],
+            "subgroups": []
+        },
+        {
+            "id": "ff039002-00af-48ad-acf4-218373991a07",
+            "name": "Subjects",
+            "subjects": [
+                {
+                    "content_type": "observations.subject",
+                    "id": "f8cb9fa2-55cb-4ef7-b2f6-2044d60c7606",
+                    "name": "Mariano",
+                    "subject_type": "person",
+                    "subject_subtype": "ranger",
+                    "common_name": "None",
+                    "additional": {
+
+                    },
+                    "created_at": "2025-08-26T10:53:44.452504-07:00",
+                    "updated_at": "2025-08-26T10:53:44.452534-07:00",
+                    "is_active": True,
+                    "user": "None",
+                    "tracks_available": False,
+                    "image_url": "/static/ranger-black.svg",
+                    "last_position_status": {
+                        "last_voice_call_start_at": "None",
+                        "radio_state_at": "None",
+                        "radio_state": "na"
+                    },
+                    "device_status_properties": "None",
+                    "url": "https://gundi-dev.staging.pamdas.org/api/v1.0/subject/f8cb9fa2-55cb-4ef7-b2f6-2044d60c7606"
+                },
+                {
+                    "content_type": "observations.subject",
+                    "id": "b9893e89-71c0-4d99-bff2-50e25eec2fe5",
+                    "name": "Jeep X",
+                    "subject_type": "unassigned",
+                    "subject_subtype": "vehicle",
+                    "common_name": "None",
+                    "additional": {
+
+                    },
+                    "created_at": "2025-08-26T10:52:58.292713-07:00",
+                    "updated_at": "2025-08-26T10:52:58.292740-07:00",
+                    "is_active": True,
+                    "user": "None",
+                    "tracks_available": False,
+                    "image_url": "/static/pin-black.svg",
+                    "last_position_status": {
+                        "last_voice_call_start_at": "None",
+                        "radio_state_at": "None",
+                        "radio_state": "na"
+                    },
+                    "device_status_properties": "None",
+                    "url": "https://gundi-dev.staging.pamdas.org/api/v1.0/subject/b9893e89-71c0-4d99-bff2-50e25eec2fe5"
+                },
+                {
+                    "content_type": "observations.subject",
+                    "id": "bc410952-86f0-4de6-93f6-e4b2c548872c",
+                    "name": "00001",
+                    "subject_type": "wildlife",
+                    "subject_subtype": "giraffe",
+                    "common_name": "None",
+                    "additional": {
+
+                    },
+                    "created_at": "2025-08-25T15:28:29.717747-07:00",
+                    "updated_at": "2025-08-25T15:30:46.181921-07:00",
+                    "is_active": True,
+                    "user": "None",
+                    "tracks_available": True,
+                    "image_url": "/static/giraffe-male.svg",
+                    "last_position_status": {
+                        "last_voice_call_start_at": "None",
+                        "radio_state_at": "None",
+                        "radio_state": "na"
+                    },
+                    "last_position_date": "2025-08-23T15:01:02+00:00",
+                    "last_position": {
+                        "type": "Feature",
+                        "geometry": {
+                            "type": "Point",
+                            "coordinates": [
+                                -123.456,
+                                47.123
+                            ]
+                        },
+                        "properties": {
+                            "title": "00001",
+                            "subject_type": "wildlife",
+                            "subject_subtype": "giraffe",
+                            "id": "bc410952-86f0-4de6-93f6-e4b2c548872c",
+                            "stroke": "#FFFF00",
+                            "stroke-opacity": 1.0,
+                            "stroke-width": 2,
+                            "image": "https://gundi-dev.staging.pamdas.org/static/giraffe-male.svg",
+                            "last_voice_call_start_at": "None",
+                            "location_requested_at": "None",
+                            "radio_state_at": "1970-01-01T00:00:00+00:00",
+                            "radio_state": "na",
+                            "coordinateProperties": {
+                                "time": "2025-08-23T15:01:02+00:00"
+                            },
+                            "DateTime": "2025-08-23T15:01:02+00:00"
+                        }
+                    },
+                    "device_status_properties": [
+                        {
+                            "label": "activity",
+                            "units": "None",
+                            "value": 7
+                        },
+                        {
+                            "label": "location_accuracy",
+                            "units": "None",
+                            "value": 3
+                        },
+                        {
+                            "label": "temperature",
+                            "units": "C",
+                            "value": 15
+                        },
+                        {
+                            "label": "battery",
+                            "units": "V",
+                            "value": 32
+                        }
+                    ],
+                    "url": "https://gundi-dev.staging.pamdas.org/api/v1.0/subject/bc410952-86f0-4de6-93f6-e4b2c548872c"
+                },
+                {
+                    "content_type": "observations.subject",
+                    "id": "f762afd6-ef2f-43fe-9b97-0aef2e7dc676",
+                    "name": "Ranger X V1234",
+                    "subject_type": "person",
+                    "subject_subtype": "ranger",
+                    "common_name": "None",
+                    "additional": {
+
+                    },
+                    "created_at": "2025-08-25T08:16:58.040917-07:00",
+                    "updated_at": "2025-08-25T08:16:58.040945-07:00",
+                    "is_active": True,
+                    "user": "None",
+                    "tracks_available": True,
+                    "image_url": "/static/ranger-black.svg",
+                    "last_position_status": {
+                        "last_voice_call_start_at": "None",
+                        "radio_state_at": "None",
+                        "radio_state": "na"
+                    },
+                    "last_position_date": "2025-08-27T20:34:09+00:00",
+                    "last_position": {
+                        "type": "Feature",
+                        "geometry": {
+                            "type": "Point",
+                            "coordinates": [
+                                -123.456,
+                                47.123
+                            ]
+                        },
+                        "properties": {
+                            "title": "Ranger X V1234",
+                            "subject_type": "person",
+                            "subject_subtype": "ranger",
+                            "id": "f762afd6-ef2f-43fe-9b97-0aef2e7dc676",
+                            "stroke": "#FFFF00",
+                            "stroke-opacity": 1.0,
+                            "stroke-width": 2,
+                            "image": "https://gundi-dev.staging.pamdas.org/static/ranger-black.svg",
+                            "last_voice_call_start_at": "None",
+                            "location_requested_at": "None",
+                            "radio_state_at": "1970-01-01T00:00:00+00:00",
+                            "radio_state": "na",
+                            "coordinateProperties": {
+                                "time": "2025-08-27T20:34:09+00:00"
+                            },
+                            "DateTime": "2025-08-27T20:34:09+00:00"
+                        }
+                    },
+                    "device_status_properties": "None",
+                    "url": "https://gundi-dev.staging.pamdas.org/api/v1.0/subject/f762afd6-ef2f-43fe-9b97-0aef2e7dc676"
+                },
+                {
+                    "content_type": "observations.subject",
+                    "id": "51170be3-0ec1-4838-be07-ca9ad9954cbe",
+                    "name": "MM Truck",
+                    "subject_type": "unassigned",
+                    "subject_subtype": "vehicle",
+                    "common_name": "None",
+                    "additional": {
+
+                    },
+                    "created_at": "2025-08-26T10:53:23.705391-07:00",
+                    "updated_at": "2025-08-26T10:53:23.705428-07:00",
+                    "is_active": True,
+                    "user": "None",
+                    "tracks_available": False,
+                    "image_url": "/static/pin-black.svg",
+                    "last_position_status": {
+                        "last_voice_call_start_at": "None",
+                        "radio_state_at": "None",
+                        "radio_state": "na"
+                    },
+                    "device_status_properties": "None",
+                    "url": "https://gundi-dev.staging.pamdas.org/api/v1.0/subject/51170be3-0ec1-4838-be07-ca9ad9954cbe"
+                }
+            ],
+            "subgroups": []
+        }
+    ]
 
 @pytest.fixture
 def expected_permissions_result_with_default_config():
@@ -2426,6 +2862,178 @@ def expected_permissions_result_with_default_config():
             ]
         }
     }
+
+
+@pytest.fixture
+def expected_permissions_result_with_include_subjects_from_subgroups_false():
+    return {
+        "User Details": {
+            "Full Name": "Gundi Service Account",
+            "Username": "gundi_serviceaccount",
+            "Is Superuser": True
+        },
+        "Global Permissions": {
+            "Event Category": [
+                "add",
+                "change",
+                "delete",
+                "view"
+            ],
+            "Event Type": [
+                "add",
+                "change",
+                "delete",
+                "view"
+            ],
+            "Event": [
+                "add",
+                "change",
+                "delete",
+                "export",
+                "view"
+            ],
+            "Message": [
+                "add",
+                "change",
+                "delete",
+                "view"
+            ],
+            "Observation": [
+                "export"
+            ]
+        },
+        "Event Categories": {
+            "Monitoring": {
+                "Event Types": [
+                    "Accident Report",
+                    "Activity Alert",
+                    "Ceres Tag Activity Alert",
+                    "IAP Area",
+                    "Mortality Alert",
+                    "Mortality All Clear",
+                    "Rainfall",
+                    "Speed Alert",
+                    "Survey 123 Response",
+                    "Weather Station Summary",
+                    "Wildlife Sighting",
+                    "eBird Observations",
+                    "iNaturalist",
+                    "wpsWatch Integration"
+                ],
+                "Permissions": [
+                    "add",
+                    "change",
+                    "delete",
+                    "view"
+                ]
+            },
+            "Wildlife Detection": {
+                "Event Types": [
+                    "Sentinel Event"
+                ],
+                "Permissions": [
+                    "add",
+                    "change",
+                    "delete",
+                    "view"
+                ]
+            },
+            "Soilmentor Events": {
+                "Event Types": [
+                    "Soilmentor"
+                ],
+                "Permissions": [
+                    "add",
+                    "change",
+                    "delete",
+                    "view"
+                ]
+            },
+            "Security": {
+                "Event Types": [
+                    "Camera Trap",
+                    "Sit Rep",
+                    "Vesel Detection SL"
+                ],
+                "Permissions": [
+                    "add",
+                    "change",
+                    "delete",
+                    "view"
+                ]
+            },
+            "Analyzer Event": {
+                "Event Types": [
+                    "GFW Fire Alert",
+                    "GFW Integrated Alerts",
+                    "Ororatech Fire"
+                ],
+                "Permissions": [
+                    "view"
+                ]
+            },
+            "Everywhere Communications Events": {
+                "Event Types": [
+                    "Check in I'm OK",
+                    "Check-in not OK",
+                    "Emergency Entered",
+                    "Emergency Exited",
+                    "Geofence Entered",
+                    "Geofence Exited",
+                    "Missed Check-in",
+                    "Missed Check-in Escalation",
+                    "News Alert (FACTAL)",
+                    "Self Check-in Started",
+                    "Self Check-in Stopped"
+                ],
+                "Permissions": [
+                    "add",
+                    "change",
+                    "delete",
+                    "view"
+                ]
+            },
+            "Skylight": {
+                "Event Types": [
+                    "Entry Alert"
+                ],
+                "Permissions": [
+                    "add",
+                    "change",
+                    "delete",
+                    "view"
+                ]
+            }
+        },
+        "Subject Groups": {
+            "Telonics": [],
+            "Stevens Connect": [],
+            "Vital Weather": [],
+            "AWT": [
+                "00001"
+            ],
+            "Seattle Radios": [],
+            "DigitAnimal (Sintra Cascais Ambiente)": [],
+            "MMSubjectsWithSubGroup": [],
+            "MMSubjectsSub": [
+                "Jeep X",
+                "MM Truck",
+            ],
+            "MMSubjectsSubSub": [
+                "Mariano"
+            ],
+            "Marine Monitor": [],
+            "Subjects": [
+                "00001",
+                "Jeep X",
+                "MM Truck",
+                "Mariano",
+                "Ranger X V1234"
+            ]
+        }
+    }
+
+
 
 
 class AsyncIterator:

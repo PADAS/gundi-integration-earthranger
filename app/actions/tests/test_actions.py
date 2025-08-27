@@ -220,3 +220,65 @@ async def test_execute_show_permissions_action_with_default_config(
     permissions = response.get("data", {})
     assert permissions == expected_permissions_result_with_default_config
 
+
+@pytest.mark.asyncio
+async def test_execute_show_permissions_action_with_include_subjects_from_subgroups_true(
+        mocker, mock_gundi_client_v2, mock_erclient_class, er_integration_v2_provider,
+        mock_publish_event, mock_config_manager_er_destination, expected_permissions_result_with_default_config
+):
+    mocker.patch("app.services.action_runner._portal", mock_gundi_client_v2)
+    mocker.patch("app.services.activity_logger.publish_event", mock_publish_event)
+    mocker.patch("app.services.action_runner.publish_event", mock_publish_event)
+    mocker.patch("app.services.action_runner.config_manager", mock_config_manager_er_destination)
+    mocker.patch("app.actions.handlers.AsyncERClient", mock_erclient_class)
+
+    response = await execute_action(
+        integration_id=str(er_integration_v2_provider.id),
+        action_id="show_permissions",
+        config_overrides={
+            "include_subjects_from_subgroups_in_parent": True
+        }
+    )
+
+    assert mock_config_manager_er_destination.get_integration_details.called
+    mock_erclient = mock_erclient_class.return_value
+    assert mock_erclient.get_me.called
+    assert mock_erclient.get_event_types.called
+    assert mock_erclient.get_subjectgroups.called
+    assert "ui" in response
+    ui_settings = response.get("ui", {})
+    assert ui_settings.get("widget") == "DynamicJSONCard"
+    permissions = response.get("data", {})
+    assert permissions == expected_permissions_result_with_default_config
+
+
+@pytest.mark.asyncio
+async def test_execute_show_permissions_action_with_include_subjects_from_subgroups_false(
+        mocker, mock_gundi_client_v2, mock_erclient_class, er_integration_v2_provider,
+        mock_publish_event, mock_config_manager_er_destination,
+        expected_permissions_result_with_include_subjects_from_subgroups_false
+):
+    mocker.patch("app.services.action_runner._portal", mock_gundi_client_v2)
+    mocker.patch("app.services.activity_logger.publish_event", mock_publish_event)
+    mocker.patch("app.services.action_runner.publish_event", mock_publish_event)
+    mocker.patch("app.services.action_runner.config_manager", mock_config_manager_er_destination)
+    mocker.patch("app.actions.handlers.AsyncERClient", mock_erclient_class)
+
+    response = await execute_action(
+        integration_id=str(er_integration_v2_provider.id),
+        action_id="show_permissions",
+        config_overrides={
+            "include_subjects_from_subgroups_in_parent": False
+        }
+    )
+
+    assert mock_config_manager_er_destination.get_integration_details.called
+    mock_erclient = mock_erclient_class.return_value
+    assert mock_erclient.get_me.called
+    assert mock_erclient.get_event_types.called
+    assert mock_erclient.get_subjectgroups.called
+    assert "ui" in response
+    ui_settings = response.get("ui", {})
+    assert ui_settings.get("widget") == "DynamicJSONCard"
+    permissions = response.get("data", {})
+    assert permissions == expected_permissions_result_with_include_subjects_from_subgroups_false
