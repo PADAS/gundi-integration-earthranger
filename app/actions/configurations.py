@@ -5,7 +5,7 @@ from typing import List, Optional
 from pydantic import Field, SecretStr
 
 from app.services.utils import GlobalUISchemaOptions
-from .core import AuthActionConfiguration, PullActionConfiguration, ExecutableActionMixin
+from .core import AuthActionConfiguration, GenericActionConfiguration, PullActionConfiguration, ExecutableActionMixin
 
 
 class ERAuthenticationType(str, Enum):
@@ -93,6 +93,14 @@ class AuthenticateConfig(AuthActionConfiguration, ExecutableActionMixin):
             })
 
 
+class ShowPermissionsConfig(GenericActionConfiguration, ExecutableActionMixin):
+    include_subjects_from_subgroups_in_parent: bool = Field(
+        True,
+        title="Include Subjects from Subgroups in Parent Group",
+        description="When showing subjects from a group, include subjects from its subgroups as well."
+    )
+
+
 class PullObservationsConfig(PullActionConfiguration):
     start_datetime: str
     end_datetime: Optional[str] = None
@@ -111,3 +119,4 @@ class PullEventsConfig(PullActionConfiguration):
     ui_global_options: GlobalUISchemaOptions = GlobalUISchemaOptions(
         order=["start_datetime", "end_datetime", "force_run_since_start"],
     )
+
