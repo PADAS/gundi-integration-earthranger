@@ -2,7 +2,7 @@ import asyncio
 
 import httpx
 import pytest
-from erclient import ERClientException
+from erclient import ERClientException, ERClientBadCredentials
 from gundi_core.schemas.v2 import Integration, IntegrationSummary
 
 
@@ -313,11 +313,24 @@ def mock_erclient_class(
     return mocked_erclient_class
 
 
+@pytest.fixture
+def er_400_invalid_credentials_exception():
+    return httpx.HTTPStatusError(
+        message="Client error '400 Bad Request' for url 'https://gundi-dev.staging.pamdas.org/oauth2/token'. For more information check: https://httpstatuses.com/400",
+        request=httpx.Request("POST", "https://gundi-dev.staging.pamdas.org/oauth2/token"),
+        response=httpx.Response(
+            status_code=400,
+            text='{"error": "invalid_grant", "error_description": "Invalid credentials given."}'
+        )
+    )
+
 
 @pytest.fixture
 def er_401_exception():
-    return ERClientException(
-        'Failed to GET to ER web service. provider_key: None, service: https://gundi-dev.staging.pamdas.org/api/v1.0, path: user/me,\n\t 401 from ER. Message: Authentication credentials were not provided. {"status":{"code":401,"message":"Unauthorized","detail":"Authentication credentials were not provided."}}'
+    return ERClientBadCredentials(
+        'ER Unauthorized ON GET https://gundi-dev.staging.pamdas.org/api/v1.0/user/me.',
+        status_code=401,
+        response_body='{"status":{"code":401,"message":"Unauthorized","detail":"Authentication credentials were not provided."}}'
     )
 
 
@@ -382,17 +395,42 @@ def mock_erclient_class_with_error(
     return mocked_erclient_class
 
 
+@pytest.fixture
+def mock_erclient_class_with_auth_400(
+        mocker,
+        auth_headers_response,
+        er_400_invalid_credentials_exception,
+        er_client_close_response
+):
+    mocked_erclient_class = mocker.MagicMock()
+    erclient_mock = mocker.MagicMock()
+    erclient_mock.get_me.side_effect = er_400_invalid_credentials_exception
+    erclient_mock.get_event_types.side_effect = er_400_invalid_credentials_exception
+    erclient_mock.get_subjectgroups.side_effect = er_400_invalid_credentials_exception
+    erclient_mock.auth_headers.side_effect = er_400_invalid_credentials_exception
+    erclient_mock.get_events.side_effect = er_400_invalid_credentials_exception
+    erclient_mock.get_observations.side_effect = er_400_invalid_credentials_exception
+    erclient_mock.close.return_value = async_return(
+        er_client_close_response
+    )
+    erclient_mock.__aenter__.return_value = erclient_mock
+    erclient_mock.__aexit__.return_value = er_client_close_response
+    mocked_erclient_class.return_value = erclient_mock
+    return mocked_erclient_class
+
 
 @pytest.fixture
 def mock_erclient_class_with_auth_401(
         mocker,
         auth_headers_response,
         er_401_exception,
-
+        er_client_close_response
 ):
     mocked_erclient_class = mocker.MagicMock()
     erclient_mock = mocker.MagicMock()
     erclient_mock.get_me.side_effect = er_401_exception
+    erclient_mock.get_event_types.side_effect = er_401_exception
+    erclient_mock.get_subjectgroups.side_effect = er_401_exception
     erclient_mock.auth_headers.side_effect = er_401_exception
     erclient_mock.get_events.side_effect = er_401_exception
     erclient_mock.get_observations.side_effect = er_401_exception
