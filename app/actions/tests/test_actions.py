@@ -332,3 +332,29 @@ async def test_execute_show_permissions_action_with_bad_password(
     response_data = response.get("data")
     user_details = response_data.get("User Details", {})
     assert user_details.get("error") == "ER status 400: Invalid credentials given."
+
+
+@pytest.mark.asyncio
+async def test_execute_show_permissions_action_with_403_on_subjectgroups(
+        mocker, mock_gundi_client_v2, mock_erclient_class_with_403_on_subjectgroups, er_integration_v2_provider,
+        mock_publish_event, mock_config_manager_er_destination, mock_er_403_on_subjectgroups_exception
+
+):
+    mocker.patch("app.services.action_runner._portal", mock_gundi_client_v2)
+    mocker.patch("app.services.activity_logger.publish_event", mock_publish_event)
+    mocker.patch("app.services.action_runner.publish_event", mock_publish_event)
+    mocker.patch("app.services.action_runner.config_manager", mock_config_manager_er_destination)
+    mocker.patch("app.actions.handlers.AsyncERClient", mock_erclient_class_with_403_on_subjectgroups)
+
+    response = await execute_action(
+        integration_id=str(er_integration_v2_provider.id),
+        action_id="show_permissions"
+    )
+
+    assert mock_config_manager_er_destination.get_integration_details.called
+    mock_erclient = mock_erclient_class_with_403_on_subjectgroups.return_value
+    assert mock_erclient.get_me.called
+    response_data = response.get("data")
+    user_details = response_data.get("Subject Groups", {})
+    exc = mock_er_403_on_subjectgroups_exception
+    assert user_details.get("error") == f"Error retrieving subject groups: {type(exc).__name__}:{exc}"

@@ -2,7 +2,7 @@ import asyncio
 
 import httpx
 import pytest
-from erclient import ERClientException, ERClientBadCredentials
+from erclient import ERClientException, ERClientBadCredentials, ERClientPermissionDenied
 from gundi_core.schemas.v2 import Integration, IntegrationSummary
 
 
@@ -335,6 +335,15 @@ def er_401_exception():
 
 
 @pytest.fixture
+def mock_er_403_on_subjectgroups_exception():
+    return ERClientPermissionDenied(
+        'ER Forbidden ON GET https://gundi-dev.staging.pamdas.org/api/v1.0/subjectgroups.',
+        status_code=403,
+        response_body='{"status":{"code":403,"message":"Forbidden","detail":"You do not have permission to perform this action."}}'
+    )
+
+
+@pytest.fixture
 def er_500_exception():
     return ERClientException(
         'Failed to GET to ER web service. provider_key: None, service: https://gundi-dev.staging.pamdas.org/api/v1.0, path: user/me,\n\t 500 from ER. Message: duplicate key value violates unique constraint "observations_observation_tenant_source_at_unique"'
@@ -458,6 +467,38 @@ def mock_erclient_class_with_auth_500(
     erclient_mock.auth_headers.side_effect = er_500_exception
     erclient_mock.get_events.side_effect = er_500_exception
     erclient_mock.get_observations.side_effect = er_500_exception
+    erclient_mock.close.return_value = async_return(
+        er_client_close_response
+    )
+    erclient_mock.__aenter__.return_value = erclient_mock
+    erclient_mock.__aexit__.return_value = er_client_close_response
+    mocked_erclient_class.return_value = erclient_mock
+    return mocked_erclient_class
+
+
+@pytest.fixture
+def mock_erclient_class_with_403_on_subjectgroups(
+        mocker,
+        auth_headers_response,
+        get_me_response,
+        get_event_types_response,
+        mock_er_403_on_subjectgroups_exception,
+        get_events_response,
+        get_observations_response,
+        er_client_close_response
+):
+    mocked_erclient_class = mocker.MagicMock()
+    erclient_mock = mocker.MagicMock()
+    erclient_mock.get_me.return_value = async_return(
+        get_me_response
+    )
+    erclient_mock.get_event_types.return_value = async_return(get_event_types_response)
+    erclient_mock.get_subjectgroups.side_effect = mock_er_403_on_subjectgroups_exception
+    erclient_mock.auth_headers.return_value = async_return(
+        auth_headers_response
+    )
+    erclient_mock.get_events.return_value = AsyncIterator(get_events_response)
+    erclient_mock.get_observations.return_value = AsyncIterator(get_observations_response)
     erclient_mock.close.return_value = async_return(
         er_client_close_response
     )
