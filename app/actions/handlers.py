@@ -262,9 +262,7 @@ async def action_show_permissions(integration: Integration, action_config: ShowP
     if not url_parse.hostname:
         response["data"]["User Details"]["error"] = f"Site URL is empty or invalid: '{integration.base_url}'"
         return response
-    if auth_config.authentication_type != ERAuthenticationType.TOKEN or not auth_config.token:
-        response["data"]["User Details"]["error"] = "Please provide a valid token in the authentication config."
-        return response
+
     async with AsyncERClient(
             service_root=f"{url_parse.scheme}://{url_parse.hostname}/api/v1.0",
             username=auth_config.username,
@@ -277,7 +275,7 @@ async def action_show_permissions(integration: Integration, action_config: ShowP
         try:  # Get user details and global permissions from the users/me endpoint
             user_me_response = await er_client.get_me()
         except ERClientBadCredentials:
-            response["data"]["User Details"]["error"] = "Invalid credentials. Please provide a valid token in the authentication config."
+            response["data"]["User Details"]["error"] = "Invalid credentials. Please provide a valid credentials in the authentication config."
             return response
         except Exception as e:
             response["data"]["User Details"]["error"] = f"Error retrieving user details: {type(e).__name__}:{e}"
