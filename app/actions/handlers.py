@@ -9,12 +9,13 @@ import stamina
 from erclient import AsyncERClient, ERClientException
 from erclient.er_errors import ERClientBadCredentials
 from gundi_client_v2.client import GundiClient
+from gundi_core.events import LogLevel
 from gundi_core.schemas.v2 import Integration
 from app.services.utils import find_config_for_action
 from app.services.state import IntegrationStateManager
 from .configurations import AuthenticateConfig, PullObservationsConfig, PullEventsConfig, ERAuthenticationType, \
     ShowPermissionsConfig
-from ..services.activity_logger import activity_logger
+from ..services.activity_logger import activity_logger, log_action_activity
 from ..services.gundi import send_events_to_gundi, send_observations_to_gundi
 
 logger = logging.getLogger(__name__)
@@ -311,6 +312,14 @@ async def action_show_permissions(integration: Integration, action_config: ShowP
                 global_category_permissions=global_category_permissions,
                 er_event_types=event_types_response
             )
+            response["data"]["Event Type Slugs"] = sorted({
+                et["value"] for et in event_types_response if et.get("value")
+            })
+            response["data"]["Event Category Slugs"] = sorted({
+                et["category"]["value"]
+                for et in event_types_response
+                if et.get("category", {}).get("value")
+            })
         try:  # Get Subject Groups from the subjectgroups/ endpoint
             include_subjects_from_subgroups_in_parent = action_config.include_subjects_from_subgroups_in_parent
             subject_groups_response = await er_client.get_subjectgroups(
@@ -320,6 +329,9 @@ async def action_show_permissions(integration: Integration, action_config: ShowP
             response["data"]["Subject Groups"]["error"] = f"Error retrieving subject groups: {type(e).__name__}:{e}"
         else:
             response["data"]["Subject Groups"] = _extract_subject_groups(er_subject_groups=subject_groups_response)
+            response["data"]["Subject Group UUIDs"] = sorted([
+                g["id"] for g in subject_groups_response if g.get("id")
+            ])
     return response
 
 
@@ -357,15 +369,19 @@ async def action_pull_events(integration: Integration, action_config: PullEvents
         start_datetime = pull_config.start_datetime
     else:
         start_datetime = last_execution
-    filter = {
+    event_filter = {
         "date_range": {
             "lower": start_datetime
         }
     }
     if pull_config.end_datetime:
-        filter["date_range"]["upper"] = pull_config.end_datetime
-    json_filter = json.dumps(filter)
-    logger.info(f"Extracting events with filter '{filter}'...")
+        event_filter["date_range"]["upper"] = pull_config.end_datetime
+    if pull_config.event_types:
+        event_filter["event_type"] = pull_config.event_types
+    if pull_config.event_categories:
+        event_filter["event_category"] = pull_config.event_categories
+    json_filter = json.dumps(event_filter)
+    logger.info(f"Extracting events with filter '{event_filter}'...")
     # Process events in batches
     async with er_client as earth_ranger:
         async for event_batch in earth_ranger.get_events(filter=json_filter, batch_size=BATCH_SIZE):
@@ -430,7 +446,32 @@ async def action_pull_observations(integration: Integration, action_config: Pull
     # Process events in batches
     logger.info(f"Extracting observations with params '{params}'...")
     async with er_client as earth_ranger:
+        source_id_set = await _resolve_source_ids(
+            earth_ranger, group_ids=pull_config.subject_group_ids
+        )
+        if pull_config.subject_group_ids and not source_id_set:
+            await log_action_activity(
+                integration_id=integration_id,
+                action_id="pull_observations",
+                title="Configured subject groups resolved to zero active sources",
+                level=LogLevel.ERROR,
+                data={"subject_group_ids": pull_config.subject_group_ids},
+            )
+            # State is intentionally NOT updated — preserves the previous watermark
+            # so a fix on the operator side can re-pull the window.
+            return {
+                "observations_extracted": 0,
+                "filter_active": True,
+                "sources_resolved": 0,
+            }
+
+        filter_active = bool(source_id_set)
         async for observation_batch in earth_ranger.get_observations(**params):
+            if filter_active:
+                observation_batch = [
+                    o for o in observation_batch
+                    if str(o.get("source", "")) in source_id_set
+                ]
             transformed_observations = transform_observations_to_gundi_schema(observations=observation_batch)
             if not transformed_observations:
                 continue  # No data to send
@@ -446,7 +487,48 @@ async def action_pull_observations(integration: Integration, action_config: Pull
         state=state
     )
     logger.info(f"Extracted {total_observations} observations for integration {integration}.")
-    return {"observations_extracted": total_observations}
+    return {
+        "observations_extracted": total_observations,
+        "filter_active": filter_active,
+        "sources_resolved": len(source_id_set) if filter_active else None,
+    }
+
+
+async def _resolve_source_ids(er_client, group_ids):
+    """Resolve subject-group UUIDs to a set of source UUIDs.
+
+    Walks ER's subjectgroup tree recursively (flat=False). When a matched UUID
+    is found, every descendant subject is included — matching the operator's
+    intuition from `action_show_permissions`, which rolls children up into
+    every ancestor. Then queries `subjectsources` in a single batched call
+    to find the sources currently assigned to those subjects.
+
+    `er_client.get_subjectgroups(flat=False)` returns a list (not an async
+    iterator) — the full tree fits in one response.
+    """
+    if not group_ids:
+        return set()
+
+    wanted = set(group_ids)
+    groups = await er_client.get_subjectgroups(flat=False)
+    subject_ids = set()
+
+    def walk(group, inherited=False):
+        matched = inherited or group.get("id") in wanted
+        if matched:
+            for subject in group.get("subjects", []):
+                subject_ids.add(subject["id"])
+        for sub in group.get("subgroups", []):
+            walk(sub, inherited=matched)
+
+    for group in groups:
+        walk(group)
+
+    if not subject_ids:
+        return set()
+
+    assignments = await er_client.get_source_assignments(subject_ids=sorted(subject_ids))
+    return {str(a["source"]) for a in assignments if a.get("source")}
 
 
 # Auxiliary functions
