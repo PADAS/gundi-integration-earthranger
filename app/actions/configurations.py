@@ -107,7 +107,7 @@ class PullObservationsConfig(PullActionConfiguration):
     force_run_since_start: bool = False
     subject_group_ids: List[str] = Field(
         default_factory=list,
-        title="Subject Group IDs",
+        title="Subject Group UUIDs",
         description=(
             "List of ER subject-group UUIDs whose members' observations should be included. "
             "Picking a parent group includes its sub-groups' subjects (resolved recursively). "
