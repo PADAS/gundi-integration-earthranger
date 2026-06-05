@@ -13,9 +13,22 @@ We build on the existing repo rather than replacing it. The existing auth, state
 | Filter value shape | **ER `value` slugs** for event types, **UUIDs** for subject groups | Closer to the API; no name-resolution layer to maintain. Portal will eventually populate these as dynamic choices (separate ticket). |
 | Empty filter list semantics | **No constraint** (additive filter) | Consistent with sibling Gundi pull actions. Misconfig is caught at *action start* with an `ActivityLog` ERROR + zero-result return — same channel operators already watch. No new config field; no save-time validator. |
 | Observation filter strategy | **Single-window pull + in-process filter by source_id** | ER observation payloads carry `source`, not `subject_id`. Two pre-loop calls (`get_subjectgroups`, `get_source_assignments`) resolve the configured group UUIDs to a source-id set, then one paginated `get_observations()` per run with an in-process filter. No fan-out, no semaphore. |
-| Scope of this round | **Filters only** | Defer event attachments and gundi-client-v2 3.x bump to follow-ups. |
+| Scope of this round | **Filters + `earthranger-client` bump** | The new `get_source_assignments` API was added in `earthranger-client` v1.15.0; the repo is currently pinned at v1.7.0. Same PR bumps `requirements.in` to `earthranger-client>=1.15.0,<2.0.0`. Defers event attachments and the `gundi-client-v2` 3.x bump to follow-ups. |
 
 ## Changes
+
+### 0. `requirements.in` — bump `earthranger-client`
+
+```diff
+-https://github.com/PADAS/er-client/releases/download/v1.7.0/earthranger_client-1.7.0-py3-none-any.whl
++earthranger-client>=1.15.0,<2.0.0
+```
+
+Then recompile `requirements.txt` with `uv pip compile`.
+
+**Why:** the observation filter calls `get_source_assignments(subject_ids=[...])`, which was added in v1.15.0. The 37-commit diff between v1.7.0 and v1.15.0 is otherwise additive and backward-compatible against every method this repo already uses (`AsyncERClient.__init__`, `get_me`, `login`, `get_event_types`, `get_subjectgroups`, `get_events`, `get_observations`, plus the `ERClientException` / `ERClientBadCredentials` exception hierarchy). `service_root` URL normalization, the now-optional `token_url`, and added `version=DEFAULT_VERSION` kwargs all preserve the existing call shape.
+
+Smoke-test the auth flow against dev ER before merging — it's the most credential-sensitive path.
 
 ### 1. `app/actions/configurations.py`
 
