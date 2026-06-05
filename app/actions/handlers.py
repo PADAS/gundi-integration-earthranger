@@ -246,6 +246,26 @@ def _extract_subject_groups(er_subject_groups):
     return {key: sorted(list(value)) for key, value in result.items()}
 
 
+def _collect_group_uuids(er_subject_groups):
+    """Recursively collect every subject-group UUID from a (possibly nested) tree.
+
+    When `get_subjectgroups(flat=False)` returns a tree, subgroup UUIDs are
+    only reachable by walking. Operators may legitimately want to filter by a
+    sub-group UUID, so we expose all of them.
+    """
+    uuids = set()
+
+    def walk(group):
+        if group.get("id"):
+            uuids.add(group["id"])
+        for sub in group.get("subgroups", []):
+            walk(sub)
+
+    for group in er_subject_groups:
+        walk(group)
+    return uuids
+
+
 async def action_show_permissions(integration: Integration, action_config: ShowPermissionsConfig):
     response = {
       "ui": {
@@ -318,7 +338,7 @@ async def action_show_permissions(integration: Integration, action_config: ShowP
             response["data"]["Event Category Slugs"] = sorted({
                 et["category"]["value"]
                 for et in event_types_response
-                if et.get("category", {}).get("value")
+                if (et.get("category") or {}).get("value")
             })
         try:  # Get Subject Groups from the subjectgroups/ endpoint
             include_subjects_from_subgroups_in_parent = action_config.include_subjects_from_subgroups_in_parent
@@ -329,9 +349,9 @@ async def action_show_permissions(integration: Integration, action_config: ShowP
             response["data"]["Subject Groups"]["error"] = f"Error retrieving subject groups: {type(e).__name__}:{e}"
         else:
             response["data"]["Subject Groups"] = _extract_subject_groups(er_subject_groups=subject_groups_response)
-            response["data"]["Subject Group UUIDs"] = sorted([
-                g["id"] for g in subject_groups_response if g.get("id")
-            ])
+            response["data"]["Subject Group UUIDs"] = sorted(
+                _collect_group_uuids(subject_groups_response)
+            )
     return response
 
 

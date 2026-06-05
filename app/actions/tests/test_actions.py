@@ -113,7 +113,7 @@ async def test_execute_pull_observations_action(
     assert mock_erclient_class.return_value.get_observations.called
     assert mock_gundi_sensors_client_class.return_value.post_observations.call_count == 2
     assert response == {
-        "observations_extracted": len(observations_batch_one) + len(observations_batch_one),
+        "observations_extracted": len(observations_batch_one) + len(observations_batch_two),
         "filter_active": False,
         "sources_resolved": None,
     }
