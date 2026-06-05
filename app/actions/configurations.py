@@ -105,18 +105,35 @@ class PullObservationsConfig(PullActionConfiguration):
     start_datetime: str = FieldWithUIOptions(
         ...,
         title="Start Datetime",
-        description="ISO-8601 timestamp. Observations recorded on or after this moment are pulled.",
+        description=(
+            "ISO-8601 timestamp filtering observations by their recorded_at. "
+            "Used only on the FIRST run, or whenever 'force_run_since_start' is true. "
+            "After a successful run the action tracks its own watermark and ignores this value "
+            "until the next manual reset."
+        ),
         format="date-time",
         ui_options=UIOptions(widget="date-time"),
     )
     end_datetime: Optional[str] = FieldWithUIOptions(
         None,
         title="End Datetime",
-        description="Optional ISO-8601 timestamp. If set, observations recorded after this moment are skipped.",
+        description=(
+            "Optional ISO-8601 ceiling on recorded_at. Sent to ER on every run, even after the "
+            "internal watermark has advanced — leave empty for ongoing pulls and only set it for "
+            "bounded historical backfills."
+        ),
         format="date-time",
         ui_options=UIOptions(widget="date-time"),
     )
-    force_run_since_start: bool = False
+    force_run_since_start: bool = FieldWithUIOptions(
+        False,
+        title="Force Run From Start Datetime",
+        description=(
+            "Resets the internal watermark for one run, so the next pull starts at "
+            "'start_datetime' instead. Toggle off again after the catch-up run completes — "
+            "otherwise every subsequent run will re-pull from start_datetime."
+        ),
+    )
     subject_group_ids: List[str] = Field(
         default_factory=list,
         title="Subject Group UUIDs",
@@ -137,18 +154,35 @@ class PullEventsConfig(PullActionConfiguration):
     start_datetime: str = FieldWithUIOptions(
         ...,
         title="Start Datetime",
-        description="ISO-8601 timestamp. Events created on or after this moment are pulled.",
+        description=(
+            "ISO-8601 timestamp filtering events by their event_time (when the event occurred, "
+            "NOT when it was created in ER). Used only on the FIRST run, or whenever "
+            "'force_run_since_start' is true. After a successful run the action tracks its own "
+            "watermark and ignores this value until the next manual reset."
+        ),
         format="date-time",
         ui_options=UIOptions(widget="date-time"),
     )
     end_datetime: Optional[str] = FieldWithUIOptions(
         None,
         title="End Datetime",
-        description="Optional ISO-8601 timestamp. If set, events created after this moment are skipped.",
+        description=(
+            "Optional ISO-8601 ceiling on event_time. Sent to ER on every run, even after the "
+            "internal watermark has advanced — leave empty for ongoing pulls and only set it for "
+            "bounded historical backfills."
+        ),
         format="date-time",
         ui_options=UIOptions(widget="date-time"),
     )
-    force_run_since_start: bool = False
+    force_run_since_start: bool = FieldWithUIOptions(
+        False,
+        title="Force Run From Start Datetime",
+        description=(
+            "Resets the internal watermark for one run, so the next pull starts at "
+            "'start_datetime' instead. Toggle off again after the catch-up run completes — "
+            "otherwise every subsequent run will re-pull from start_datetime."
+        ),
+    )
     event_types: List[str] = Field(
         default_factory=list,
         title="Event Types",
