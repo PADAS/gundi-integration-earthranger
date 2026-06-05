@@ -4,7 +4,7 @@ from typing import List, Optional
 
 from pydantic import Field, SecretStr
 
-from app.services.utils import GlobalUISchemaOptions
+from app.services.utils import FieldWithUIOptions, GlobalUISchemaOptions, UIOptions
 from .core import AuthActionConfiguration, GenericActionConfiguration, PullActionConfiguration, ExecutableActionMixin
 
 
@@ -102,8 +102,20 @@ class ShowPermissionsConfig(GenericActionConfiguration, ExecutableActionMixin):
 
 
 class PullObservationsConfig(PullActionConfiguration):
-    start_datetime: str
-    end_datetime: Optional[str] = None
+    start_datetime: str = FieldWithUIOptions(
+        ...,
+        title="Start Datetime",
+        description="ISO-8601 timestamp. Observations recorded on or after this moment are pulled.",
+        format="date-time",
+        ui_options=UIOptions(widget="date-time"),
+    )
+    end_datetime: Optional[str] = FieldWithUIOptions(
+        None,
+        title="End Datetime",
+        description="Optional ISO-8601 timestamp. If set, observations recorded after this moment are skipped.",
+        format="date-time",
+        ui_options=UIOptions(widget="date-time"),
+    )
     force_run_since_start: bool = False
     subject_group_ids: List[str] = Field(
         default_factory=list,
@@ -122,8 +134,20 @@ class PullObservationsConfig(PullActionConfiguration):
 
 
 class PullEventsConfig(PullActionConfiguration):
-    start_datetime: str
-    end_datetime: Optional[str] = None
+    start_datetime: str = FieldWithUIOptions(
+        ...,
+        title="Start Datetime",
+        description="ISO-8601 timestamp. Events created on or after this moment are pulled.",
+        format="date-time",
+        ui_options=UIOptions(widget="date-time"),
+    )
+    end_datetime: Optional[str] = FieldWithUIOptions(
+        None,
+        title="End Datetime",
+        description="Optional ISO-8601 timestamp. If set, events created after this moment are skipped.",
+        format="date-time",
+        ui_options=UIOptions(widget="date-time"),
+    )
     force_run_since_start: bool = False
     event_types: List[str] = Field(
         default_factory=list,
