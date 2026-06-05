@@ -105,9 +105,19 @@ class PullObservationsConfig(PullActionConfiguration):
     start_datetime: str
     end_datetime: Optional[str] = None
     force_run_since_start: bool = False
+    subject_group_ids: List[str] = Field(
+        default_factory=list,
+        title="Subject Group UUIDs",
+        description=(
+            "List of ER subject-group UUIDs whose members' observations should be included. "
+            "Picking a parent group includes its sub-groups' subjects (resolved recursively). "
+            "Run the 'show_permissions' action to find UUIDs available to this account. "
+            "An empty list applies no group constraint."
+        ),
+    )
 
     ui_global_options: GlobalUISchemaOptions = GlobalUISchemaOptions(
-        order=["start_datetime", "end_datetime", "force_run_since_start"],
+        order=["start_datetime", "end_datetime", "subject_group_ids", "force_run_since_start"],
     )
 
 
@@ -115,8 +125,27 @@ class PullEventsConfig(PullActionConfiguration):
     start_datetime: str
     end_datetime: Optional[str] = None
     force_run_since_start: bool = False
+    event_types: List[str] = Field(
+        default_factory=list,
+        title="Event Types",
+        description=(
+            "List of ER event-type slugs to pull, e.g. ['wildlife_sighting_rep', 'poacher_sighting_rep']. "
+            "Run the 'show_permissions' action to see the slugs available for this account. "
+            "Combined with Event Categories using ER's AND semantics. "
+            "An empty list applies no event-type constraint."
+        ),
+    )
+    event_categories: List[str] = Field(
+        default_factory=list,
+        title="Event Categories",
+        description=(
+            "List of ER event-category slugs, e.g. ['wildlife', 'monitoring']. "
+            "ER applies type and category filters with AND semantics. "
+            "An empty list applies no category constraint."
+        ),
+    )
 
     ui_global_options: GlobalUISchemaOptions = GlobalUISchemaOptions(
-        order=["start_datetime", "end_datetime", "force_run_since_start"],
+        order=["start_datetime", "end_datetime", "event_types", "event_categories", "force_run_since_start"],
     )
 
