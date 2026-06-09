@@ -52,6 +52,33 @@ async def send_events_to_gundi(events: List[dict], **kwargs) -> dict:
 
 
 @stamina.retry(on=httpx.HTTPError, wait_initial=1.0, wait_jitter=5.0, wait_max=32.0)
+async def update_event_in_gundi(gundi_object_id: str, changes: dict, **kwargs) -> dict:
+    """
+    PATCH an existing Gundi event by its Gundi-side object_id.
+
+    The `changes` dict is forwarded verbatim to the sensors API as the request
+    body. Each key is one of the fields accepted by EventCreateUpdateSerializer
+    (e.g. ``status``, ``priority``, ``title``, ``notes``); the values overwrite
+    the event's state. The same dict appears as ``changes`` on the downstream
+    EventUpdate that cdip-routing dispatches to destination integrations.
+
+    Per the GUNDI-5386 design, callers emit ONE update per logical change so
+    each shows up as a separate downstream comment.
+
+    :param gundi_object_id: The UUID Gundi returned when the original Event was
+        posted (stored in IntegrationStateManager per ER event UUID).
+    :param changes: Patch body. Examples: ``{"status": "active"}``,
+        ``{"priority": 200}``, ``{"notes": [{"id": ..., "text": ..., "author": ..., "created_at": ...}]}``.
+    :param kwargs: integration_id: The UUID of the related integration.
+    :return: The API response dict.
+    """
+    integration_id = kwargs.get("integration_id")
+    assert integration_id, "integration_id is required"
+    sensors_api_client = await _get_sensors_api_client(integration_id=str(integration_id))
+    return await sensors_api_client.update_event(event_id=gundi_object_id, data=changes)
+
+
+@stamina.retry(on=httpx.HTTPError, wait_initial=1.0, wait_jitter=5.0, wait_max=32.0)
 async def send_event_attachments_to_gundi(event_id: str, attachments: List[tuple], **kwargs) -> dict:
     """
     Send Event Attachments to Gundi using the REST API v2

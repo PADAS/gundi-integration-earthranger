@@ -82,8 +82,15 @@ async def test_execute_pull_events_action(
     assert mock_state_manager.get_state.called
     assert mock_state_manager.set_state.called
     assert mock_erclient_class.return_value.get_events.called
-    assert mock_gundi_sensors_client_class.return_value.post_events.call_count == 2
-    assert response == {"events_extracted": len(events_batch_one) + len(events_batch_two)}
+    # One post_events per event now (per-event state lookup) — was batched before GUNDI-5386.
+    total = len(events_batch_one) + len(events_batch_two)
+    assert mock_gundi_sensors_client_class.return_value.post_events.call_count == total
+    assert response == {
+        "events_extracted": total,
+        "events_updated": 0,
+        "updates_emitted": 0,
+        "events_skipped_unchanged": 0,
+    }
 
 
 @pytest.mark.asyncio
@@ -693,3 +700,168 @@ async def test_show_permissions_surfaces_raw_slugs_and_uuids(
     # Slugs are sorted strings, not display names.
     assert data["Event Type Slugs"] == sorted(data["Event Type Slugs"])
     assert all(isinstance(uuid, str) for uuid in data["Subject Group UUIDs"])
+
+
+# ---------------------------------------------------------------------------
+# GUNDI-5386: pull_events new-vs-update branching
+# ---------------------------------------------------------------------------
+
+from app.actions.handlers import _emit_event_updates, _extract_object_id_from_post_events_response
+
+
+def test_extract_object_id_from_post_events_response():
+    """Pulls object_id out of the typical list-wrapped response, and degrades cleanly."""
+    assert _extract_object_id_from_post_events_response(
+        [{"object_id": "abc-123", "created_at": "..."}]
+    ) == "abc-123"
+    assert _extract_object_id_from_post_events_response(
+        {"object_id": "single-dict-fallback"}
+    ) == "single-dict-fallback"
+    assert _extract_object_id_from_post_events_response([]) is None
+    assert _extract_object_id_from_post_events_response(None) is None
+    assert _extract_object_id_from_post_events_response("not-json") is None
+
+
+@pytest.mark.asyncio
+async def test_emit_event_updates_for_new_note(mocker):
+    """A single new note in the ER event payload → one update_event_in_gundi call."""
+    mock_update = mocker.patch("app.actions.handlers.update_event_in_gundi")
+    mock_update.return_value = async_return({})
+    state_record = {
+        "gundi_object_id": "gundi-obj-1",
+        "updated_at": "2026-06-01T00:00:00Z",
+        "state": "active",
+        "priority": 100,
+        "title": "Snare check",
+        "seen_note_ids": ["note-a"],
+    }
+    er_event = {
+        "id": "er-uuid-1",
+        "updated_at": "2026-06-02T00:00:00Z",
+        "state": "active",
+        "priority": 100,
+        "title": "Snare check",
+        "notes": [
+            {"id": "note-a", "text": "old"},
+            {"id": "note-b", "text": "fresh observation"},
+        ],
+    }
+    emitted, new_seen = await _emit_event_updates(
+        er_event=er_event, state_record=state_record, integration_id="int-1"
+    )
+    assert emitted == 1
+    assert mock_update.call_count == 1
+    call_kwargs = mock_update.call_args.kwargs
+    assert call_kwargs["gundi_object_id"] == "gundi-obj-1"
+    assert call_kwargs["changes"] == {"notes": [{"id": "note-b", "text": "fresh observation"}]}
+    assert "note-a" in new_seen and "note-b" in new_seen
+
+
+@pytest.mark.asyncio
+async def test_emit_event_updates_for_field_changes(mocker):
+    """Status, priority, and title changes each emit a separate update_event."""
+    mock_update = mocker.patch("app.actions.handlers.update_event_in_gundi")
+    mock_update.return_value = async_return({})
+    state_record = {
+        "gundi_object_id": "gundi-obj-2",
+        "updated_at": "2026-06-01T00:00:00Z",
+        "state": "new",
+        "priority": 100,
+        "title": "Old title",
+        "seen_note_ids": [],
+    }
+    er_event = {
+        "id": "er-uuid-2",
+        "updated_at": "2026-06-02T00:00:00Z",
+        "state": "active",       # changed
+        "priority": 200,         # changed
+        "title": "New title",    # changed
+        "notes": [],
+    }
+    emitted, _ = await _emit_event_updates(
+        er_event=er_event, state_record=state_record, integration_id="int-2"
+    )
+    assert emitted == 3
+    # Each change goes into the PATCH body under the cdip-side field name (status, not state).
+    sent_changes = [c.kwargs["changes"] for c in mock_update.call_args_list]
+    assert {"status": "active"} in sent_changes
+    assert {"priority": 200} in sent_changes
+    assert {"title": "New title"} in sent_changes
+
+
+@pytest.mark.asyncio
+async def test_emit_event_updates_skips_when_nothing_changed(mocker):
+    """No new notes and no field diffs → zero update_event_in_gundi calls."""
+    mock_update = mocker.patch("app.actions.handlers.update_event_in_gundi")
+    mock_update.return_value = async_return({})
+    state_record = {
+        "gundi_object_id": "gundi-obj-3",
+        "updated_at": "2026-06-01T00:00:00Z",
+        "state": "active",
+        "priority": 100,
+        "title": "Snare check",
+        "seen_note_ids": ["note-x"],
+    }
+    er_event = {
+        "id": "er-uuid-3",
+        "updated_at": "2026-06-02T00:00:00Z",
+        "state": "active",
+        "priority": 100,
+        "title": "Snare check",
+        "notes": [{"id": "note-x", "text": "still here"}],
+    }
+    emitted, _ = await _emit_event_updates(
+        er_event=er_event, state_record=state_record, integration_id="int-3"
+    )
+    assert emitted == 0
+    mock_update.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_pull_events_skips_event_when_updated_at_unchanged(
+        mocker, mock_gundi_client_v2, mock_erclient_class,
+        mock_get_gundi_api_key, mock_gundi_sensors_client_class, er_integration_v2_provider,
+        mock_publish_event, mock_gundi_client_v2_class, mock_config_manager_er_provider,
+        events_batch_one
+):
+    """If a previously-seen ER event reappears with the same updated_at, we no-op."""
+    # State manager that returns a per-event record whose updated_at matches the first event.
+    first_event = events_batch_one[0]
+    mock_state_manager = mocker.MagicMock()
+
+    async def fake_get_state(integration_id, action_id, source_id="no-source"):
+        if source_id == first_event["id"]:
+            return {
+                "gundi_object_id": "gundi-obj-existing",
+                "updated_at": first_event["updated_at"],
+                "state": first_event.get("state"),
+                "priority": first_event.get("priority"),
+                "title": first_event.get("title"),
+                "seen_note_ids": [],
+            }
+        return {"last_execution": "2023-11-17T11:20:00+0200"}
+
+    mock_state_manager.get_state.side_effect = fake_get_state
+    mock_state_manager.set_state.return_value = async_return(None)
+    # Single-event batch keeps the test focused.
+    from app.actions.tests.conftest import AsyncIterator
+    mock_erclient_class.return_value.get_events.return_value = AsyncIterator([[first_event]])
+
+    mocker.patch("app.services.activity_logger.publish_event", mock_publish_event)
+    mocker.patch("app.services.action_runner.publish_event", mock_publish_event)
+    mocker.patch("app.services.action_runner.config_manager", mock_config_manager_er_provider)
+    mocker.patch("app.services.action_runner._portal", mock_gundi_client_v2)
+    mocker.patch("app.actions.handlers.state_manager", mock_state_manager)
+    mocker.patch("app.actions.handlers.AsyncERClient", mock_erclient_class)
+    mocker.patch("app.services.gundi.GundiClient", mock_gundi_client_v2_class)
+    mocker.patch("app.services.gundi.GundiDataSenderClient", mock_gundi_sensors_client_class)
+    mocker.patch("app.services.gundi._get_gundi_api_key", mock_get_gundi_api_key)
+
+    response = await execute_action(
+        integration_id=str(er_integration_v2_provider.id),
+        action_id="pull_events",
+    )
+
+    mock_gundi_sensors_client_class.return_value.post_events.assert_not_called()
+    assert response["events_skipped_unchanged"] == 1
+    assert response["events_extracted"] == 0
