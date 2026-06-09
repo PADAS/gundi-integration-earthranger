@@ -1224,3 +1224,51 @@ async def test_pull_events_warns_about_partially_unresolvable_slugs(
         if c.kwargs.get("level") == LogLevel.WARNING
     )
     assert warning_log.kwargs["data"]["unresolved_event_types"] == ["typo_slug"]
+
+
+# ---------------------------------------------------------------------------
+# ER deep-link: er_event_url in additional, so CMORE can render a click-through.
+# ---------------------------------------------------------------------------
+
+from urllib.parse import urlparse as _urlparse
+from app.actions.handlers import _er_ui_root
+
+
+def test_er_ui_root_strips_path_query_and_fragment():
+    """Normalize the integration's base_url to scheme://netloc so we don't
+    accidentally embed '/api/v1.0' or query params into deep-link URLs."""
+    assert _er_ui_root(_urlparse("https://gundi-er.pamdas.org")) == "https://gundi-er.pamdas.org"
+    assert _er_ui_root(_urlparse("https://gundi-er.pamdas.org/api/v1.0")) == "https://gundi-er.pamdas.org"
+    assert _er_ui_root(_urlparse("https://gundi-er.pamdas.org:8443/foo?x=1")) == "https://gundi-er.pamdas.org:8443"
+    # Unparseable / blank → empty string (caller treats as "skip the deep-link").
+    assert _er_ui_root(_urlparse("")) == ""
+    assert _er_ui_root(_urlparse("not-a-url")) == ""
+
+
+def test_transform_events_emits_er_event_url_when_ui_root_provided():
+    """The deep-link is built as ``{er_ui_root}/events/{er_event_id}`` and lands
+    in additional. CMORE-side handler reads this to render a click-through."""
+    transformed = transform_events_to_gundi_schema(
+        events=[{"id": "907a54b9-808b-45a6-919c-b6dd204c32c6", "event_type": "wildlife_sighting"}],
+        er_ui_root="https://gundi-dev.staging.pamdas.org",
+    )
+    assert transformed[0]["additional"]["er_event_url"] == (
+        "https://gundi-dev.staging.pamdas.org/events/907a54b9-808b-45a6-919c-b6dd204c32c6"
+    )
+
+
+def test_transform_events_skips_er_event_url_when_ui_root_missing():
+    """No er_ui_root → no deep-link key in additional (backward compatible)."""
+    transformed = transform_events_to_gundi_schema(
+        events=[{"id": "abc", "event_type": "wildlife_sighting"}],
+    )
+    assert "er_event_url" not in transformed[0]["additional"]
+
+
+def test_transform_events_skips_er_event_url_when_event_id_missing():
+    """No event id → no deep-link key (don't emit a URL pointing to ``/events/None``)."""
+    transformed = transform_events_to_gundi_schema(
+        events=[{"event_type": "wildlife_sighting"}],
+        er_ui_root="https://gundi-dev.staging.pamdas.org",
+    )
+    assert "er_event_url" not in transformed[0]["additional"]
