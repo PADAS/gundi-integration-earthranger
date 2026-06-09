@@ -1,6 +1,16 @@
 # gundi-integration-action-runner
 Template repo for integration in Gundi v2.
 
+## Integration type slug
+
+The canonical Gundi integration-type slug for this runner is **`earth_ranger`**. It matches `gundi_core.schemas.v1.DestinationTypes.EarthRanger` and every fixture across `cdip-routing` and the gundi-integration repos. Always use `earth_ranger` (with underscore) when:
+
+- Setting `INTEGRATION_TYPE_SLUG` in deployed env config
+- Running `python app/register.py --slug ...` from CLI or VS Code launch tasks
+- Referencing this integration type elsewhere in the system
+
+An `earthranger` (no underscore) IntegrationType existed historically as a registration accident and is being cleaned up — see [the explanation thread on PR #13](https://github.com/PADAS/gundi-integration-earthranger/pull/13).
+
 ## Usage
 - Fork this repo
 - Implement your own actions in `actions/handlers.py`
