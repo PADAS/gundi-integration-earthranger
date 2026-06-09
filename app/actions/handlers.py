@@ -420,6 +420,12 @@ async def action_pull_events(integration: Integration, action_config: PullEvents
     updates_emitted = 0  # individual update_event calls (notes + field changes)
     events_skipped_unchanged = 0
     async with er_client as earth_ranger:
+        # Build a {slug → display} map once per pull so titleless events can fall back
+        # to a human-readable event-type name ("Poacher Sighting Report") instead of
+        # the raw slug ("poacher_sighting_rep") on downstream destinations like CMORE.
+        # Best-effort: if the lookup fails (e.g. credentials lack the permission), we
+        # degrade to slug-only and log a warning rather than failing the whole pull.
+        event_type_display_by_slug = await _fetch_event_type_display_map(earth_ranger)
         async for event_batch in earth_ranger.get_events(filter=json_filter, batch_size=BATCH_SIZE):
             for er_event in event_batch:
                 er_event_uuid = er_event.get("id")
@@ -433,7 +439,10 @@ async def action_pull_events(integration: Integration, action_config: PullEvents
                 )
                 if not state_record.get("gundi_object_id"):
                     # Never seen this ER event before → post it to Gundi as new.
-                    transformed = transform_events_to_gundi_schema(events=[er_event])
+                    transformed = transform_events_to_gundi_schema(
+                        events=[er_event],
+                        event_type_display_by_slug=event_type_display_by_slug,
+                    )
                     if not transformed:
                         continue
                     response = await send_events_to_gundi(
@@ -644,15 +653,51 @@ def get_authentication_config(integration):
     return AuthenticateConfig.parse_obj(auth_action_config.data)
 
 
-def transform_events_to_gundi_schema(events):
+async def _fetch_event_type_display_map(er_client):
+    """Build a {slug: display_name} map from ER's event-types endpoint.
+
+    Used as a fallback so events missing their own title get a human-readable
+    label downstream (e.g. "Poacher Sighting Report") rather than the raw slug
+    ("poacher_sighting_rep"). Returns an empty dict on any failure — the caller
+    treats this as best-effort.
+    """
+    try:
+        event_types = await er_client.get_event_types()
+    except Exception as e:
+        logger.warning(
+            "Could not fetch ER event types for title-fallback map: %s: %s. "
+            "Titleless events will fall back to the event_type slug.",
+            type(e).__name__, e,
+        )
+        return {}
+    return {
+        et["value"]: et.get("display")
+        for et in event_types
+        if et.get("value") and et.get("display")
+    }
+
+
+def transform_events_to_gundi_schema(events, event_type_display_by_slug=None):
+    """Map an ER event payload list to the Gundi sensors-API event schema.
+
+    ``event_type_display_by_slug`` is an optional {slug: display} map used as
+    the title fallback when the ER event has no title of its own. If omitted
+    or the slug isn't in the map, falls through to the slug itself — matching
+    the prior behavior.
+    """
+    display_map = event_type_display_by_slug or {}
     transformed_data = []
     for event in events:
         try:
             transformed_event = {}
             # Set base fields
-            if event_type := event.get("event_type"):
+            event_type = event.get("event_type")
+            if event_type:
                 transformed_event["event_type"] = event_type
-            if title := event.get("title"):
+            # Prefer the ER event's own title; otherwise fall back to the
+            # event-type display name; otherwise the slug; otherwise nothing.
+            title = event.get("title") or display_map.get(event_type) or event_type
+            if title:
                 transformed_event["title"] = title
             if recorded_at := event.get("created_at"):
                 transformed_event["recorded_at"] = recorded_at

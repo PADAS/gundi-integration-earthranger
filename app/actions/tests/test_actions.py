@@ -865,3 +865,91 @@ async def test_pull_events_skips_event_when_updated_at_unchanged(
     mock_gundi_sensors_client_class.return_value.post_events.assert_not_called()
     assert response["events_skipped_unchanged"] == 1
     assert response["events_extracted"] == 0
+
+
+# ---------------------------------------------------------------------------
+# Title fallback: use EventType.display when an ER event has no title.
+# ---------------------------------------------------------------------------
+
+from app.actions.handlers import (
+    _fetch_event_type_display_map,
+    transform_events_to_gundi_schema,
+)
+
+
+def test_transform_events_uses_event_title_when_present():
+    """An explicit title on the ER event wins over the display map."""
+    transformed = transform_events_to_gundi_schema(
+        events=[{"id": "x", "event_type": "poacher_sighting_rep", "title": "Snare check"}],
+        event_type_display_by_slug={"poacher_sighting_rep": "Poacher Sighting Report"},
+    )
+    assert transformed[0]["title"] == "Snare check"
+
+
+def test_transform_events_falls_back_to_display_when_title_missing():
+    """No title on the event → use the EventType display name from the map."""
+    transformed = transform_events_to_gundi_schema(
+        events=[{"id": "x", "event_type": "poacher_sighting_rep"}],
+        event_type_display_by_slug={"poacher_sighting_rep": "Poacher Sighting Report"},
+    )
+    assert transformed[0]["title"] == "Poacher Sighting Report"
+
+
+def test_transform_events_falls_through_to_slug_when_display_unmapped():
+    """No title and the slug isn't in the display map → keep the prior slug fallback."""
+    transformed = transform_events_to_gundi_schema(
+        events=[{"id": "x", "event_type": "some_unmapped_type"}],
+        event_type_display_by_slug={"other": "Other Display"},
+    )
+    assert transformed[0]["title"] == "some_unmapped_type"
+
+
+def test_transform_events_omits_title_when_event_type_also_missing():
+    """No title, no event_type → no title set (the prior behavior)."""
+    transformed = transform_events_to_gundi_schema(
+        events=[{"id": "x"}],
+        event_type_display_by_slug={"poacher_sighting_rep": "Poacher Sighting Report"},
+    )
+    assert "title" not in transformed[0]
+
+
+def test_transform_events_no_display_map_arg_matches_prior_behavior():
+    """Calling without the new kwarg preserves the original slug-only fallback."""
+    transformed = transform_events_to_gundi_schema(
+        events=[{"id": "x", "event_type": "poacher_sighting_rep"}],
+    )
+    assert transformed[0]["title"] == "poacher_sighting_rep"
+
+
+@pytest.mark.asyncio
+async def test_fetch_event_type_display_map_builds_dict(mocker):
+    er_client = mocker.MagicMock()
+
+    async def fake_get_event_types():
+        return [
+            {"value": "poacher_sighting_rep", "display": "Poacher Sighting Report"},
+            {"value": "wildlife_sighting_rep", "display": "Wildlife Sighting Report"},
+            # Entries missing either field are skipped.
+            {"value": "no_display_rep"},
+            {"display": "No Slug"},
+        ]
+
+    er_client.get_event_types = fake_get_event_types
+    result = await _fetch_event_type_display_map(er_client)
+    assert result == {
+        "poacher_sighting_rep": "Poacher Sighting Report",
+        "wildlife_sighting_rep": "Wildlife Sighting Report",
+    }
+
+
+@pytest.mark.asyncio
+async def test_fetch_event_type_display_map_degrades_to_empty_on_error(mocker):
+    """If get_event_types fails (403, network, etc.) we degrade gracefully."""
+    er_client = mocker.MagicMock()
+
+    async def boom():
+        raise RuntimeError("simulated permissions failure")
+
+    er_client.get_event_types = boom
+    result = await _fetch_event_type_display_map(er_client)
+    assert result == {}
