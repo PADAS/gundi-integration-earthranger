@@ -940,66 +940,134 @@ def test_transform_events_no_display_map_arg_matches_prior_behavior():
 
 
 @pytest.mark.asyncio
-async def test_fetch_event_type_maps_builds_all_three_lookups(mocker):
-    """One get_event_types() call should populate display, type-id, and
-    category-id maps from the same payload."""
+async def test_fetch_event_type_maps_merges_v1_and_v2(mocker):
+    """ER's v1 and v2 event-type endpoints each return only their own version's
+    types. The helper queries both and merges, with v1 contributing category
+    UUIDs (nested object) and v2 contributing slug→id mappings for v2-only types."""
+    from erclient import VERSION_1_0, VERSION_2_0
     er_client = mocker.MagicMock()
 
-    async def fake_get_event_types():
-        return [
-            {
-                "value": "poacher_sighting_rep",
-                "display": "Poacher Sighting Report",
-                "id": "type-uuid-1",
-                "category": {"value": "security", "id": "cat-uuid-1", "is_active": True},
-            },
-            {
-                "value": "wildlife_sighting_rep",
-                "display": "Wildlife Sighting Report",
-                "id": "type-uuid-2",
-                "category": {"value": "wildlife", "id": "cat-uuid-2", "is_active": True},
-            },
-            # Entry missing display still contributes to id_by_slug and category map.
-            {
-                "value": "no_display_rep",
-                "id": "type-uuid-3",
-                "category": {"value": "wildlife", "id": "cat-uuid-2"},
-            },
-            # Entry missing slug is skipped entirely.
-            {"display": "No Slug", "id": "type-uuid-x"},
-        ]
+    async def fake_get_event_types(version=VERSION_1_0, **kwargs):
+        if version == VERSION_1_0:
+            return [
+                {
+                    "value": "wildlife_sighting_rep",
+                    "display": "Wildlife Sighting Report",
+                    "id": "v1-type-uuid",
+                    "category": {"value": "wildlife", "id": "cat-uuid-w", "is_active": True},
+                },
+            ]
+        if version == VERSION_2_0:
+            return [
+                # v2 carries category as a bare slug, not a nested dict.
+                {
+                    "value": "coyote_carcass",
+                    "display": "Coyote Carcass",
+                    "id": "v2-type-uuid",
+                    "category": "wildlife",
+                },
+            ]
+        return []
 
     er_client.get_event_types = fake_get_event_types
     maps = await _fetch_event_type_maps(er_client)
+    # Both versions contribute to display + id maps.
     assert maps.display_by_slug == {
-        "poacher_sighting_rep": "Poacher Sighting Report",
         "wildlife_sighting_rep": "Wildlife Sighting Report",
+        "coyote_carcass": "Coyote Carcass",
     }
     assert maps.id_by_slug == {
-        "poacher_sighting_rep": "type-uuid-1",
-        "wildlife_sighting_rep": "type-uuid-2",
-        "no_display_rep": "type-uuid-3",
+        "wildlife_sighting_rep": "v1-type-uuid",
+        "coyote_carcass": "v2-type-uuid",
     }
-    # Categories dedupe — "wildlife" appears twice but maps to one UUID.
+    # v1's nested category dict populates category_id_by_slug; the v2 fetch
+    # didn't need to fall back to get_event_categories.
+    assert maps.category_id_by_slug == {"wildlife": "cat-uuid-w"}
+
+
+@pytest.mark.asyncio
+async def test_fetch_event_type_maps_falls_back_to_categories_endpoint(mocker):
+    """If only v2 event types exist (no nested category UUIDs), the helper hits
+    the /event_categories endpoint to populate category_id_by_slug."""
+    from erclient import VERSION_1_0, VERSION_2_0
+    er_client = mocker.MagicMock()
+
+    async def fake_get_event_types(version=VERSION_1_0, **kwargs):
+        if version == VERSION_1_0:
+            return []  # ER instance has no v1 types
+        return [
+            {
+                "value": "coyote_carcass",
+                "display": "Coyote Carcass",
+                "id": "v2-type-uuid",
+                "category": "wildlife",
+            },
+        ]
+
+    async def fake_get_event_categories(**kwargs):
+        return [
+            {"value": "wildlife", "id": "cat-uuid-w", "display": "Wildlife", "is_active": True},
+            {"value": "monitoring", "id": "cat-uuid-m", "display": "Monitoring", "is_active": True},
+        ]
+
+    er_client.get_event_types = fake_get_event_types
+    er_client.get_event_categories = fake_get_event_categories
+
+    maps = await _fetch_event_type_maps(er_client)
+    assert maps.id_by_slug == {"coyote_carcass": "v2-type-uuid"}
+    # category_id_by_slug was empty after v1+v2 → categories endpoint backfilled it.
     assert maps.category_id_by_slug == {
-        "security": "cat-uuid-1",
-        "wildlife": "cat-uuid-2",
+        "wildlife": "cat-uuid-w",
+        "monitoring": "cat-uuid-m",
     }
 
 
 @pytest.mark.asyncio
-async def test_fetch_event_type_maps_degrades_to_empty_on_403(mocker):
-    """If get_event_types fails with a 403 all three maps are empty."""
+async def test_fetch_event_type_maps_v1_succeeds_v2_fails(mocker):
+    """One endpoint failing doesn't break the other."""
+    from erclient import VERSION_1_0, VERSION_2_0
     er_client = mocker.MagicMock()
 
-    async def boom():
+    async def fake_get_event_types(version=VERSION_1_0, **kwargs):
+        if version == VERSION_1_0:
+            return [
+                {
+                    "value": "wildlife_sighting_rep",
+                    "display": "Wildlife Sighting Report",
+                    "id": "v1-type-uuid",
+                    "category": {"value": "wildlife", "id": "cat-uuid-w"},
+                },
+            ]
         raise ERClientPermissionDenied(
-            "ER Forbidden ON GET https://gundi-er.pamdas.org/api/v1.0/activity/events/eventtypes.",
+            "ER Forbidden ON GET https://gundi-er.pamdas.org/api/v2.0/activity/eventtypes.",
             status_code=403,
-            response_body='{"status":{"code":403,"message":"Forbidden"}}',
+            response_body="{}",
         )
 
-    er_client.get_event_types = boom
+    er_client.get_event_types = fake_get_event_types
+    maps = await _fetch_event_type_maps(er_client)
+    assert maps.id_by_slug == {"wildlife_sighting_rep": "v1-type-uuid"}
+    assert maps.category_id_by_slug == {"wildlife": "cat-uuid-w"}
+
+
+@pytest.mark.asyncio
+async def test_fetch_event_type_maps_degrades_to_empty_when_everything_fails(mocker):
+    """v1, v2, and categories all 403 → all maps empty (callers will skip pull)."""
+    er_client = mocker.MagicMock()
+
+    async def boom_event_types(**kwargs):
+        raise ERClientPermissionDenied(
+            "ER Forbidden", status_code=403, response_body="{}"
+        )
+
+    async def boom_categories(**kwargs):
+        raise ERClientPermissionDenied(
+            "ER Forbidden", status_code=403, response_body="{}"
+        )
+
+    er_client.get_event_types = boom_event_types
+    er_client.get_event_categories = boom_categories
+
     maps = await _fetch_event_type_maps(er_client)
     assert isinstance(maps, EventTypeMaps)
     assert maps.display_by_slug == {}
