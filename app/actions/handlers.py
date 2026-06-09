@@ -25,6 +25,14 @@ DEFAULT_CONNECT_TIMEOUT_SECONDS = 10.0
 BATCH_SIZE = 100
 state_manager = IntegrationStateManager()
 
+# TTL for the per-event state map populated by action_pull_events
+# (`integration_state.{integration_id}.pull_events.{er_event_uuid}`). Long
+# enough that any realistic edit window lands while we still have the
+# gundi_object_id and seen_note_ids; short enough that the keyspace eventually
+# prunes itself for events that nobody touches again. Mirrors the sibling
+# constant in gundi-integration-cmore for the destination-side mapping.
+ER_EVENT_STATE_TTL_SECONDS = 90 * 24 * 60 * 60  # 90 days
+
 # Maps the operator-selected date field to the corresponding key on ER's
 # event-filter blob. ER applies these independently of each other, so only
 # one is set per pull.
@@ -742,7 +750,11 @@ def _extract_object_id_from_post_events_response(response):
 
 
 async def _save_event_state(integration_id, er_event_uuid, gundi_object_id, er_event, seen_note_ids):
-    """Persist per-event state under (pull_events, er_event_uuid)."""
+    """Persist per-event state under (pull_events, er_event_uuid).
+
+    Bounded by ``ER_EVENT_STATE_TTL_SECONDS`` so the per-event keyspace doesn't
+    grow forever for events that stop receiving edits.
+    """
     await state_manager.set_state(
         integration_id=integration_id,
         action_id="pull_events",
@@ -755,6 +767,7 @@ async def _save_event_state(integration_id, er_event_uuid, gundi_object_id, er_e
             "title": er_event.get("title"),
             "seen_note_ids": list(seen_note_ids),
         },
+        ttl_seconds=ER_EVENT_STATE_TTL_SECONDS,
     )
 
 
