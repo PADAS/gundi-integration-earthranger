@@ -8,7 +8,7 @@ from urllib.parse import urlparse
 
 import httpx
 import stamina
-from erclient import AsyncERClient, ERClientException
+from erclient import AsyncERClient, ERClientException, VERSION_1_0, VERSION_2_0
 from erclient.er_errors import ERClientBadCredentials
 from gundi_client_v2.client import GundiClient
 from gundi_core.events import LogLevel
@@ -728,44 +728,95 @@ class EventTypeMaps:
 
 
 async def _fetch_event_type_maps(er_client) -> EventTypeMaps:
-    """Build slug→display, slug→type_id, and category_slug→category_id maps
-    from a single ER get_event_types() call.
+    """Build slug→display, slug→type_id, and category_slug→category_id maps.
 
-    Best-effort: if the lookup fails (e.g. credentials lack the permission to
-    read event types), returns an empty ``EventTypeMaps`` and logs a warning.
-    Downstream behavior on empty maps:
+    ER's EventType has a ``version`` field — each type is exclusively v1 OR
+    v2 — and the two list endpoints filter to their own version only:
 
-    - Titleless events fall back to the event_type slug (existing behavior).
-    - Operator-configured filter slugs that can't resolve get a WARNING; if
-      ALL configured slugs are unresolvable, the pull is skipped entirely
-      rather than silently fetching everything.
+    - ``GET /api/v1.0/activity/events/eventtypes``  (filter: version=v1)
+    - ``GET /api/v2.0/activity/eventtypes``         (filter: version=v2)
+
+    Neither endpoint returns the other version's types, so we query both and
+    merge. v1 responses carry a nested category dict (`id`, `value`, ...);
+    v2 responses carry only the category slug. As a fallback for category
+    UUIDs we hit ``GET /activity/events/categories`` if the merged maps
+    haven't already populated ``category_id_by_slug`` (e.g. an ER instance
+    with only v2 event types).
+
+    All three fetches are best-effort and logged independently — a 403 on
+    one doesn't break the others. If everything fails, all maps are empty;
+    downstream callers treat that as the "skip the pull" signal.
     """
+    maps = EventTypeMaps()
+
     try:
-        event_types = await er_client.get_event_types()
+        v1_types = await er_client.get_event_types(version=VERSION_1_0)
     except Exception as e:
         logger.warning(
-            "Could not fetch ER event types: %s: %s. "
-            "Operator-configured filter slugs will not resolve and titleless "
-            "events will fall back to the event_type slug.",
+            "Could not fetch ER v1 event types: %s: %s. "
+            "Slug→UUID resolution will fall back to v2-only results.",
             type(e).__name__, e,
         )
-        return EventTypeMaps()
+    else:
+        for et in v1_types:
+            _absorb_event_type(maps, et, with_category=True)
 
-    maps = EventTypeMaps()
-    for et in event_types:
-        slug = et.get("value")
-        if not slug:
-            continue
-        if et.get("display"):
-            maps.display_by_slug[slug] = et["display"]
-        if et.get("id"):
-            maps.id_by_slug[slug] = et["id"]
-        category = et.get("category") or {}
-        cat_slug = category.get("value")
-        cat_id = category.get("id")
-        if cat_slug and cat_id:
-            maps.category_id_by_slug[cat_slug] = cat_id
+    try:
+        v2_types = await er_client.get_event_types(version=VERSION_2_0)
+    except Exception as e:
+        logger.warning(
+            "Could not fetch ER v2 event types: %s: %s. "
+            "Slug→UUID resolution will fall back to v1-only results.",
+            type(e).__name__, e,
+        )
+    else:
+        for et in v2_types:
+            # v2 carries category as a bare slug, not as a nested object —
+            # we resolve category UUIDs separately below.
+            _absorb_event_type(maps, et, with_category=False)
+
+    # If we got no category UUIDs from the v1 event types (e.g. ER has only
+    # v2 types defined), the canonical categories endpoint fills the gap.
+    if not maps.category_id_by_slug:
+        try:
+            categories = await er_client.get_event_categories()
+        except Exception as e:
+            logger.warning(
+                "Could not fetch ER event categories: %s: %s. "
+                "event_category filter slugs will not resolve.",
+                type(e).__name__, e,
+            )
+        else:
+            for cat in categories:
+                cat_slug = cat.get("value")
+                cat_id = cat.get("id")
+                if cat_slug and cat_id:
+                    maps.category_id_by_slug.setdefault(cat_slug, cat_id)
+
     return maps
+
+
+def _absorb_event_type(maps: EventTypeMaps, et: dict, *, with_category: bool) -> None:
+    """Merge one ER event-type record into the shared maps.
+
+    Uses ``setdefault`` so v1 and v2 entries for the same slug (shouldn't
+    happen — version is exclusive — but be defensive) don't clobber each
+    other; first-seen wins.
+    """
+    slug = et.get("value")
+    if not slug:
+        return
+    if et.get("display"):
+        maps.display_by_slug.setdefault(slug, et["display"])
+    if et.get("id"):
+        maps.id_by_slug.setdefault(slug, et["id"])
+    if with_category:
+        category = et.get("category") or {}
+        if isinstance(category, dict):
+            cat_slug = category.get("value")
+            cat_id = category.get("id")
+            if cat_slug and cat_id:
+                maps.category_id_by_slug.setdefault(cat_slug, cat_id)
 
 
 def _resolve_slugs(configured_slugs, slug_to_id):
