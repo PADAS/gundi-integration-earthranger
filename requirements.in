@@ -1,3 +1,7 @@
 # Add your integration-specific dependencies here
 earthranger-client>=1.15.0,<2.0.0
-backports.zoneinfo==0.2.1;python_version<"3.9"
+# backports.zoneinfo dropped — repo is permanently on Python 3.10+ (see
+# Dockerfile + .python-version), so the zoneinfo stdlib module is always
+# available. Keeping the entry caused Docker builds to fail because the
+# marker was being stripped during uv pip compile and the 0.2.1 C extension
+# uses _PyLong_One which Python 3.10 removed.
