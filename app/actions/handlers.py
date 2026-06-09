@@ -16,7 +16,7 @@ from app.services.state import IntegrationStateManager
 from .configurations import AuthenticateConfig, EventFilterDateField, PullObservationsConfig, PullEventsConfig, \
     ERAuthenticationType, ShowPermissionsConfig
 from ..services.activity_logger import activity_logger, log_action_activity
-from ..services.gundi import send_events_to_gundi, send_observations_to_gundi
+from ..services.gundi import send_events_to_gundi, send_observations_to_gundi, update_event_in_gundi
 
 logger = logging.getLogger(__name__)
 
@@ -412,25 +412,93 @@ async def action_pull_events(integration: Integration, action_config: PullEvents
         event_filter["event_category"] = pull_config.event_categories
     json_filter = json.dumps(event_filter)
     logger.info(f"Extracting events with filter '{event_filter}'...")
-    # Process events in batches
+    # Process events in batches. Per-event state in Redis (keyed by ER event UUID)
+    # distinguishes never-seen events (post as new) from previously-forwarded events
+    # whose updated_at has advanced (emit one update_event per detected change).
+    events_new = 0
+    events_updated = 0  # distinct events that had at least one change emitted
+    updates_emitted = 0  # individual update_event calls (notes + field changes)
+    events_skipped_unchanged = 0
     async with er_client as earth_ranger:
         async for event_batch in earth_ranger.get_events(filter=json_filter, batch_size=BATCH_SIZE):
-            transformed_events = transform_events_to_gundi_schema(events=event_batch)
-            if not transformed_events:
-                continue  # No data to send
-            logger.info(f"Sending {len(transformed_events)} events to Gundi...")
-            await send_events_to_gundi(events=transformed_events, integration_id=integration_id)
-            total_events += len(transformed_events)
-    # Update state
+            for er_event in event_batch:
+                er_event_uuid = er_event.get("id")
+                if not er_event_uuid:
+                    logger.warning("ER event payload missing 'id'; skipping.", extra={"event": er_event})
+                    continue
+                state_record = await state_manager.get_state(
+                    integration_id=integration_id,
+                    action_id="pull_events",
+                    source_id=er_event_uuid,
+                )
+                if not state_record.get("gundi_object_id"):
+                    # Never seen this ER event before → post it to Gundi as new.
+                    transformed = transform_events_to_gundi_schema(events=[er_event])
+                    if not transformed:
+                        continue
+                    response = await send_events_to_gundi(
+                        events=transformed, integration_id=integration_id
+                    )
+                    gundi_object_id = _extract_object_id_from_post_events_response(response)
+                    if not gundi_object_id:
+                        logger.error(
+                            "Could not extract object_id from post_events response; "
+                            "skipping state persistence for this event.",
+                            extra={"er_event_id": er_event_uuid, "response": response},
+                        )
+                        continue
+                    # Mark all existing notes as already-seen (no bulk-forward on first sight).
+                    note_ids = [n["id"] for n in er_event.get("notes") or [] if n.get("id")]
+                    await _save_event_state(
+                        integration_id=integration_id,
+                        er_event_uuid=er_event_uuid,
+                        gundi_object_id=gundi_object_id,
+                        er_event=er_event,
+                        seen_note_ids=note_ids,
+                    )
+                    events_new += 1
+                    continue
+
+                # Seen before. Defensive freshness check: same updated_at → no work to do.
+                if state_record.get("updated_at") == er_event.get("updated_at"):
+                    events_skipped_unchanged += 1
+                    continue
+
+                # Updated event → emit one update_event per detected change.
+                emitted, new_seen_note_ids = await _emit_event_updates(
+                    er_event=er_event,
+                    state_record=state_record,
+                    integration_id=integration_id,
+                )
+                updates_emitted += emitted
+                if emitted > 0:
+                    events_updated += 1
+                # Refresh state to reflect what we forwarded this run.
+                await _save_event_state(
+                    integration_id=integration_id,
+                    er_event_uuid=er_event_uuid,
+                    gundi_object_id=state_record["gundi_object_id"],
+                    er_event=er_event,
+                    seen_note_ids=new_seen_note_ids,
+                )
+    # Save watermark.
     state = {"last_execution": execution_timestamp}
-    logger.debug(f"Saving state for integration {integration}, action pull_events:\n{state}")
+    logger.debug(f"Saving watermark for integration {integration}, action pull_events:\n{state}")
     await state_manager.set_state(
         integration_id=integration_id,
         action_id="pull_events",
         state=state
     )
-    logger.info(f"Extracted {total_events} events.")
-    return {"events_extracted": total_events}
+    logger.info(
+        f"pull_events done. new={events_new} updated={events_updated} "
+        f"updates_emitted={updates_emitted} skipped_unchanged={events_skipped_unchanged}"
+    )
+    return {
+        "events_extracted": events_new,
+        "events_updated": events_updated,
+        "updates_emitted": updates_emitted,
+        "events_skipped_unchanged": events_skipped_unchanged,
+    }
 
 
 @activity_logger()
@@ -642,4 +710,91 @@ def transform_observations_to_gundi_schema(observations):
         else:
             transformed_data.append(transformed_observation)
     return transformed_data
+
+
+# Maps an ER event field name to the corresponding key the sensors-API
+# EventCreateUpdateSerializer accepts on PATCH (see cdip PR #428). For each
+# entry: (er_event_field, serializer_patch_field, state_record_key).
+_ER_FIELD_DIFF_MAP = (
+    ("state", "status", "state"),      # ER 'state' → cdip 'status'
+    ("priority", "priority", "priority"),
+    ("title", "title", "title"),
+)
+
+
+def _extract_object_id_from_post_events_response(response):
+    """Pull the Gundi-assigned object_id out of a post_events response.
+
+    post_events always wraps in a list on the wire — even for a single event —
+    so the response is normally a list of dicts. Be defensive about dict
+    responses too in case the API surface ever shifts.
+    """
+    if isinstance(response, list):
+        if not response:
+            return None
+        first = response[0]
+        if isinstance(first, dict):
+            return first.get("object_id")
+        return None
+    if isinstance(response, dict):
+        return response.get("object_id")
+    return None
+
+
+async def _save_event_state(integration_id, er_event_uuid, gundi_object_id, er_event, seen_note_ids):
+    """Persist per-event state under (pull_events, er_event_uuid)."""
+    await state_manager.set_state(
+        integration_id=integration_id,
+        action_id="pull_events",
+        source_id=er_event_uuid,
+        state={
+            "gundi_object_id": gundi_object_id,
+            "updated_at": er_event.get("updated_at"),
+            "state": er_event.get("state"),
+            "priority": er_event.get("priority"),
+            "title": er_event.get("title"),
+            "seen_note_ids": list(seen_note_ids),
+        },
+    )
+
+
+async def _emit_event_updates(er_event, state_record, integration_id):
+    """Emit one Gundi update_event per detected change on a previously-seen event.
+
+    Returns a tuple (emitted_count, new_seen_note_ids). The caller persists
+    the updated state after we return so a transient failure mid-loop leaves
+    the watermark untouched and the next run can re-detect.
+    """
+    gundi_object_id = state_record["gundi_object_id"]
+    seen_note_ids = list(state_record.get("seen_note_ids", []))
+    seen_set = set(seen_note_ids)
+    emitted = 0
+
+    # New notes — one update_event each, preserves author + timestamp per comment.
+    for note in er_event.get("notes") or []:
+        note_id = note.get("id")
+        if not note_id or note_id in seen_set:
+            continue
+        await update_event_in_gundi(
+            gundi_object_id=gundi_object_id,
+            changes={"notes": [note]},
+            integration_id=integration_id,
+        )
+        seen_note_ids.append(note_id)
+        seen_set.add(note_id)
+        emitted += 1
+
+    # Field changes — one update_event per changed field.
+    for er_field, patch_field, state_key in _ER_FIELD_DIFF_MAP:
+        new_value = er_event.get(er_field)
+        if new_value == state_record.get(state_key):
+            continue
+        await update_event_in_gundi(
+            gundi_object_id=gundi_object_id,
+            changes={patch_field: new_value},
+            integration_id=integration_id,
+        )
+        emitted += 1
+
+    return emitted, seen_note_ids
 
