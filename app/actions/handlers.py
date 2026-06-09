@@ -13,8 +13,8 @@ from gundi_core.events import LogLevel
 from gundi_core.schemas.v2 import Integration
 from app.services.utils import find_config_for_action
 from app.services.state import IntegrationStateManager
-from .configurations import AuthenticateConfig, PullObservationsConfig, PullEventsConfig, ERAuthenticationType, \
-    ShowPermissionsConfig
+from .configurations import AuthenticateConfig, EventFilterDateField, PullObservationsConfig, PullEventsConfig, \
+    ERAuthenticationType, ShowPermissionsConfig
 from ..services.activity_logger import activity_logger, log_action_activity
 from ..services.gundi import send_events_to_gundi, send_observations_to_gundi
 
@@ -24,6 +24,15 @@ logger = logging.getLogger(__name__)
 DEFAULT_CONNECT_TIMEOUT_SECONDS = 10.0
 BATCH_SIZE = 100
 state_manager = IntegrationStateManager()
+
+# Maps the operator-selected date field to the corresponding key on ER's
+# event-filter blob. ER applies these independently of each other, so only
+# one is set per pull.
+ER_EVENT_FILTER_KEY_BY_DATE_FIELD = {
+    EventFilterDateField.EVENT_TIME: "date_range",
+    EventFilterDateField.CREATED_AT: "create_date",
+    EventFilterDateField.UPDATED_AT: "update_date",
+}
 
 
 async def action_auth(integration: Integration, action_config: AuthenticateConfig):
@@ -389,13 +398,14 @@ async def action_pull_events(integration: Integration, action_config: PullEvents
         start_datetime = pull_config.start_datetime
     else:
         start_datetime = last_execution
+    date_filter_key = ER_EVENT_FILTER_KEY_BY_DATE_FIELD[pull_config.filter_date_field]
     event_filter = {
-        "date_range": {
+        date_filter_key: {
             "lower": start_datetime
         }
     }
     if pull_config.end_datetime:
-        event_filter["date_range"]["upper"] = pull_config.end_datetime
+        event_filter[date_filter_key]["upper"] = pull_config.end_datetime
     if pull_config.event_types:
         event_filter["event_type"] = pull_config.event_types
     if pull_config.event_categories:

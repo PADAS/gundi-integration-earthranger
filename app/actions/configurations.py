@@ -13,6 +13,19 @@ class ERAuthenticationType(str, Enum):
     USERNAME_PASSWORD = "username_password"
 
 
+class EventFilterDateField(str, Enum):
+    """Which ER timestamp on an Event the start/end window applies to.
+
+    Maps to ER's three event filter keys:
+      EVENT_TIME → date_range (Event.event_time)
+      CREATED_AT → create_date (Event.created_at)
+      UPDATED_AT → update_date (Event.updated_at)
+    """
+    EVENT_TIME = "event_time"
+    CREATED_AT = "created_at"
+    UPDATED_AT = "updated_at"
+
+
 class AuthenticateConfig(AuthActionConfiguration, ExecutableActionMixin):
     authentication_type: ERAuthenticationType = Field(
         ERAuthenticationType.TOKEN,
@@ -155,8 +168,8 @@ class PullEventsConfig(PullActionConfiguration):
         ...,
         title="Start Datetime",
         description=(
-            "ISO-8601 timestamp filtering events by their event_time (when the event occurred, "
-            "NOT when it was created in ER). Used only on the FIRST run, or whenever "
+            "ISO-8601 timestamp filtering events by the field selected in "
+            "'filter_date_field' (default: updated_at). Used only on the FIRST run, or whenever "
             "'force_run_since_start' is true. After a successful run the action tracks its own "
             "watermark and ignores this value until the next manual reset."
         ),
@@ -167,12 +180,25 @@ class PullEventsConfig(PullActionConfiguration):
         None,
         title="End Datetime",
         description=(
-            "Optional ISO-8601 ceiling on event_time. Sent to ER on every run, even after the "
-            "internal watermark has advanced — leave empty for ongoing pulls and only set it for "
-            "bounded historical backfills."
+            "Optional ISO-8601 ceiling on the field selected in 'filter_date_field'. "
+            "Sent to ER on every run, even after the internal watermark has advanced — leave "
+            "empty for ongoing pulls and only set it for bounded historical backfills."
         ),
         format="date-time",
         ui_options=UIOptions(widget="date-time"),
+    )
+    filter_date_field: EventFilterDateField = FieldWithUIOptions(
+        EventFilterDateField.UPDATED_AT,
+        title="Filter By Date Field",
+        description=(
+            "Which ER timestamp the start/end window applies to. "
+            "'updated_at' (the default) catches backdated events and late edits on subsequent "
+            "runs because the watermark compares against when ER last touched the row. "
+            "'created_at' is similar but ignores edits after the event first appears. "
+            "'event_time' filters by when the event actually occurred and will silently miss "
+            "events whose event_time predates the current watermark — use only for bounded "
+            "historical backfills."
+        ),
     )
     force_run_since_start: bool = FieldWithUIOptions(
         False,
@@ -204,6 +230,6 @@ class PullEventsConfig(PullActionConfiguration):
     )
 
     ui_global_options: GlobalUISchemaOptions = GlobalUISchemaOptions(
-        order=["start_datetime", "end_datetime", "event_types", "event_categories", "force_run_since_start"],
+        order=["start_datetime", "end_datetime", "filter_date_field", "event_types", "event_categories", "force_run_since_start"],
     )
 
