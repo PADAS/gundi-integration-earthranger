@@ -1,4 +1,5 @@
 import pytest
+from erclient import ERClientPermissionDenied
 
 from app.conftest import async_return
 from app.services.action_runner import execute_action
@@ -865,3 +866,151 @@ async def test_pull_events_skips_event_when_updated_at_unchanged(
     mock_gundi_sensors_client_class.return_value.post_events.assert_not_called()
     assert response["events_skipped_unchanged"] == 1
     assert response["events_extracted"] == 0
+
+
+# ---------------------------------------------------------------------------
+# Title fallback: use EventType.display when an ER event has no title.
+# ---------------------------------------------------------------------------
+
+from app.actions.handlers import (
+    _fetch_event_type_display_map,
+    transform_events_to_gundi_schema,
+)
+
+
+def test_transform_events_uses_event_title_when_present():
+    """An explicit title on the ER event wins over the display map."""
+    transformed = transform_events_to_gundi_schema(
+        events=[{"id": "x", "event_type": "poacher_sighting_rep", "title": "Snare check"}],
+        event_type_display_by_slug={"poacher_sighting_rep": "Poacher Sighting Report"},
+    )
+    assert transformed[0]["title"] == "Snare check"
+
+
+def test_transform_events_falls_back_to_display_when_title_missing():
+    """No title on the event → use the EventType display name from the map."""
+    transformed = transform_events_to_gundi_schema(
+        events=[{"id": "x", "event_type": "poacher_sighting_rep"}],
+        event_type_display_by_slug={"poacher_sighting_rep": "Poacher Sighting Report"},
+    )
+    assert transformed[0]["title"] == "Poacher Sighting Report"
+
+
+def test_transform_events_falls_through_to_slug_when_display_unmapped():
+    """No title and the slug isn't in the display map → keep the prior slug fallback."""
+    transformed = transform_events_to_gundi_schema(
+        events=[{"id": "x", "event_type": "some_unmapped_type"}],
+        event_type_display_by_slug={"other": "Other Display"},
+    )
+    assert transformed[0]["title"] == "some_unmapped_type"
+
+
+def test_transform_events_omits_title_when_event_type_also_missing():
+    """No title, no event_type → no title set (the prior behavior)."""
+    transformed = transform_events_to_gundi_schema(
+        events=[{"id": "x"}],
+        event_type_display_by_slug={"poacher_sighting_rep": "Poacher Sighting Report"},
+    )
+    assert "title" not in transformed[0]
+
+
+def test_transform_events_no_display_map_arg_matches_prior_behavior():
+    """Calling without the new kwarg preserves the original slug-only fallback."""
+    transformed = transform_events_to_gundi_schema(
+        events=[{"id": "x", "event_type": "poacher_sighting_rep"}],
+    )
+    assert transformed[0]["title"] == "poacher_sighting_rep"
+
+
+@pytest.mark.asyncio
+async def test_fetch_event_type_display_map_builds_dict(mocker):
+    er_client = mocker.MagicMock()
+
+    async def fake_get_event_types():
+        return [
+            {"value": "poacher_sighting_rep", "display": "Poacher Sighting Report"},
+            {"value": "wildlife_sighting_rep", "display": "Wildlife Sighting Report"},
+            # Entries missing either field are skipped.
+            {"value": "no_display_rep"},
+            {"display": "No Slug"},
+        ]
+
+    er_client.get_event_types = fake_get_event_types
+    result = await _fetch_event_type_display_map(er_client)
+    assert result == {
+        "poacher_sighting_rep": "Poacher Sighting Report",
+        "wildlife_sighting_rep": "Wildlife Sighting Report",
+    }
+
+
+@pytest.mark.asyncio
+async def test_fetch_event_type_display_map_degrades_to_empty_on_403(mocker):
+    """If get_event_types fails with a 403 we degrade to an empty map (callers
+    then fall back to the event_type slug)."""
+    er_client = mocker.MagicMock()
+
+    async def boom():
+        # Mirror what erclient raises in production when the integration's
+        # credentials lack the 'eventtype:view' permission.
+        raise ERClientPermissionDenied(
+            "ER Forbidden ON GET https://gundi-er.pamdas.org/api/v1.0/activity/events/eventtypes.",
+            status_code=403,
+            response_body='{"status":{"code":403,"message":"Forbidden"}}',
+        )
+
+    er_client.get_event_types = boom
+    result = await _fetch_event_type_display_map(er_client)
+    assert result == {}
+
+
+@pytest.mark.asyncio
+async def test_pull_events_falls_back_to_slug_when_event_types_unavailable(
+        mocker, mock_gundi_client_v2, mock_state_manager, mock_get_gundi_api_key,
+        mock_gundi_sensors_client_class, er_integration_v2_provider,
+        mock_publish_event, mock_gundi_client_v2_class, mock_config_manager_er_provider,
+        mock_erclient_class,
+):
+    """End-to-end: get_event_types raises → titleless events still flow through to
+    Gundi with the event_type slug as their title."""
+    # The ER client raises on get_event_types but returns one titleless event
+    # from get_events. The handler should swallow the first error, treat the
+    # display map as empty, and fall back to the slug for the title.
+    async def boom():
+        raise ERClientPermissionDenied(
+            "ER Forbidden ON GET https://gundi-er.pamdas.org/api/v1.0/activity/events/eventtypes.",
+            status_code=403,
+            response_body="{}",
+        )
+
+    mock_erclient_class.return_value.get_event_types = boom
+
+    from app.actions.tests.conftest import AsyncIterator
+    titleless_event = {
+        "id": "untitled-event-uuid",
+        "event_type": "poacher_sighting_rep",
+        # Note: no 'title' key set.
+        "updated_at": "2026-06-09T00:00:00Z",
+        "created_at": "2026-06-09T00:00:00Z",
+    }
+    mock_erclient_class.return_value.get_events.return_value = AsyncIterator([[titleless_event]])
+
+    mocker.patch("app.services.action_runner._portal", mock_gundi_client_v2)
+    mocker.patch("app.services.activity_logger.publish_event", mock_publish_event)
+    mocker.patch("app.services.action_runner.publish_event", mock_publish_event)
+    mocker.patch("app.services.action_runner.config_manager", mock_config_manager_er_provider)
+    mocker.patch("app.actions.handlers.state_manager", mock_state_manager)
+    mocker.patch("app.actions.handlers.AsyncERClient", mock_erclient_class)
+    mocker.patch("app.services.gundi.GundiClient", mock_gundi_client_v2_class)
+    mocker.patch("app.services.gundi.GundiDataSenderClient", mock_gundi_sensors_client_class)
+    mocker.patch("app.services.gundi._get_gundi_api_key", mock_get_gundi_api_key)
+
+    await execute_action(
+        integration_id=str(er_integration_v2_provider.id),
+        action_id="pull_events",
+    )
+
+    # The event was forwarded once with the slug as the title.
+    post_events_calls = mock_gundi_sensors_client_class.return_value.post_events.call_args_list
+    assert len(post_events_calls) == 1
+    posted = post_events_calls[0].kwargs["data"]
+    assert posted[0]["title"] == "poacher_sighting_rep"
