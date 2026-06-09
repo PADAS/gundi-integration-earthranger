@@ -1,5 +1,8 @@
+import json
+
 import pytest
 from erclient import ERClientPermissionDenied
+from gundi_core.events import LogLevel
 
 from app.conftest import async_return
 from app.services.action_runner import execute_action
@@ -394,11 +397,16 @@ async def test_pull_events_event_type_and_category_filter_passed_to_er(
         mock_get_gundi_api_key, mock_gundi_sensors_client_class, er_integration_v2_provider,
         mock_publish_event, mock_gundi_client_v2_class, mock_config_manager_er_provider
 ):
-    """The configured event_types / event_categories are injected into the ER filter dict."""
+    """Operator-supplied event_type / event_category slugs are resolved to ER UUIDs
+    via get_event_types() and the UUIDs (not the slugs) are sent in the filter blob."""
     import json
     pull_events_data = er_integration_v2_provider.get_action_config("pull_events").data
-    pull_events_data["event_types"] = ["poacher_sighting_rep", "wildlife_sighting_rep"]
-    pull_events_data["event_categories"] = ["wildlife"]
+    # These slugs exist in the get_event_types_response conftest fixture:
+    #   wildlife_sighting → id 0ae08721-6b7c-4d5e-aeda-cb3d1a38926f
+    #   mapipedia_activity_rep → id cdcf6a31-5d64-4a5c-8bf9-bf7d146363d0
+    #   category "monitoring" → id 6b359461-aa53-4116-bf2c-04cc580de4ef
+    pull_events_data["event_types"] = ["wildlife_sighting", "mapipedia_activity_rep"]
+    pull_events_data["event_categories"] = ["monitoring"]
 
     mocker.patch("app.services.activity_logger.publish_event", mock_publish_event)
     mocker.patch("app.services.action_runner.publish_event", mock_publish_event)
@@ -416,8 +424,15 @@ async def test_pull_events_event_type_and_category_filter_passed_to_er(
     )
 
     er_filter = json.loads(mock_erclient_class.return_value.get_events.call_args.kwargs["filter"])
-    assert er_filter["event_type"] == ["poacher_sighting_rep", "wildlife_sighting_rep"]
-    assert er_filter["event_category"] == ["wildlife"]
+    # The filter carries the resolved UUIDs from the fixture, NOT the operator's
+    # slugs — ER's events endpoint filters by event_type__id__in (UUIDs), so
+    # passing raw slugs would have ER silently drop the filter and return
+    # everything matching only the date window (the bug this test now guards).
+    assert set(er_filter["event_type"]) == {
+        "0ae08721-6b7c-4d5e-aeda-cb3d1a38926f",     # wildlife_sighting
+        "cdcf6a31-5d64-4a5c-8bf9-bf7d146363d0",     # mapipedia_activity_rep
+    }
+    assert er_filter["event_category"] == ["6b359461-aa53-4116-bf2c-04cc580de4ef"]  # monitoring
 
 
 @pytest.mark.parametrize(
@@ -873,7 +888,9 @@ async def test_pull_events_skips_event_when_updated_at_unchanged(
 # ---------------------------------------------------------------------------
 
 from app.actions.handlers import (
-    _fetch_event_type_display_map,
+    EventTypeMaps,
+    _fetch_event_type_maps,
+    _resolve_slugs,
     transform_events_to_gundi_schema,
 )
 
@@ -923,35 +940,59 @@ def test_transform_events_no_display_map_arg_matches_prior_behavior():
 
 
 @pytest.mark.asyncio
-async def test_fetch_event_type_display_map_builds_dict(mocker):
+async def test_fetch_event_type_maps_builds_all_three_lookups(mocker):
+    """One get_event_types() call should populate display, type-id, and
+    category-id maps from the same payload."""
     er_client = mocker.MagicMock()
 
     async def fake_get_event_types():
         return [
-            {"value": "poacher_sighting_rep", "display": "Poacher Sighting Report"},
-            {"value": "wildlife_sighting_rep", "display": "Wildlife Sighting Report"},
-            # Entries missing either field are skipped.
-            {"value": "no_display_rep"},
-            {"display": "No Slug"},
+            {
+                "value": "poacher_sighting_rep",
+                "display": "Poacher Sighting Report",
+                "id": "type-uuid-1",
+                "category": {"value": "security", "id": "cat-uuid-1", "is_active": True},
+            },
+            {
+                "value": "wildlife_sighting_rep",
+                "display": "Wildlife Sighting Report",
+                "id": "type-uuid-2",
+                "category": {"value": "wildlife", "id": "cat-uuid-2", "is_active": True},
+            },
+            # Entry missing display still contributes to id_by_slug and category map.
+            {
+                "value": "no_display_rep",
+                "id": "type-uuid-3",
+                "category": {"value": "wildlife", "id": "cat-uuid-2"},
+            },
+            # Entry missing slug is skipped entirely.
+            {"display": "No Slug", "id": "type-uuid-x"},
         ]
 
     er_client.get_event_types = fake_get_event_types
-    result = await _fetch_event_type_display_map(er_client)
-    assert result == {
+    maps = await _fetch_event_type_maps(er_client)
+    assert maps.display_by_slug == {
         "poacher_sighting_rep": "Poacher Sighting Report",
         "wildlife_sighting_rep": "Wildlife Sighting Report",
+    }
+    assert maps.id_by_slug == {
+        "poacher_sighting_rep": "type-uuid-1",
+        "wildlife_sighting_rep": "type-uuid-2",
+        "no_display_rep": "type-uuid-3",
+    }
+    # Categories dedupe — "wildlife" appears twice but maps to one UUID.
+    assert maps.category_id_by_slug == {
+        "security": "cat-uuid-1",
+        "wildlife": "cat-uuid-2",
     }
 
 
 @pytest.mark.asyncio
-async def test_fetch_event_type_display_map_degrades_to_empty_on_403(mocker):
-    """If get_event_types fails with a 403 we degrade to an empty map (callers
-    then fall back to the event_type slug)."""
+async def test_fetch_event_type_maps_degrades_to_empty_on_403(mocker):
+    """If get_event_types fails with a 403 all three maps are empty."""
     er_client = mocker.MagicMock()
 
     async def boom():
-        # Mirror what erclient raises in production when the integration's
-        # credentials lack the 'eventtype:view' permission.
         raise ERClientPermissionDenied(
             "ER Forbidden ON GET https://gundi-er.pamdas.org/api/v1.0/activity/events/eventtypes.",
             status_code=403,
@@ -959,8 +1000,26 @@ async def test_fetch_event_type_display_map_degrades_to_empty_on_403(mocker):
         )
 
     er_client.get_event_types = boom
-    result = await _fetch_event_type_display_map(er_client)
-    assert result == {}
+    maps = await _fetch_event_type_maps(er_client)
+    assert isinstance(maps, EventTypeMaps)
+    assert maps.display_by_slug == {}
+    assert maps.id_by_slug == {}
+    assert maps.category_id_by_slug == {}
+
+
+def test_resolve_slugs_splits_known_from_unknown():
+    """Known slugs map to their IDs; unknowns surface separately for the WARN log."""
+    resolved, unresolved = _resolve_slugs(
+        ["a", "typo", "b"], {"a": "id-a", "b": "id-b", "c": "id-c"}
+    )
+    assert resolved == ["id-a", "id-b"]
+    assert unresolved == ["typo"]
+
+
+def test_resolve_slugs_with_empty_inputs():
+    """Both axes use this helper; empty config + empty map should noop cleanly."""
+    assert _resolve_slugs([], {"a": "id"}) == ([], [])
+    assert _resolve_slugs(["a"], {}) == ([], ["a"])
 
 
 @pytest.mark.asyncio
@@ -1014,3 +1073,86 @@ async def test_pull_events_falls_back_to_slug_when_event_types_unavailable(
     assert len(post_events_calls) == 1
     posted = post_events_calls[0].kwargs["data"]
     assert posted[0]["title"] == "poacher_sighting_rep"
+
+
+@pytest.mark.asyncio
+async def test_pull_events_skips_when_all_event_type_slugs_unresolvable(
+        mocker, mock_gundi_client_v2, mock_state_manager, mock_erclient_class,
+        mock_get_gundi_api_key, mock_gundi_sensors_client_class, er_integration_v2_provider,
+        mock_publish_event, mock_gundi_client_v2_class, mock_config_manager_er_provider,
+):
+    """If every configured event_type slug fails to resolve, skip the pull and
+    log ERROR — rather than silently fetching everything because ER drops
+    invalid filter blobs."""
+    pull_events_data = er_integration_v2_provider.get_action_config("pull_events").data
+    pull_events_data["event_types"] = ["typo_one", "typo_two"]
+    pull_events_data["event_categories"] = []
+
+    mock_log = mocker.patch("app.actions.handlers.log_action_activity")
+    mock_log.return_value = async_return(None)
+
+    mocker.patch("app.services.activity_logger.publish_event", mock_publish_event)
+    mocker.patch("app.services.action_runner.publish_event", mock_publish_event)
+    mocker.patch("app.services.action_runner.config_manager", mock_config_manager_er_provider)
+    mocker.patch("app.services.action_runner._portal", mock_gundi_client_v2)
+    mocker.patch("app.actions.handlers.state_manager", mock_state_manager)
+    mocker.patch("app.actions.handlers.AsyncERClient", mock_erclient_class)
+    mocker.patch("app.services.gundi.GundiClient", mock_gundi_client_v2_class)
+    mocker.patch("app.services.gundi.GundiDataSenderClient", mock_gundi_sensors_client_class)
+    mocker.patch("app.services.gundi._get_gundi_api_key", mock_get_gundi_api_key)
+
+    response = await execute_action(
+        integration_id=str(er_integration_v2_provider.id),
+        action_id="pull_events",
+    )
+
+    mock_erclient_class.return_value.get_events.assert_not_called()
+    mock_state_manager.set_state.assert_not_called()  # watermark NOT advanced
+    assert response["skipped_reason"] == "no_resolvable_event_types"
+    # An ERROR-level activity log named the typoed slugs so ops can fix it.
+    error_log = next(
+        c for c in mock_log.call_args_list
+        if c.kwargs.get("level") == LogLevel.ERROR
+    )
+    assert error_log.kwargs["data"]["configured_event_types"] == ["typo_one", "typo_two"]
+
+
+@pytest.mark.asyncio
+async def test_pull_events_warns_about_partially_unresolvable_slugs(
+        mocker, mock_gundi_client_v2, mock_state_manager, mock_erclient_class,
+        mock_get_gundi_api_key, mock_gundi_sensors_client_class, er_integration_v2_provider,
+        mock_publish_event, mock_gundi_client_v2_class, mock_config_manager_er_provider,
+):
+    """A mix of known-good and typoed slugs logs a WARNING and proceeds with
+    the known-good ones (better than failing the whole pull)."""
+    pull_events_data = er_integration_v2_provider.get_action_config("pull_events").data
+    pull_events_data["event_types"] = ["wildlife_sighting", "typo_slug"]
+    pull_events_data["event_categories"] = []
+
+    mock_log = mocker.patch("app.actions.handlers.log_action_activity")
+    mock_log.return_value = async_return(None)
+
+    mocker.patch("app.services.activity_logger.publish_event", mock_publish_event)
+    mocker.patch("app.services.action_runner.publish_event", mock_publish_event)
+    mocker.patch("app.services.action_runner.config_manager", mock_config_manager_er_provider)
+    mocker.patch("app.services.action_runner._portal", mock_gundi_client_v2)
+    mocker.patch("app.actions.handlers.state_manager", mock_state_manager)
+    mocker.patch("app.actions.handlers.AsyncERClient", mock_erclient_class)
+    mocker.patch("app.services.gundi.GundiClient", mock_gundi_client_v2_class)
+    mocker.patch("app.services.gundi.GundiDataSenderClient", mock_gundi_sensors_client_class)
+    mocker.patch("app.services.gundi._get_gundi_api_key", mock_get_gundi_api_key)
+
+    await execute_action(
+        integration_id=str(er_integration_v2_provider.id),
+        action_id="pull_events",
+    )
+
+    # We DID call get_events — with the one resolvable slug's UUID in the filter.
+    er_filter = json.loads(mock_erclient_class.return_value.get_events.call_args.kwargs["filter"])
+    assert er_filter["event_type"] == ["0ae08721-6b7c-4d5e-aeda-cb3d1a38926f"]
+    # And we surfaced the typoed slug via a WARNING activity log.
+    warning_log = next(
+        c for c in mock_log.call_args_list
+        if c.kwargs.get("level") == LogLevel.WARNING
+    )
+    assert warning_log.kwargs["data"]["unresolved_event_types"] == ["typo_slug"]

@@ -2,6 +2,8 @@ import json
 import datetime
 import logging
 from collections import defaultdict
+from dataclasses import dataclass, field
+from typing import Dict
 from urllib.parse import urlparse
 
 import httpx
@@ -398,20 +400,6 @@ async def action_pull_events(integration: Integration, action_config: PullEvents
         start_datetime = pull_config.start_datetime
     else:
         start_datetime = last_execution
-    date_filter_key = ER_EVENT_FILTER_KEY_BY_DATE_FIELD[pull_config.filter_date_field]
-    event_filter = {
-        date_filter_key: {
-            "lower": start_datetime
-        }
-    }
-    if pull_config.end_datetime:
-        event_filter[date_filter_key]["upper"] = pull_config.end_datetime
-    if pull_config.event_types:
-        event_filter["event_type"] = pull_config.event_types
-    if pull_config.event_categories:
-        event_filter["event_category"] = pull_config.event_categories
-    json_filter = json.dumps(event_filter)
-    logger.info(f"Extracting events with filter '{event_filter}'...")
     # Process events in batches. Per-event state in Redis (keyed by ER event UUID)
     # distinguishes never-seen events (post as new) from previously-forwarded events
     # whose updated_at has advanced (emit one update_event per detected change).
@@ -420,12 +408,81 @@ async def action_pull_events(integration: Integration, action_config: PullEvents
     updates_emitted = 0  # individual update_event calls (notes + field changes)
     events_skipped_unchanged = 0
     async with er_client as earth_ranger:
-        # Build a {slug → display} map once per pull so titleless events can fall back
-        # to a human-readable event-type name ("Poacher Sighting Report") instead of
-        # the raw slug ("poacher_sighting_rep") on downstream destinations like CMORE.
-        # Best-effort: if the lookup fails (e.g. credentials lack the permission), we
-        # degrade to slug-only and log a warning rather than failing the whole pull.
-        event_type_display_by_slug = await _fetch_event_type_display_map(earth_ranger)
+        # One get_event_types() call powers two things:
+        #   1) Operator-configured event_type / event_category slugs must be
+        #      resolved to UUIDs before being sent in the ER filter blob —
+        #      ER filters by event_type__id__in, not by slug.
+        #   2) Titleless events fall back to the EventType display name.
+        # Best-effort: if the lookup fails we degrade gracefully.
+        event_type_maps = await _fetch_event_type_maps(earth_ranger)
+        event_type_display_by_slug = event_type_maps.display_by_slug
+
+        # Resolve configured slugs → ER UUIDs for the filter.
+        resolved_type_ids, unresolved_types = _resolve_slugs(
+            pull_config.event_types, event_type_maps.id_by_slug
+        )
+        resolved_category_ids, unresolved_categories = _resolve_slugs(
+            pull_config.event_categories, event_type_maps.category_id_by_slug
+        )
+        if unresolved_types or unresolved_categories:
+            await log_action_activity(
+                integration_id=integration_id,
+                action_id="pull_events",
+                title="Some configured event-type/category slugs do not exist on this ER instance",
+                level=LogLevel.WARNING,
+                data={
+                    "unresolved_event_types": unresolved_types,
+                    "unresolved_event_categories": unresolved_categories,
+                },
+            )
+        # If the operator configured filters and NONE resolve, the safer action
+        # is to skip the pull rather than silently fetch everything (which is
+        # what ER does when the filter blob is dropped). Watermark is NOT
+        # advanced so a fix to the typo / permission can re-pull the window.
+        if pull_config.event_types and not resolved_type_ids:
+            await log_action_activity(
+                integration_id=integration_id,
+                action_id="pull_events",
+                title="No configured event_types resolved to ER UUIDs; skipping pull",
+                level=LogLevel.ERROR,
+                data={"configured_event_types": list(pull_config.event_types)},
+            )
+            return {
+                "events_extracted": 0,
+                "events_updated": 0,
+                "updates_emitted": 0,
+                "events_skipped_unchanged": 0,
+                "skipped_reason": "no_resolvable_event_types",
+            }
+        if pull_config.event_categories and not resolved_category_ids:
+            await log_action_activity(
+                integration_id=integration_id,
+                action_id="pull_events",
+                title="No configured event_categories resolved to ER UUIDs; skipping pull",
+                level=LogLevel.ERROR,
+                data={"configured_event_categories": list(pull_config.event_categories)},
+            )
+            return {
+                "events_extracted": 0,
+                "events_updated": 0,
+                "updates_emitted": 0,
+                "events_skipped_unchanged": 0,
+                "skipped_reason": "no_resolvable_event_categories",
+            }
+
+        date_filter_key = ER_EVENT_FILTER_KEY_BY_DATE_FIELD[pull_config.filter_date_field]
+        event_filter = {
+            date_filter_key: {"lower": start_datetime}
+        }
+        if pull_config.end_datetime:
+            event_filter[date_filter_key]["upper"] = pull_config.end_datetime
+        if resolved_type_ids:
+            event_filter["event_type"] = resolved_type_ids
+        if resolved_category_ids:
+            event_filter["event_category"] = resolved_category_ids
+        json_filter = json.dumps(event_filter)
+        logger.info(f"Extracting events with filter '{event_filter}'...")
+
         async for event_batch in earth_ranger.get_events(filter=json_filter, batch_size=BATCH_SIZE):
             for er_event in event_batch:
                 er_event_uuid = er_event.get("id")
@@ -653,28 +710,77 @@ def get_authentication_config(integration):
     return AuthenticateConfig.parse_obj(auth_action_config.data)
 
 
-async def _fetch_event_type_display_map(er_client):
-    """Build a {slug: display_name} map from ER's event-types endpoint.
+@dataclass
+class EventTypeMaps:
+    """Three lookup tables derived from a single ER get_event_types() call.
 
-    Used as a fallback so events missing their own title get a human-readable
-    label downstream (e.g. "Poacher Sighting Report") rather than the raw slug
-    ("poacher_sighting_rep"). Returns an empty dict on any failure — the caller
-    treats this as best-effort.
+    - ``display_by_slug``: slug → human-readable display name. Used as the
+      title fallback when an ER event has no title of its own.
+    - ``id_by_slug``: slug → ER EventType UUID. ER's events endpoint filters
+      by ``event_type__id__in`` (UUIDs), not by slug, so operator-supplied
+      slugs must be resolved before being sent in the filter blob.
+    - ``category_id_by_slug``: category slug → ER EventCategory UUID. Same
+      story for ``event_type__category__id__in``.
+    """
+    display_by_slug: Dict[str, str] = field(default_factory=dict)
+    id_by_slug: Dict[str, str] = field(default_factory=dict)
+    category_id_by_slug: Dict[str, str] = field(default_factory=dict)
+
+
+async def _fetch_event_type_maps(er_client) -> EventTypeMaps:
+    """Build slug→display, slug→type_id, and category_slug→category_id maps
+    from a single ER get_event_types() call.
+
+    Best-effort: if the lookup fails (e.g. credentials lack the permission to
+    read event types), returns an empty ``EventTypeMaps`` and logs a warning.
+    Downstream behavior on empty maps:
+
+    - Titleless events fall back to the event_type slug (existing behavior).
+    - Operator-configured filter slugs that can't resolve get a WARNING; if
+      ALL configured slugs are unresolvable, the pull is skipped entirely
+      rather than silently fetching everything.
     """
     try:
         event_types = await er_client.get_event_types()
     except Exception as e:
         logger.warning(
-            "Could not fetch ER event types for title-fallback map: %s: %s. "
-            "Titleless events will fall back to the event_type slug.",
+            "Could not fetch ER event types: %s: %s. "
+            "Operator-configured filter slugs will not resolve and titleless "
+            "events will fall back to the event_type slug.",
             type(e).__name__, e,
         )
-        return {}
-    return {
-        et["value"]: et.get("display")
-        for et in event_types
-        if et.get("value") and et.get("display")
-    }
+        return EventTypeMaps()
+
+    maps = EventTypeMaps()
+    for et in event_types:
+        slug = et.get("value")
+        if not slug:
+            continue
+        if et.get("display"):
+            maps.display_by_slug[slug] = et["display"]
+        if et.get("id"):
+            maps.id_by_slug[slug] = et["id"]
+        category = et.get("category") or {}
+        cat_slug = category.get("value")
+        cat_id = category.get("id")
+        if cat_slug and cat_id:
+            maps.category_id_by_slug[cat_slug] = cat_id
+    return maps
+
+
+def _resolve_slugs(configured_slugs, slug_to_id):
+    """Split ``configured_slugs`` into (resolved_ids, unresolved_slugs).
+
+    Used for both event_types and event_categories — same shape on both sides.
+    """
+    resolved = []
+    unresolved = []
+    for slug in configured_slugs:
+        if slug in slug_to_id:
+            resolved.append(slug_to_id[slug])
+        else:
+            unresolved.append(slug)
+    return resolved, unresolved
 
 
 def transform_events_to_gundi_schema(events, event_type_display_by_slug=None):
