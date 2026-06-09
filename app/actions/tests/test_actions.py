@@ -412,6 +412,51 @@ async def test_pull_events_event_type_and_category_filter_passed_to_er(
     assert er_filter["event_category"] == ["wildlife"]
 
 
+@pytest.mark.parametrize(
+    "filter_date_field, expected_er_key",
+    [
+        (None, "update_date"),                # default — no config override
+        ("updated_at", "update_date"),
+        ("event_time", "date_range"),
+        ("created_at", "create_date"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_pull_events_date_field_maps_to_er_filter_key(
+        mocker, filter_date_field, expected_er_key,
+        mock_gundi_client_v2, mock_state_manager, mock_erclient_class,
+        mock_get_gundi_api_key, mock_gundi_sensors_client_class, er_integration_v2_provider,
+        mock_publish_event, mock_gundi_client_v2_class, mock_config_manager_er_provider
+):
+    """The configured filter_date_field selects which ER filter key the date window goes into."""
+    import json
+    pull_events_data = er_integration_v2_provider.get_action_config("pull_events").data
+    if filter_date_field is not None:
+        pull_events_data["filter_date_field"] = filter_date_field
+
+    mocker.patch("app.services.activity_logger.publish_event", mock_publish_event)
+    mocker.patch("app.services.action_runner.publish_event", mock_publish_event)
+    mocker.patch("app.services.action_runner.config_manager", mock_config_manager_er_provider)
+    mocker.patch("app.services.action_runner._portal", mock_gundi_client_v2)
+    mocker.patch("app.actions.handlers.state_manager", mock_state_manager)
+    mocker.patch("app.actions.handlers.AsyncERClient", mock_erclient_class)
+    mocker.patch("app.services.gundi.GundiClient", mock_gundi_client_v2_class)
+    mocker.patch("app.services.gundi.GundiDataSenderClient", mock_gundi_sensors_client_class)
+    mocker.patch("app.services.gundi._get_gundi_api_key", mock_get_gundi_api_key)
+
+    await execute_action(
+        integration_id=str(er_integration_v2_provider.id),
+        action_id="pull_events",
+    )
+
+    er_filter = json.loads(mock_erclient_class.return_value.get_events.call_args.kwargs["filter"])
+    other_keys = {"date_range", "create_date", "update_date"} - {expected_er_key}
+    assert expected_er_key in er_filter
+    assert "lower" in er_filter[expected_er_key]
+    for k in other_keys:
+        assert k not in er_filter
+
+
 # ---------------------------------------------------------------------------
 # Filtering: _resolve_source_ids unit tests
 # ---------------------------------------------------------------------------
