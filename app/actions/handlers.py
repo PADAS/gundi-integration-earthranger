@@ -379,6 +379,10 @@ async def action_pull_events(integration: Integration, action_config: PullEvents
     auth_config = get_authentication_config(integration=integration)
     # Prepare the ER client to extract events
     url_parse = urlparse(integration.base_url)
+    # UI root for deep-link URLs stamped onto each event's provider_metadata so
+    # downstream destinations (CMORE) can render a click-through back to the
+    # source ER event.
+    er_ui_root = _er_ui_root(url_parse)
     er_client = AsyncERClient(
         service_root=f"{url_parse.scheme}://{url_parse.hostname}/api/v1.0",
         username=auth_config.username or None,
@@ -499,6 +503,7 @@ async def action_pull_events(integration: Integration, action_config: PullEvents
                     transformed = transform_events_to_gundi_schema(
                         events=[er_event],
                         event_type_display_by_slug=event_type_display_by_slug,
+                        er_ui_root=er_ui_root,
                     )
                     if not transformed:
                         continue
@@ -834,13 +839,30 @@ def _resolve_slugs(configured_slugs, slug_to_id):
     return resolved, unresolved
 
 
-def transform_events_to_gundi_schema(events, event_type_display_by_slug=None):
+def _er_ui_root(url_parse) -> str:
+    """Strip path/query/fragment from a parsed ER integration base URL,
+    leaving just ``scheme://netloc`` (so ports survive). Returns an empty
+    string if the URL is unparseable, which downstream code treats as
+    "skip the deep-link" rather than emitting a malformed URL.
+    """
+    if not (url_parse.scheme and url_parse.netloc):
+        return ""
+    return f"{url_parse.scheme}://{url_parse.netloc}"
+
+
+def transform_events_to_gundi_schema(events, event_type_display_by_slug=None, er_ui_root=None):
     """Map an ER event payload list to the Gundi sensors-API event schema.
 
     ``event_type_display_by_slug`` is an optional {slug: display} map used as
     the title fallback when the ER event has no title of its own. If omitted
     or the slug isn't in the map, falls through to the slug itself — matching
     the prior behavior.
+
+    ``er_ui_root`` is an optional ``scheme://netloc`` string for the ER web
+    UI. When supplied, each transformed event's ``provider_metadata.source_event_url``
+    points at the source ER event so downstream destinations can render a
+    click-through cross-reference. Requires gundi-core 1.12.0+ (the
+    ``Event.provider_metadata`` field) and a cdip serializer that accepts it.
     """
     display_map = event_type_display_by_slug or {}
     transformed_data = []
@@ -867,7 +889,16 @@ def transform_events_to_gundi_schema(events, event_type_display_by_slug=None):
                     "lon": location.get("longitude"),
                     "lat": location.get("latitude")
                 }
-            # Save others fields in additional
+            # Provider-side cross-reference: deep-link back to the ER UI for
+            # this event. Surfaced by downstream destinations (e.g. CMORE
+            # appends it to the event description). Only set when both inputs
+            # are present so we never emit a malformed URL.
+            er_event_id = event.get("id")
+            if er_ui_root and er_event_id:
+                transformed_event["provider_metadata"] = {
+                    "source_event_url": f"{er_ui_root}/events/{er_event_id}",
+                }
+            # Save other fields in additional
             transformed_event["additional"] = {
                 key: value for key, value in event.items()
                 if key not in transformed_event.keys()
