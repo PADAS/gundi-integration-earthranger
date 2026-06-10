@@ -383,6 +383,13 @@ async def action_pull_events(integration: Integration, action_config: PullEvents
     # downstream destinations (CMORE) can render a click-through back to the
     # source ER event.
     er_ui_root = _er_ui_root(url_parse)
+    # Diagnostic: surface the computed UI root so an empty value (e.g. from a
+    # misconfigured base_url) explains a missing deep-link in downstream
+    # destinations like CMORE.
+    logger.info(
+        "pull_events: integration.base_url=%r → er_ui_root=%r",
+        integration.base_url, er_ui_root,
+    )
     er_client = AsyncERClient(
         service_root=f"{url_parse.scheme}://{url_parse.hostname}/api/v1.0",
         username=auth_config.username or None,
@@ -507,6 +514,17 @@ async def action_pull_events(integration: Integration, action_config: PullEvents
                     )
                     if not transformed:
                         continue
+                    # Diagnostic: log what we're about to POST so a downstream
+                    # destination seeing an unexpected payload (e.g. CMORE
+                    # rendering provider_metadata=None) can be traced back to
+                    # the ER runner's outbound shape.
+                    logger.info(
+                        "Posting Gundi event: er_event_uuid=%r title=%r "
+                        "provider_metadata=%r",
+                        er_event_uuid,
+                        transformed[0].get("title"),
+                        transformed[0].get("provider_metadata"),
+                    )
                     response = await send_events_to_gundi(
                         events=transformed, integration_id=integration_id
                     )
