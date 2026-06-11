@@ -900,7 +900,9 @@ def transform_events_to_gundi_schema(events, event_type_display_by_slug=None, er
             title = event.get("title") or display_map.get(event_type) or event_type
             if title:
                 transformed_event["title"] = title
-            if recorded_at := event.get("created_at"):
+            # Use the event's own time, not created_at (which is the save
+            # time) — CMORE shows recorded_at as the event's dateOccurred.
+            if recorded_at := event.get("time") or event.get("created_at"):
                 transformed_event["recorded_at"] = recorded_at
             if geometry := event.get("geojson"):
                 transformed_event["geometry"] = geometry
@@ -911,15 +913,20 @@ def transform_events_to_gundi_schema(events, event_type_display_by_slug=None, er
                     "lon": location.get("longitude"),
                     "lat": location.get("latitude")
                 }
-            # Provider-side cross-reference: deep-link back to the ER UI for
-            # this event. Surfaced by downstream destinations (e.g. CMORE
-            # appends it to the event description). Only set when both inputs
-            # are present so we never emit a malformed URL.
+            # Provider-side metadata surfaced by downstream destinations
+            # (e.g. CMORE renders the deep-link as a comment and the serial
+            # number in the event title). Each piece is only added when
+            # available, and Event has no `additional` field, so this is the
+            # channel for passing through provider context like serial_number.
+            provider_metadata = {}
             er_event_id = event.get("id")
             if er_ui_root and er_event_id:
-                transformed_event["provider_metadata"] = {
-                    "source_event_url": f"{er_ui_root}/events/{er_event_id}",
-                }
+                provider_metadata["source_event_url"] = f"{er_ui_root}/events/{er_event_id}"
+            serial_number = event.get("serial_number")
+            if serial_number is not None:
+                provider_metadata["serial_number"] = serial_number
+            if provider_metadata:
+                transformed_event["provider_metadata"] = provider_metadata
             # Save other fields in additional
             transformed_event["additional"] = {
                 key: value for key, value in event.items()
