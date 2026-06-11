@@ -1289,3 +1289,44 @@ def test_transform_events_omits_provider_metadata_when_event_id_missing():
         er_ui_root="https://gundi-dev.staging.pamdas.org",
     )
     assert "provider_metadata" not in transformed[0]
+
+
+def test_transform_events_uses_event_time_for_recorded_at():
+    """recorded_at is the event's own ``time``, not ``created_at`` (the save
+    time) — CMORE shows it as the event's dateOccurred."""
+    transformed = transform_events_to_gundi_schema(
+        events=[{
+            "id": "x", "event_type": "wildlife_sighting",
+            "time": "2026-06-10T13:03:25-07:00",
+            "created_at": "2026-06-10T13:04:02-07:00",
+        }],
+    )
+    assert transformed[0]["recorded_at"] == "2026-06-10T13:03:25-07:00"
+
+
+def test_transform_events_recorded_at_falls_back_to_created_at():
+    """No ``time`` → fall back to ``created_at`` (prior behavior)."""
+    transformed = transform_events_to_gundi_schema(
+        events=[{"id": "x", "event_type": "wildlife_sighting", "created_at": "2026-06-10T13:04:02-07:00"}],
+    )
+    assert transformed[0]["recorded_at"] == "2026-06-10T13:04:02-07:00"
+
+
+def test_transform_events_includes_serial_number_in_provider_metadata():
+    """The ER serial_number rides in provider_metadata (Event has no `additional`),
+    alongside the deep-link, for CMORE to render in the title and comment."""
+    transformed = transform_events_to_gundi_schema(
+        events=[{"id": "907a54b9", "event_type": "rhino_carcass", "serial_number": 267}],
+        er_ui_root="https://gundi-dev.staging.pamdas.org",
+    )
+    pm = transformed[0]["provider_metadata"]
+    assert pm["serial_number"] == 267
+    assert pm["source_event_url"] == "https://gundi-dev.staging.pamdas.org/events/907a54b9"
+
+
+def test_transform_events_serial_number_without_ui_root():
+    """serial_number is included even when there's no er_ui_root (no deep-link)."""
+    transformed = transform_events_to_gundi_schema(
+        events=[{"id": "x", "event_type": "rhino_carcass", "serial_number": 5}],
+    )
+    assert transformed[0]["provider_metadata"] == {"serial_number": 5}
