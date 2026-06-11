@@ -939,6 +939,21 @@ def test_transform_events_no_display_map_arg_matches_prior_behavior():
     assert transformed[0]["title"] == "poacher_sighting_rep"
 
 
+def test_transform_events_sets_source_to_event_type():
+    """ER events have no per-device source, so the event_type is used as the
+    Gundi source (external_source_id) instead of defaulting to 'default-source'."""
+    transformed = transform_events_to_gundi_schema(
+        events=[{"id": "x", "event_type": "rhino_carcass"}],
+    )
+    assert transformed[0]["source"] == "rhino_carcass"
+
+
+def test_transform_events_omits_source_when_event_type_missing():
+    """No event_type → no source set (let downstream default it)."""
+    transformed = transform_events_to_gundi_schema(events=[{"id": "x"}])
+    assert "source" not in transformed[0]
+
+
 @pytest.mark.asyncio
 async def test_fetch_event_type_maps_merges_v1_and_v2(mocker):
     """ER's v1 and v2 event-type endpoints each return only their own version's

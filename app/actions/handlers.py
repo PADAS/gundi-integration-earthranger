@@ -891,6 +891,10 @@ def transform_events_to_gundi_schema(events, event_type_display_by_slug=None, er
             event_type = event.get("event_type")
             if event_type:
                 transformed_event["event_type"] = event_type
+                # ER events have no per-device source; use the event_type as the
+                # source so Gundi groups them sensibly (external_source_id)
+                # rather than defaulting everything to "default-source".
+                transformed_event["source"] = event_type
             # Prefer the ER event's own title; otherwise fall back to the
             # event-type display name; otherwise the slug; otherwise nothing.
             title = event.get("title") or display_map.get(event_type) or event_type
