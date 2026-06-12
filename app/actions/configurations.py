@@ -157,6 +157,19 @@ class PullObservationsConfig(PullActionConfiguration):
             "An empty list applies no group constraint."
         ),
     )
+    # This integration is most often used only as a destination, so scheduled
+    # pulling is OFF by default — the scheduler skips this action quietly until
+    # an operator opts in. Enable it on integrations that should pull
+    # observations from EarthRanger.
+    run_on_schedule: bool = Field(
+        False,
+        title="Run On Schedule",
+        description=(
+            "When enabled, this action runs automatically on its configured schedule. "
+            "Off by default — enable it for integrations that should pull observations from "
+            "EarthRanger; leave it off when this integration is used only as a destination."
+        ),
+    )
 
     ui_global_options: GlobalUISchemaOptions = GlobalUISchemaOptions(
         order=["start_datetime", "end_datetime", "subject_group_ids", "force_run_since_start", "run_on_schedule"],
@@ -226,6 +239,19 @@ class PullEventsConfig(PullActionConfiguration):
             "List of ER event-category slugs, e.g. ['wildlife', 'monitoring']. "
             "ER applies type and category filters with AND semantics. "
             "An empty list applies no category constraint."
+        ),
+    )
+    # This integration is most often used only as a destination, so scheduled
+    # pulling is OFF by default — the scheduler skips this action quietly until
+    # an operator opts in. Enable it on integrations that should pull events
+    # from EarthRanger.
+    run_on_schedule: bool = Field(
+        False,
+        title="Run On Schedule",
+        description=(
+            "When enabled, this action runs automatically on its configured schedule. "
+            "Off by default — enable it for integrations that should pull events from "
+            "EarthRanger; leave it off when this integration is used only as a destination."
         ),
     )
 
