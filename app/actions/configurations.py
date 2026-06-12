@@ -159,7 +159,7 @@ class PullObservationsConfig(PullActionConfiguration):
     )
 
     ui_global_options: GlobalUISchemaOptions = GlobalUISchemaOptions(
-        order=["start_datetime", "end_datetime", "subject_group_ids", "force_run_since_start"],
+        order=["start_datetime", "end_datetime", "subject_group_ids", "force_run_since_start", "run_on_schedule"],
     )
 
 
@@ -230,6 +230,6 @@ class PullEventsConfig(PullActionConfiguration):
     )
 
     ui_global_options: GlobalUISchemaOptions = GlobalUISchemaOptions(
-        order=["start_datetime", "end_datetime", "filter_date_field", "event_types", "event_categories", "force_run_since_start"],
+        order=["start_datetime", "end_datetime", "filter_date_field", "event_types", "event_categories", "force_run_since_start", "run_on_schedule"],
     )
 
