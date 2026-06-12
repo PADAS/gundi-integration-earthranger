@@ -6,6 +6,18 @@ from gundi_core.events import LogLevel
 
 from app.conftest import async_return
 from app.services.action_runner import execute_action
+from app.actions.configurations import PullEventsConfig, PullObservationsConfig
+
+
+@pytest.mark.parametrize("config_cls", [PullEventsConfig, PullObservationsConfig])
+def test_pull_actions_default_run_on_schedule_off(config_cls):
+    # This integration is most often used only as a destination, so scheduled
+    # pulling must be opt-in: run_on_schedule defaults False and an operator
+    # enables it explicitly on real source integrations.
+    config = config_cls(start_datetime="2024-01-01T00:00:00Z")
+    assert config.run_on_schedule is False
+    enabled = config_cls(start_datetime="2024-01-01T00:00:00Z", run_on_schedule=True)
+    assert enabled.run_on_schedule is True
 
 
 @pytest.mark.asyncio
