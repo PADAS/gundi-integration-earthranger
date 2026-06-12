@@ -139,6 +139,27 @@ def mock_redis_with_action_config(mocker, pull_observations_config_as_json):
 
 
 @pytest.fixture
+def mock_redis_with_webhook_config(mocker, integration_v2_with_webhook):
+    redis = MagicMock()
+    redis_client = mocker.MagicMock()
+    redis_client.set.return_value = async_return(MagicMock())
+    # Return webhook config JSON when asked for webhook key
+    webhook_config_json = integration_v2_with_webhook.webhook_configuration.json()
+    redis_client.get.return_value = async_return(webhook_config_json)
+    redis_client.delete.return_value = async_return(MagicMock())
+    redis_client.setex.return_value = async_return(None)
+    redis_client.incr.return_value = redis_client
+    redis_client.decr.return_value = async_return(None)
+    redis_client.expire.return_value = redis_client
+    redis_client.execute.return_value = async_return((1, True))
+    redis_client.__aenter__.return_value = redis_client
+    redis_client.__aexit__.return_value = None
+    redis_client.pipeline.return_value = redis_client
+    redis.Redis.return_value = redis_client
+    return redis
+
+
+@pytest.fixture
 def pull_observations_config_as_json():
     return json.dumps(
         {
@@ -600,6 +621,15 @@ def integration_v2_with_webhook_generic():
 
 
 @pytest.fixture
+def integration_v2_with_diagnostic_webhook(integration_v2_with_webhook_generic):
+    data = integration_v2_with_webhook_generic.dict()
+    data["webhook_configuration"]["data"]["diagnostic_destination_url"] = (
+        "https://diagnostics.example.com/webhook-dump"
+    )
+    return Integration.parse_obj(data)
+
+
+@pytest.fixture
 def mock_generic_webhook_config():
     return {
         "jq_filter": '{     "source": .end_device_ids.device_id,     "source_name": .end_device_ids.device_id,     "type": .uplink_message.locations."frm-payload".source,     "recorded_at": .uplink_message.settings.time,     "location": {       "lat": .uplink_message.locations."frm-payload".latitude,       "lon": .uplink_message.locations."frm-payload".longitude     },     "additional": {       "application_id": .end_device_ids.application_ids.application_id,       "dev_eui": .end_device_ids.dev_eui,       "dev_addr": .end_device_ids.dev_addr,       "batterypercent": .uplink_message.decoded_payload.batterypercent,       "gps": .uplink_message.decoded_payload.gps     }   }',
@@ -790,6 +820,30 @@ def mock_gundi_client_v2_class(mocker, mock_gundi_client_v2):
 
 
 @pytest.fixture
+def mock_gundi_client_v2_class_for_webhooks(mocker, integration_v2_with_webhook):
+    """Mock GundiClient class for webhook tests that need cache miss simulation"""
+    mock_gundi_client_v2_class = mocker.MagicMock()
+    mock_gundi_instance = mocker.AsyncMock()
+    mock_gundi_instance.get_integration_details = mocker.AsyncMock(return_value=integration_v2_with_webhook)
+    mock_gundi_client_v2_class.return_value.__aenter__.return_value = mock_gundi_instance
+    mock_gundi_client_v2_class.return_value.__aexit__.return_value = None
+    return mock_gundi_client_v2_class
+
+
+@pytest.fixture
+def mock_gundi_client_v2_class_with_error(mocker):
+    """Mock GundiClient class that raises an exception for error testing"""
+    mock_gundi_client_v2_class = mocker.MagicMock()
+    mock_gundi_instance = mocker.AsyncMock()
+    mock_gundi_instance.get_integration_details = mocker.AsyncMock(
+        side_effect=Exception("Gundi API unavailable")
+    )
+    mock_gundi_client_v2_class.return_value.__aenter__.return_value = mock_gundi_instance
+    mock_gundi_client_v2_class.return_value.__aexit__.return_value = None
+    return mock_gundi_client_v2_class
+
+
+@pytest.fixture
 def mock_gundi_sensors_client_class(
     mocker,
     events_created_response,
@@ -866,6 +920,9 @@ def mock_state_manager(mocker):
         {"last_execution": "2023-11-17T11:20:00+0200"}
     )
     mock_state_manager.set_state.return_value = async_return(None)
+    # Default: throttle window is open (first-in-window), so throttled events
+    # publish. Tests that exercise the suppressed path override this.
+    mock_state_manager.set_if_absent.return_value = async_return(True)
     return mock_state_manager
 
 
