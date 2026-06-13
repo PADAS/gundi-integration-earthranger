@@ -1474,3 +1474,10 @@ def test_iter_subwindows_multiday_stride():
         ("2025-01-01T00:00:00+00:00", "2025-01-08T00:00:00+00:00"),
         ("2025-01-08T00:00:00+00:00", "2025-01-15T00:00:00+00:00"),
     ]
+
+
+def test_pull_observations_config_backfill_defaults():
+    from app.actions.configurations import PullObservationsConfig
+    cfg = PullObservationsConfig(start_datetime="2025-01-01T00:00:00+00:00")
+    assert cfg.subwindow_days == 1
+    assert cfg.continue_immediately is False
