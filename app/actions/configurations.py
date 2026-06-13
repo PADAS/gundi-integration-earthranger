@@ -133,7 +133,8 @@ class PullObservationsConfig(PullActionConfiguration):
         description=(
             "Optional ISO-8601 ceiling on recorded_at. Sent to ER on every run, even after the "
             "internal watermark has advanced — leave empty for ongoing pulls and only set it for "
-            "bounded historical backfills."
+            "bounded historical backfills. After a bounded backfill finishes, clear this field "
+            "(otherwise every later run recomputes an empty window and logs an empty completion)."
         ),
         format="date-time",
         ui_options=UIOptions(widget="date-time"),
@@ -157,6 +158,28 @@ class PullObservationsConfig(PullActionConfiguration):
             "An empty list applies no group constraint."
         ),
     )
+    subwindow_days: int = FieldWithUIOptions(
+        1,
+        title="Sub-window Size (days)",
+        description=(
+            "Backfill granularity: the pull processes the [start, end] window in "
+            "slices this many days wide, per source, committing progress after each "
+            "slice. Smaller values bound memory and re-work on resume; larger values "
+            "reduce per-slice overhead. Default 1."
+        ),
+        ge=1,
+        ui_options=UIOptions(widget="updown"),
+    )
+    continue_immediately: bool = FieldWithUIOptions(
+        False,
+        title="Continue Immediately (self-re-trigger)",
+        description=(
+            "When a run hits its time budget with work remaining, immediately "
+            "re-trigger the next chunk via PubSub instead of waiting for the next "
+            "scheduled tick. Faster backfills, but requires INTEGRATION_COMMANDS_TOPIC "
+            "to be configured. Off by default (scheduler-driven catch-up)."
+        ),
+    )
     # This integration is most often used only as a destination, so scheduled
     # pulling is OFF by default — the scheduler skips this action quietly until
     # an operator opts in. Enable it on integrations that should pull
@@ -172,7 +195,7 @@ class PullObservationsConfig(PullActionConfiguration):
     )
 
     ui_global_options: GlobalUISchemaOptions = GlobalUISchemaOptions(
-        order=["start_datetime", "end_datetime", "subject_group_ids", "force_run_since_start", "run_on_schedule"],
+        order=["start_datetime", "end_datetime", "subject_group_ids", "subwindow_days", "force_run_since_start", "continue_immediately", "run_on_schedule"],
     )
 
 

@@ -273,6 +273,9 @@ def mock_state_manager(mocker):
         {'last_execution': '2023-11-17T11:20:00+0200'}
     )
     mock_state_manager.set_state.return_value = async_return(None)
+    # Backfill lease + cursor-clear primitives. Default: lease acquired.
+    mock_state_manager.set_if_absent.return_value = async_return(True)
+    mock_state_manager.delete_state.return_value = async_return(None)
     return mock_state_manager
 
 

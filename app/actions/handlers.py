@@ -1,6 +1,7 @@
 import json
 import datetime
 import logging
+import time
 from collections import defaultdict
 from dataclasses import dataclass, field
 from typing import Dict
@@ -8,23 +9,31 @@ from urllib.parse import urlparse
 
 import httpx
 import stamina
+from dateutil import parser as dateutil_parser
 from erclient import AsyncERClient, ERClientException, VERSION_1_0, VERSION_2_0
 from erclient.er_errors import ERClientBadCredentials
 from gundi_client_v2.client import GundiClient
 from gundi_core.events import LogLevel
 from gundi_core.schemas.v2 import Integration
+from app import settings
 from app.services.utils import find_config_for_action
 from app.services.state import IntegrationStateManager
 from .configurations import AuthenticateConfig, EventFilterDateField, PullObservationsConfig, PullEventsConfig, \
     ERAuthenticationType, ShowPermissionsConfig
 from ..services.activity_logger import activity_logger, log_action_activity
 from ..services.gundi import send_events_to_gundi, send_observations_to_gundi, update_event_in_gundi
+from ..services.action_scheduler import trigger_action
 
 logger = logging.getLogger(__name__)
 
 
 DEFAULT_CONNECT_TIMEOUT_SECONDS = 10.0
 BATCH_SIZE = 100
+SUBJECT_ID_CHUNK_SIZE = 25
+BUDGET_FRACTION = 0.8            # fraction of MAX_ACTION_EXECUTION_TIME before yielding
+MAX_NO_PROGRESS_RETRIES = 3      # self-re-trigger runaway guard
+LOCK_MARGIN_SECONDS = 30         # lease TTL margin above the hard timeout
+BACKFILL_LOCK_SOURCE_ID = "backfill-lock"
 state_manager = IntegrationStateManager()
 
 # Maps the operator-selected date field to the corresponding key on ER's
@@ -597,12 +606,9 @@ async def action_pull_observations(integration: Integration, action_config: Pull
     logger.info(
         f"Extracting observations for integration {integration_id}, with config {action_config}",
     )
-    total_observations = 0
     execution_timestamp = datetime.datetime.now(tz=datetime.timezone.utc).isoformat()
-    # Parse configurations
     pull_config = action_config
     auth_config = get_authentication_config(integration=integration)
-    # Prepare the ER client to extract events
     url_parse = urlparse(integration.base_url)
     er_client = AsyncERClient(
         service_root=f"{url_parse.scheme}://{url_parse.hostname}/api/v1.0",
@@ -613,86 +619,252 @@ async def action_pull_observations(integration: Integration, action_config: Pull
         client_id="das_web_client",
         connect_timeout=DEFAULT_CONNECT_TIMEOUT_SECONDS,
     )
-    # Prepare filters to extract Data Since last execution
-    state = await state_manager.get_state(
-        integration_id=integration_id, action_id="pull_observations"
-    )
-    logger.debug(
-        f"State retrieved for integration {integration_id}, action pull_observations:\n{state}"
-    )
-    last_execution = state.get("last_execution")
-    if not last_execution or pull_config.force_run_since_start:
-        start_datetime = pull_config.start_datetime
-    else:
-        start_datetime = last_execution
-    params = {
-        "start": start_datetime,
-        "batch_size": BATCH_SIZE
-    }
-    if pull_config.end_datetime:
-        params["end"] = pull_config.end_datetime
-    # Process events in batches
-    logger.info(f"Extracting observations with params '{params}'...")
+
+    start_monotonic = time.monotonic()
+    soft_budget = settings.MAX_ACTION_EXECUTION_TIME * BUDGET_FRACTION
+
     async with er_client as earth_ranger:
-        source_id_set = await _resolve_source_ids(
-            earth_ranger, group_ids=pull_config.subject_group_ids
-        )
-        if pull_config.subject_group_ids and not source_id_set:
-            await log_action_activity(
+        # Mutual exclusion: a long backfill may still be running when the next
+        # scheduled tick fires. Without the lease, both would process the same
+        # cursor units concurrently (duplicate sends + cursor races).
+        if not await _acquire_backfill_lease(integration_id):
+            return _skip_quietly(
+                integration_id, "pull_observations",
+                reason="backfill_in_progress",
+                message="Skipping 'pull_observations': another run holds the backfill lease.",
+                log_level=logging.INFO,
+            )
+        try:
+            state = await state_manager.get_state(
+                integration_id=integration_id, action_id="pull_observations"
+            )
+            cursor = state.get("backfill")
+            last_execution = state.get("last_execution")
+
+            if cursor is None:
+                # Fresh run: compute the window and resolve the source list once.
+                last = state.get("last_execution")
+                if not last or pull_config.force_run_since_start:
+                    window_start = pull_config.start_datetime
+                else:
+                    window_start = last
+                window_end = pull_config.end_datetime or execution_timestamp
+
+                source_id_set = await _resolve_source_ids(
+                    earth_ranger,
+                    group_ids=pull_config.subject_group_ids,
+                    integration_id=integration_id,
+                )
+                if pull_config.subject_group_ids and not source_id_set:
+                    await log_action_activity(
+                        integration_id=integration_id,
+                        action_id="pull_observations",
+                        title="Configured subject groups resolved to zero active sources",
+                        level=LogLevel.ERROR,
+                        data={"subject_group_ids": pull_config.subject_group_ids},
+                    )
+                    # Watermark intentionally NOT advanced; operator fix re-pulls.
+                    return {
+                        "status": "skipped_no_sources",
+                        "observations_extracted": 0,
+                        "filter_active": True,
+                        "sources_resolved": 0,
+                    }
+                cursor = _build_backfill_cursor(
+                    start=window_start,
+                    end=window_end,
+                    subwindow_days=pull_config.subwindow_days,
+                    source_ids=source_id_set,
+                )
+
+            filter_active = cursor["sources"] != [None]
+            subwindows = _iter_subwindows(
+                cursor["start"], cursor["end"], cursor["subwindow_days"]
+            )
+
+            total_observations = 0
+            units_completed = 0
+            wi = cursor["window_index"]
+            si = cursor["source_index"]
+
+            while wi < len(subwindows):
+                w_start, w_end = subwindows[wi]
+                while si < len(cursor["sources"]):
+                    # Yield before starting a unit if the soft budget is spent.
+                    if time.monotonic() - start_monotonic >= soft_budget:
+                        cursor["window_index"] = wi
+                        cursor["source_index"] = si
+                        # Tracks consecutive zero-progress yields. Only consulted
+                        # by the self-re-trigger guard below (continue_immediately);
+                        # in scheduler-driven mode the scheduler cadence is the brake.
+                        cursor["no_progress_count"] = (
+                            cursor.get("no_progress_count", 0) + 1
+                            if units_completed == 0 else 0
+                        )
+                        await _save_backfill_cursor(
+                            integration_id, last_execution=last_execution, cursor=cursor
+                        )
+                        logger.info(
+                            "pull_observations yielding (budget): window %d/%d source %d/%d",
+                            wi, len(subwindows), si, len(cursor["sources"]),
+                        )
+                        # Opt-in: immediately re-trigger the next chunk via PubSub,
+                        # unless we're making no progress (runaway guard). Under
+                        # TRIGGER_ACTIONS_ALWAYS_SYNC (local/test), the re-triggered
+                        # run is a no-op: it runs inline before this run's finally
+                        # releases the lease, so it skips on the held lease.
+                        if pull_config.continue_immediately:
+                            if cursor["no_progress_count"] < MAX_NO_PROGRESS_RETRIES:
+                                try:
+                                    await trigger_action(integration_id, "pull_observations")
+                                except Exception as exc:
+                                    # Cursor is already saved; a failed re-trigger is
+                                    # non-fatal — the next scheduled tick resumes from it.
+                                    logger.warning(
+                                        "pull_observations: re-trigger failed (%s); next "
+                                        "chunk will resume on the scheduled tick.",
+                                        exc,
+                                        extra={"attention_needed": True},
+                                    )
+                            else:
+                                logger.warning(
+                                    "pull_observations not re-triggering: %d consecutive "
+                                    "no-progress runs (runaway guard).",
+                                    cursor["no_progress_count"],
+                                    extra={"attention_needed": True},
+                                )
+                        return {
+                            "status": "in_progress",
+                            "observations_extracted": total_observations,
+                            "units_failed": cursor.get("units_failed", 0),
+                            "window_index": wi,
+                            "source_index": si,
+                            "filter_active": filter_active,
+                            "sources_resolved": len(cursor["sources"]) if filter_active else None,
+                        }
+                    source = cursor["sources"][si]
+                    try:
+                        total_observations += await _pull_source_window(
+                            earth_ranger, source, w_start, w_end,
+                            integration_id=integration_id,
+                        )
+                    except Exception as e:
+                        # Don't wedge the backfill on one bad unit: log loudly and
+                        # advance past it (at-least-once; operator can re-pull).
+                        cursor["units_failed"] = cursor.get("units_failed", 0) + 1
+                        logger.error(
+                            "pull_observations unit failed (source=%r window=%s..%s): %s",
+                            source, w_start, w_end, e,
+                            extra={"attention_needed": True},
+                        )
+                    si += 1
+                    units_completed += 1
+                    cursor["window_index"] = wi
+                    cursor["source_index"] = si
+                    await _save_backfill_cursor(
+                        integration_id, last_execution=last_execution, cursor=cursor
+                    )
+                si = 0
+                wi += 1
+
+            # All units done → advance the watermark to the window end and clear
+            # the cursor (drops "backfill", sets last_execution).
+            units_failed = cursor.get("units_failed", 0)
+            # Advance the watermark first (durable record of completion) so a
+            # failure publishing the warning below can't force a full re-run.
+            await state_manager.set_state(
                 integration_id=integration_id,
                 action_id="pull_observations",
-                title="Configured subject groups resolved to zero active sources",
-                level=LogLevel.ERROR,
-                data={"subject_group_ids": pull_config.subject_group_ids},
+                state={"last_execution": cursor["end"]},
             )
-            # State is intentionally NOT updated — preserves the previous watermark
-            # so a fix on the operator side can re-pull the window.
+            if units_failed:
+                await log_action_activity(
+                    integration_id=integration_id,
+                    action_id="pull_observations",
+                    title="Observation backfill completed with skipped units",
+                    level=LogLevel.WARNING,
+                    data={"units_failed": units_failed, "window_end": cursor["end"]},
+                )
+            logger.info(
+                f"Extracted {total_observations} observations for integration {integration}."
+            )
             return {
-                "observations_extracted": 0,
-                "filter_active": True,
-                "sources_resolved": 0,
+                "status": "complete",
+                "observations_extracted": total_observations,
+                "units_failed": units_failed,
+                "filter_active": filter_active,
+                "sources_resolved": len(cursor["sources"]) if filter_active else None,
             }
-
-        filter_active = bool(source_id_set)
-        async for observation_batch in earth_ranger.get_observations(**params):
-            if filter_active:
-                observation_batch = [
-                    o for o in observation_batch
-                    if str(o.get("source", "")) in source_id_set
-                ]
-            transformed_observations = transform_observations_to_gundi_schema(observations=observation_batch)
-            if not transformed_observations:
-                continue  # No data to send
-            logger.info(f"Sending {len(transformed_observations)} observations to Gundi...")
-            await send_observations_to_gundi(observations=transformed_observations, integration_id=integration_id)
-            total_observations += len(transformed_observations)
-    # Update state
-    state = {"last_execution": execution_timestamp}
-    logger.debug(f"Saving state for integration {integration}, action pull_observations:\n{state}")
-    await state_manager.set_state(
-        integration_id=integration_id,
-        action_id="pull_observations",
-        state=state
-    )
-    logger.info(f"Extracted {total_observations} observations for integration {integration}.")
-    return {
-        "observations_extracted": total_observations,
-        "filter_active": filter_active,
-        "sources_resolved": len(source_id_set) if filter_active else None,
-    }
+        finally:
+            await _release_backfill_lease(integration_id)
 
 
-async def _resolve_source_ids(er_client, group_ids):
+async def _fetch_source_assignments(er_client, subject_ids, *, integration_id=None):
+    """Fetch subjectsources for many subjects, chunked to keep URLs short and
+    each response within a single page.
+
+    ER's ``subjectsources`` endpoint is a single (non-paginated) request: a huge
+    ``subjects=`` query string risks a 414, and a response large enough to
+    paginate would be silently truncated. Chunking subjects into small groups
+    sidesteps both. As a safety net we WARN if any chunk response still carries a
+    ``next`` (the single-page assumption breaking), and we capture diagnostics on
+    unexpected/malformed shapes (problem (b)).
+    """
+    assignments = []
+    malformed = 0
+    for chunk in _chunked(subject_ids, SUBJECT_ID_CHUNK_SIZE):
+        raw = await er_client.get_source_assignments(subject_ids=chunk)
+        if isinstance(raw, dict):
+            if raw.get("next"):
+                logger.warning(
+                    "subjectsources chunk returned a paginated 'next' "
+                    "(count=%s, chunk_size=%d) — sources may be dropped; "
+                    "lower SUBJECT_ID_CHUNK_SIZE.",
+                    raw.get("count"), len(chunk),
+                    extra={"attention_needed": True},
+                )
+            records = raw.get("results", [])
+        elif isinstance(raw, list):
+            records = raw
+        else:
+            logger.warning(
+                "Unexpected subjectsources response type %s: %.200r",
+                type(raw).__name__, raw,
+                extra={"attention_needed": True},
+            )
+            records = []
+        if records:
+            logger.debug(
+                "subjectsources chunk: response_type=%s records=%d sample=%r",
+                type(raw).__name__, len(records), records[0],
+            )
+        for rec in records:
+            if isinstance(rec, dict) and rec.get("source"):
+                assignments.append(rec)
+            else:
+                malformed += 1
+                logger.warning(
+                    "Skipping malformed subjectsource record: %r", rec,
+                    extra={"attention_needed": True},
+                )
+    if malformed and integration_id:
+        await log_action_activity(
+            integration_id=integration_id,
+            action_id="pull_observations",
+            title="Some source-assignment records were malformed and skipped",
+            level=LogLevel.WARNING,
+            data={"malformed_count": malformed},
+        )
+    return assignments
+
+
+async def _resolve_source_ids(er_client, group_ids, *, integration_id=None):
     """Resolve subject-group UUIDs to a set of source UUIDs.
 
     Walks ER's subjectgroup tree recursively (flat=False). When a matched UUID
-    is found, every descendant subject is included — matching the operator's
-    intuition from `action_show_permissions`, which rolls children up into
-    every ancestor. Then queries `subjectsources` in a single batched call
-    to find the sources currently assigned to those subjects.
-
-    `er_client.get_subjectgroups(flat=False)` returns a list (not an async
-    iterator) — the full tree fits in one response.
+    is found, every descendant subject is included. Then resolves the subjects'
+    current source assignments via ``_fetch_source_assignments`` (chunked, so a
+    large subject list neither overruns the URL nor drops paginated rows).
     """
     if not group_ids:
         return set()
@@ -715,13 +887,119 @@ async def _resolve_source_ids(er_client, group_ids):
     if not subject_ids:
         return set()
 
-    assignments = await er_client.get_source_assignments(subject_ids=sorted(subject_ids))
-    # subjectsources comes back as a paginated envelope, not a flat list — see _as_list.
+    assignments = await _fetch_source_assignments(
+        er_client, sorted(subject_ids), integration_id=integration_id
+    )
+    return {str(a["source"]) for a in assignments if a.get("source")}
+
+
+async def _acquire_backfill_lease(integration_id):
+    """Acquire the per-(integration, pull_observations) lease.
+
+    Returns True if this invocation may proceed, False if another invocation
+    currently holds it. The TTL is the crash backstop: because the handler is
+    hard-killed by asyncio.wait_for at MAX_ACTION_EXECUTION_TIME, a run can never
+    outlive its own lease. Fails OPEN on a state-store error (a rare duplicate is
+    cheaper than turning a benign no-op into a crash).
+    """
+    ttl = int(settings.MAX_ACTION_EXECUTION_TIME) + LOCK_MARGIN_SECONDS
+    # NOTE: state_manager.set_if_absent retries on redis.RedisError (stamina),
+    # so a hard Redis outage delays this fail-open path by the retry budget.
+    try:
+        return await state_manager.set_if_absent(
+            integration_id=integration_id,
+            action_id="pull_observations",
+            source_id=BACKFILL_LOCK_SOURCE_ID,
+            ttl_seconds=ttl,
+        )
+    except Exception as e:
+        logger.warning(
+            "Backfill lease acquire failed (%s); proceeding without lease.", e
+        )
+        return True
+
+
+async def _release_backfill_lease(integration_id):
+    """Release the lease. Best-effort: if this fails, the TTL expires it."""
+    try:
+        await state_manager.delete_state(
+            integration_id=integration_id,
+            action_id="pull_observations",
+            source_id=BACKFILL_LOCK_SOURCE_ID,
+        )
+    except Exception as e:
+        logger.warning(
+            "Backfill lease release failed (%s); TTL will expire it.", e
+        )
+
+
+def _skip_quietly(integration_id, action_id, *, reason, message, log_level=logging.INFO):
+    """Record an expected pull-action skip in the local log only.
+
+    Mirrors ``app.services.action_runner._skip_quietly`` (defined locally to
+    avoid a circular import: action_runner imports app.actions at module load).
+    Used when an overlapping invocation finds the backfill lease already held —
+    an expected, steady-state no-op kept out of the portal activity feed.
+    """
+    logger.log(log_level, f"{message} (integration '{integration_id}')")
+    return {"skipped": True, "reason": reason}
+
+
+def _build_backfill_cursor(*, start, end, subwindow_days, source_ids):
+    """Snapshot the work definition + zeroed progress for a new backfill run.
+
+    ``source_ids`` is snapshotted (sorted) so the unit sequence is stable across
+    resumes. An empty set means "no group filter" → a single ``None`` source,
+    i.e. one whole-instance fetch per sub-window.
+    """
+    sources = sorted(source_ids) if source_ids else [None]
     return {
-        str(a["source"])
-        for a in _as_list(assignments)
-        if isinstance(a, dict) and a.get("source")
+        "start": start,
+        "end": end,
+        "subwindow_days": int(subwindow_days or 1),
+        "sources": sources,
+        "window_index": 0,
+        "source_index": 0,
+        "no_progress_count": 0,
     }
+
+
+async def _save_backfill_cursor(integration_id, *, last_execution, cursor):
+    """Persist the cursor alongside the (unchanged) watermark.
+
+    The watermark is only advanced on completion; until then it is preserved so
+    a failure never loses the previously-confirmed window.
+    """
+    state = {"backfill": cursor}
+    if last_execution is not None:
+        state["last_execution"] = last_execution
+    await state_manager.set_state(
+        integration_id=integration_id,
+        action_id="pull_observations",
+        state=state,
+    )
+
+
+async def _pull_source_window(er_client, source, start, end, *, integration_id):
+    """Drain one (source × sub-window) unit and forward to Gundi.
+
+    ``source=None`` means no source filter (whole instance for the window).
+    Returns the number of observations forwarded. ER filters server-side, so no
+    client-side source filtering is needed. ``er_client`` must already be an
+    entered/open client session (call within ``async with er_client``).
+    """
+    params = {"start": start, "end": end, "batch_size": BATCH_SIZE}
+    if source is not None:
+        params["source_id"] = source
+    sent = 0
+    async for observation_batch in er_client.get_observations(**params):
+        transformed = transform_observations_to_gundi_schema(observations=observation_batch)
+        if not transformed:
+            continue
+        logger.info(f"Sending {len(transformed)} observations to Gundi...")
+        await send_observations_to_gundi(observations=transformed, integration_id=integration_id)
+        sent += len(transformed)
+    return sent
 
 
 # Auxiliary functions
@@ -743,6 +1021,50 @@ def _as_list(response):
     if isinstance(response, dict):
         return response.get("results", [])
     return response or []
+
+
+def _chunked(seq, size):
+    """Yield successive ``size``-length chunks (lists) from ``seq``."""
+    seq = list(seq)
+    for i in range(0, len(seq), size):
+        yield seq[i:i + size]
+
+
+def _parse_iso(value):
+    """Parse an ISO-8601 string (tolerant of ER's no-colon offsets and 'Z')."""
+    return dateutil_parser.isoparse(value)
+
+
+def _ensure_utc(dt):
+    """Treat a naive datetime as UTC so naive/aware comparisons never raise."""
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=datetime.timezone.utc)
+    return dt
+
+
+def _to_iso(dt):
+    """Render a datetime back to ISO-8601."""
+    return dt.isoformat()
+
+
+def _iter_subwindows(start_iso, end_iso, subwindow_days):
+    """Return ascending half-open ``[start, end)`` sub-windows as ISO pairs.
+
+    The window list is deterministic given (start, end, subwindow_days), so a
+    resumed run regenerates the exact same units and continues by index.
+    Returns an empty list when ``start`` is not before ``end``.
+    """
+    days = max(1, int(subwindow_days or 1))
+    start = _ensure_utc(_parse_iso(start_iso))
+    end = _ensure_utc(_parse_iso(end_iso))
+    delta = datetime.timedelta(days=days)
+    windows = []
+    cur = start
+    while cur < end:
+        nxt = min(cur + delta, end)
+        windows.append((_to_iso(cur), _to_iso(nxt)))
+        cur = nxt
+    return windows
 
 
 def get_authentication_config(integration):
