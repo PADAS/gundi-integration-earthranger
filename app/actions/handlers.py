@@ -694,6 +694,9 @@ async def action_pull_observations(integration: Integration, action_config: Pull
                     if time.monotonic() - start_monotonic >= soft_budget:
                         cursor["window_index"] = wi
                         cursor["source_index"] = si
+                        # Tracks consecutive zero-progress yields. Only consulted
+                        # by the self-re-trigger guard below (continue_immediately);
+                        # in scheduler-driven mode the scheduler cadence is the brake.
                         cursor["no_progress_count"] = (
                             cursor.get("no_progress_count", 0) + 1
                             if units_completed == 0 else 0
@@ -706,7 +709,10 @@ async def action_pull_observations(integration: Integration, action_config: Pull
                             wi, len(subwindows), si, len(cursor["sources"]),
                         )
                         # Opt-in: immediately re-trigger the next chunk via PubSub,
-                        # unless we're making no progress (runaway guard).
+                        # unless we're making no progress (runaway guard). Under
+                        # TRIGGER_ACTIONS_ALWAYS_SYNC (local/test), the re-triggered
+                        # run is a no-op: it runs inline before this run's finally
+                        # releases the lease, so it skips on the held lease.
                         if pull_config.continue_immediately:
                             if cursor["no_progress_count"] < MAX_NO_PROGRESS_RETRIES:
                                 try:

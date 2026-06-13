@@ -133,7 +133,8 @@ class PullObservationsConfig(PullActionConfiguration):
         description=(
             "Optional ISO-8601 ceiling on recorded_at. Sent to ER on every run, even after the "
             "internal watermark has advanced — leave empty for ongoing pulls and only set it for "
-            "bounded historical backfills."
+            "bounded historical backfills. After a bounded backfill finishes, clear this field "
+            "(otherwise every later run recomputes an empty window and logs an empty completion)."
         ),
         format="date-time",
         ui_options=UIOptions(widget="date-time"),
