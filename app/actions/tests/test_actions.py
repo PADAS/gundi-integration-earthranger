@@ -1414,3 +1414,13 @@ def test_transform_events_serial_number_without_ui_root():
         events=[{"id": "x", "event_type": "rhino_carcass", "serial_number": 5}],
     )
     assert transformed[0]["provider_metadata"] == {"serial_number": 5}
+
+
+def test_chunked_splits_into_fixed_size_groups():
+    from app.actions.handlers import _chunked
+    assert list(_chunked([1, 2, 3, 4, 5], 2)) == [[1, 2], [3, 4], [5]]
+
+
+def test_chunked_empty_yields_nothing():
+    from app.actions.handlers import _chunked
+    assert list(_chunked([], 3)) == []

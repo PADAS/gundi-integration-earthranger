@@ -745,6 +745,13 @@ def _as_list(response):
     return response or []
 
 
+def _chunked(seq, size):
+    """Yield successive ``size``-length chunks (lists) from ``seq``."""
+    seq = list(seq)
+    for i in range(0, len(seq), size):
+        yield seq[i:i + size]
+
+
 def get_authentication_config(integration):
     configurations = integration.configurations
     auth_action_config = find_config_for_action(
