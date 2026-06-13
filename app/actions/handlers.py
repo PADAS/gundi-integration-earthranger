@@ -730,6 +730,7 @@ async def action_pull_observations(integration: Integration, action_config: Pull
                         return {
                             "status": "in_progress",
                             "observations_extracted": total_observations,
+                            "units_failed": cursor.get("units_failed", 0),
                             "window_index": wi,
                             "source_index": si,
                             "filter_active": filter_active,
@@ -744,6 +745,7 @@ async def action_pull_observations(integration: Integration, action_config: Pull
                     except Exception as e:
                         # Don't wedge the backfill on one bad unit: log loudly and
                         # advance past it (at-least-once; operator can re-pull).
+                        cursor["units_failed"] = cursor.get("units_failed", 0) + 1
                         logger.error(
                             "pull_observations unit failed (source=%r window=%s..%s): %s",
                             source, w_start, w_end, e,
@@ -761,6 +763,15 @@ async def action_pull_observations(integration: Integration, action_config: Pull
 
             # All units done → advance the watermark to the window end and clear
             # the cursor (drops "backfill", sets last_execution).
+            units_failed = cursor.get("units_failed", 0)
+            if units_failed:
+                await log_action_activity(
+                    integration_id=integration_id,
+                    action_id="pull_observations",
+                    title="Observation backfill completed with skipped units",
+                    level=LogLevel.WARNING,
+                    data={"units_failed": units_failed, "window_end": cursor["end"]},
+                )
             await state_manager.set_state(
                 integration_id=integration_id,
                 action_id="pull_observations",
@@ -772,6 +783,7 @@ async def action_pull_observations(integration: Integration, action_config: Pull
             return {
                 "status": "complete",
                 "observations_extracted": total_observations,
+                "units_failed": cursor.get("units_failed", 0),
                 "filter_active": filter_active,
                 "sources_resolved": len(cursor["sources"]) if filter_active else None,
             }

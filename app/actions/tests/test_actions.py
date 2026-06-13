@@ -150,6 +150,7 @@ async def test_execute_pull_observations_action(
     assert response == {
         "status": "complete",
         "observations_extracted": len(observations_batch_one) + len(observations_batch_two),
+        "units_failed": 0,
         "filter_active": False,
         "sources_resolved": None,
     }
@@ -733,6 +734,7 @@ async def test_pull_observations_filters_by_resolved_source_ids(
     assert response == {
         "status": "complete",
         "observations_extracted": 2,
+        "units_failed": 0,
         "filter_active": True,
         "sources_resolved": 2,
     }
@@ -1982,3 +1984,132 @@ async def test_pull_observations_retrigger_failure_is_non_fatal(
 
     assert response["status"] == "in_progress"
     mock_trigger.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_pull_observations_unit_failure_is_logged_and_skipped(
+        mocker, mock_gundi_client_v2, mock_state_manager, mock_erclient_class,
+        mock_get_gundi_api_key, mock_gundi_sensors_client_class, er_integration_v2_provider,
+        mock_publish_event, mock_gundi_client_v2_class, mock_config_manager_er_provider
+):
+    """A unit that raises is logged (attention) and skipped; the run still completes,
+    reports units_failed, advances the watermark, and posts an activity-log warning."""
+    cursor = {
+        "start": "2025-01-01T00:00:00+00:00", "end": "2025-01-02T00:00:00+00:00",
+        "subwindow_days": 1, "sources": ["src-bad", "src-ok"],
+        "window_index": 0, "source_index": 0, "no_progress_count": 0,
+    }
+    mock_state_manager.get_state.return_value = async_return_local({
+        "last_execution": "2024-12-01T00:00:00+00:00", "backfill": cursor,
+    })
+
+    from app.actions.tests.conftest import AsyncIterator
+
+    def fake_get_observations(**kw):
+        if kw.get("source_id") == "src-bad":
+            raise RuntimeError("ER 500 on this source/window")
+        return AsyncIterator([[{"id": "o1", "source": "src-ok", "recorded_at": "2025-01-01T01:00:00Z"}]])
+
+    mock_erclient_class.return_value.get_observations.side_effect = fake_get_observations
+    mock_log_activity = mocker.patch("app.actions.handlers.log_action_activity")
+    mock_log_activity.return_value = async_return_local(None)
+
+    mocker.patch("app.services.action_runner._portal", mock_gundi_client_v2)
+    mocker.patch("app.services.activity_logger.publish_event", mock_publish_event)
+    mocker.patch("app.services.action_runner.publish_event", mock_publish_event)
+    mocker.patch("app.services.action_runner.config_manager", mock_config_manager_er_provider)
+    mocker.patch("app.actions.handlers.state_manager", mock_state_manager)
+    mocker.patch("app.actions.handlers.AsyncERClient", mock_erclient_class)
+    mocker.patch("app.services.gundi.GundiClient", mock_gundi_client_v2_class)
+    mocker.patch("app.services.gundi.GundiDataSenderClient", mock_gundi_sensors_client_class)
+    mocker.patch("app.services.gundi._get_gundi_api_key", mock_get_gundi_api_key)
+
+    response = await execute_action(
+        integration_id=str(er_integration_v2_provider.id),
+        action_id="pull_observations",
+    )
+
+    assert response["status"] == "complete"
+    assert response["units_failed"] == 1
+    assert response["observations_extracted"] == 1  # src-ok still forwarded
+    # Watermark advanced to the window end despite the failed unit.
+    final = mock_state_manager.set_state.call_args.kwargs["state"]
+    assert final == {"last_execution": "2025-01-02T00:00:00+00:00"}
+    # A partial-completion activity-log warning was emitted.
+    titles = [c.kwargs.get("title", "") for c in mock_log_activity.call_args_list]
+    assert any("skipped units" in t for t in titles)
+
+
+@pytest.mark.asyncio
+async def test_pull_observations_resume_round_trip_completes(
+        mocker, mock_gundi_client_v2, mock_erclient_class,
+        mock_get_gundi_api_key, mock_gundi_sensors_client_class, er_integration_v2_provider,
+        mock_publish_event, mock_gundi_client_v2_class, mock_config_manager_er_provider
+):
+    """Invocation 1 yields in_progress at the budget; invocation 2 resumes from the
+    persisted cursor and completes, advancing the watermark and clearing the cursor."""
+
+    class FakeStateManager:
+        def __init__(self):
+            self.store = {}
+        async def get_state(self, integration_id, action_id, source_id="no-source"):
+            return self.store.get((integration_id, action_id, source_id), {})
+        async def set_state(self, integration_id, action_id, state, source_id="no-source"):
+            self.store[(integration_id, action_id, source_id)] = state
+        async def set_if_absent(self, integration_id, action_id, *, ttl_seconds, source_id="no-source"):
+            return True
+        async def delete_state(self, integration_id, action_id, source_id="no-source"):
+            self.store.pop((integration_id, action_id, source_id), None)
+
+    fake_sm = FakeStateManager()
+    # Seed a fresh-run state with NO backfill cursor, force start from the config window.
+    pull_obs_data = er_integration_v2_provider.get_action_config("pull_observations").data
+    pull_obs_data["force_run_since_start"] = True
+    pull_obs_data["start_datetime"] = "2025-01-01T00:00:00+00:00"
+    pull_obs_data["end_datetime"] = "2025-01-04T00:00:00+00:00"  # 3 one-day windows
+    pull_obs_data["subwindow_days"] = 1
+
+    from app.actions.tests.conftest import AsyncIterator
+    mock_erclient_class.return_value.get_observations.side_effect = (
+        lambda **kw: AsyncIterator([[{"id": "o1", "source": "src-x", "recorded_at": "2025-01-01T01:00:00Z"}]])
+    )
+
+    # Budget: advance 200s per monotonic() call. Soft budget = 540*0.8 = 432s.
+    # Invocation 1 completes ~1-2 units then trips the budget and yields.
+    # Reset the clock between invocations so invocation 2 also gets a fresh budget.
+    clock = {"t": 0.0}
+    def fake_monotonic(*a):
+        clock["t"] += 200.0
+        return clock["t"]
+    mocker.patch("app.actions.handlers.time.monotonic", side_effect=fake_monotonic)
+
+    mocker.patch("app.services.action_runner._portal", mock_gundi_client_v2)
+    mocker.patch("app.services.activity_logger.publish_event", mock_publish_event)
+    mocker.patch("app.services.action_runner.publish_event", mock_publish_event)
+    mocker.patch("app.services.action_runner.config_manager", mock_config_manager_er_provider)
+    mocker.patch("app.actions.handlers.state_manager", fake_sm)
+    mocker.patch("app.actions.handlers.AsyncERClient", mock_erclient_class)
+    mocker.patch("app.services.gundi.GundiClient", mock_gundi_client_v2_class)
+    mocker.patch("app.services.gundi.GundiDataSenderClient", mock_gundi_sensors_client_class)
+    mocker.patch("app.services.gundi._get_gundi_api_key", mock_get_gundi_api_key)
+
+    integration_id = str(er_integration_v2_provider.id)
+
+    # Invocation 1
+    r1 = await execute_action(integration_id=integration_id, action_id="pull_observations")
+    assert r1["status"] == "in_progress"
+    assert ("backfill" in fake_sm.store.get((integration_id, "pull_observations", "no-source"), {}))
+
+    # Keep resuming until complete (bounded loop so a bug can't hang the test).
+    last = r1
+    for _ in range(20):
+        if last["status"] == "complete":
+            break
+        clock["t"] = 0.0  # fresh budget for the next invocation
+        last = await execute_action(integration_id=integration_id, action_id="pull_observations")
+
+    assert last["status"] == "complete"
+    # Watermark advanced to the configured end; cursor cleared.
+    final = fake_sm.store[(integration_id, "pull_observations", "no-source")]
+    assert final == {"last_execution": "2025-01-04T00:00:00+00:00"}
+    assert "backfill" not in final
