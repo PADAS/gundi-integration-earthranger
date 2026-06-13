@@ -1546,3 +1546,4 @@ async def test_fetch_source_assignments_skips_malformed_records(mocker, caplog):
         assignments = await _fetch_source_assignments(er_client, ["s"])
 
     assert assignments == [{"subject": "s", "source": "src-ok"}]
+    assert any("malformed" in r.message.lower() for r in caplog.records)

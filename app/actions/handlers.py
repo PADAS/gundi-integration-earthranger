@@ -713,7 +713,7 @@ async def _fetch_source_assignments(er_client, subject_ids, *, integration_id=No
             records = raw
         else:
             logger.warning(
-                "Unexpected subjectsources response type %s: %r",
+                "Unexpected subjectsources response type %s: %.200r",
                 type(raw).__name__, raw,
                 extra={"attention_needed": True},
             )
