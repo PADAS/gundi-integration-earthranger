@@ -1,6 +1,7 @@
 # ER Observation Backfill — Review Follow-ups
 
 **Source:** Code review of PR #30 (`feat/resumable-observation-backfill`)
+**Tracking:** [GUNDI-5406](https://allenai.atlassian.net/browse/GUNDI-5406)
 **Date:** 2026-06-13
 **Related:** spec `2026-06-13-er-observations-resumable-backfill-design.md`, plan `docs/superpowers/plans/2026-06-13-resumable-observation-backfill.md`
 
