@@ -534,6 +534,41 @@ async def test_resolve_source_ids_walks_subgroups(mocker):
 
 
 @pytest.mark.asyncio
+async def test_resolve_source_ids_handles_paginated_subjectsources_response(mocker):
+    """ER's subjectsources endpoint returns a paginated envelope
+    ({count,next,previous,results}), not a flat list. _resolve_source_ids must
+    read `results` rather than iterating the dict's (string) keys.
+
+    Regression: pull_observations crashed with
+    "AttributeError: 'str' object has no attribute 'get'".
+    """
+    from app.actions.handlers import _resolve_source_ids
+
+    er_client = mocker.MagicMock()
+
+    async def fake_get_subjectgroups(flat=False):
+        return [{"id": "grp", "subjects": [{"id": "subj-1"}], "subgroups": []}]
+
+    async def fake_get_source_assignments(subject_ids=None, source_ids=None):
+        return {
+            "count": 2,
+            "next": None,
+            "previous": None,
+            "results": [
+                {"subject": "subj-1", "source": "src-1"},
+                {"subject": "subj-1", "source": "src-2"},
+            ],
+        }
+
+    er_client.get_subjectgroups.side_effect = fake_get_subjectgroups
+    er_client.get_source_assignments.side_effect = fake_get_source_assignments
+
+    sources = await _resolve_source_ids(er_client, group_ids=["grp"])
+
+    assert sources == {"src-1", "src-2"}
+
+
+@pytest.mark.asyncio
 async def test_resolve_source_ids_dedups_across_overlapping_groups(mocker):
     """A subject in two configured groups only triggers one assignment lookup."""
     from app.actions.handlers import _resolve_source_ids

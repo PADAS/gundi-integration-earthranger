@@ -715,7 +715,19 @@ async def _resolve_source_ids(er_client, group_ids):
         return set()
 
     assignments = await er_client.get_source_assignments(subject_ids=sorted(subject_ids))
-    return {str(a["source"]) for a in assignments if a.get("source")}
+    # ER list endpoints return either a flat list or a paginated envelope
+    # ({"count", "next", "previous", "results": [...]}). get_source_assignments
+    # returns the unwrapped `data`, which for subjectsources is the paginated
+    # envelope — so pull the records out of `results` before reading "source".
+    # (Iterating the envelope directly walks its string keys and raises
+    # AttributeError: 'str' object has no attribute 'get'.)
+    if isinstance(assignments, dict):
+        assignments = assignments.get("results", [])
+    return {
+        str(a["source"])
+        for a in assignments
+        if isinstance(a, dict) and a.get("source")
+    }
 
 
 # Auxiliary functions
