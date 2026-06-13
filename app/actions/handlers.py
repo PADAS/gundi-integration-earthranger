@@ -709,7 +709,17 @@ async def action_pull_observations(integration: Integration, action_config: Pull
                         # unless we're making no progress (runaway guard).
                         if pull_config.continue_immediately:
                             if cursor["no_progress_count"] < MAX_NO_PROGRESS_RETRIES:
-                                await trigger_action(integration_id, "pull_observations")
+                                try:
+                                    await trigger_action(integration_id, "pull_observations")
+                                except Exception as exc:
+                                    # Cursor is already saved; a failed re-trigger is
+                                    # non-fatal — the next scheduled tick resumes from it.
+                                    logger.warning(
+                                        "pull_observations: re-trigger failed (%s); next "
+                                        "chunk will resume on the scheduled tick.",
+                                        exc,
+                                        extra={"attention_needed": True},
+                                    )
                             else:
                                 logger.warning(
                                     "pull_observations not re-triggering: %d consecutive "

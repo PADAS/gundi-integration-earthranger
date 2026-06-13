@@ -1890,7 +1890,7 @@ async def test_pull_observations_self_retriggers_when_enabled(
     )
 
     assert response["status"] == "in_progress"
-    mock_trigger.assert_called_once()
+    mock_trigger.assert_called_once_with(str(er_integration_v2_provider.id), "pull_observations")
 
 
 @pytest.mark.asyncio
@@ -1935,3 +1935,50 @@ async def test_pull_observations_self_retrigger_stops_after_no_progress_limit(
 
     assert response["status"] == "in_progress"
     mock_trigger.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_pull_observations_retrigger_failure_is_non_fatal(
+        mocker, mock_gundi_client_v2, mock_state_manager, mock_erclient_class,
+        mock_get_gundi_api_key, mock_gundi_sensors_client_class, er_integration_v2_provider,
+        mock_publish_event, mock_gundi_client_v2_class, mock_config_manager_er_provider
+):
+    """If trigger_action raises (e.g. commands topic unset), the run still returns
+    in_progress — the saved cursor resumes on the next scheduled tick."""
+    pull_obs_data = er_integration_v2_provider.get_action_config("pull_observations").data
+    pull_obs_data["continue_immediately"] = True
+
+    cursor = {
+        "start": "2025-01-01T00:00:00+00:00", "end": "2025-01-05T00:00:00+00:00",
+        "subwindow_days": 1, "sources": ["src-a"],
+        "window_index": 0, "source_index": 0, "no_progress_count": 0,
+    }
+    mock_state_manager.get_state.return_value = async_return_local({
+        "last_execution": "2024-12-01T00:00:00+00:00", "backfill": cursor,
+    })
+    mocker.patch("app.actions.handlers.time.monotonic",
+                 side_effect=lambda *a, _n=[0]: (_n.__setitem__(0, _n[0] + 1) or _n[0] * 300.0))
+    from app.actions.tests.conftest import AsyncIterator
+    mock_erclient_class.return_value.get_observations.side_effect = (
+        lambda **kw: AsyncIterator([[{"id": "o1", "source": "src-a", "recorded_at": "2025-01-01T01:00:00Z"}]])
+    )
+    mock_trigger = mocker.patch("app.actions.handlers.trigger_action")
+    mock_trigger.side_effect = ValueError("INTEGRATION_COMMANDS_TOPIC not set")
+
+    mocker.patch("app.services.action_runner._portal", mock_gundi_client_v2)
+    mocker.patch("app.services.activity_logger.publish_event", mock_publish_event)
+    mocker.patch("app.services.action_runner.publish_event", mock_publish_event)
+    mocker.patch("app.services.action_runner.config_manager", mock_config_manager_er_provider)
+    mocker.patch("app.actions.handlers.state_manager", mock_state_manager)
+    mocker.patch("app.actions.handlers.AsyncERClient", mock_erclient_class)
+    mocker.patch("app.services.gundi.GundiClient", mock_gundi_client_v2_class)
+    mocker.patch("app.services.gundi.GundiDataSenderClient", mock_gundi_sensors_client_class)
+    mocker.patch("app.services.gundi._get_gundi_api_key", mock_get_gundi_api_key)
+
+    response = await execute_action(
+        integration_id=str(er_integration_v2_provider.id),
+        action_id="pull_observations",
+    )
+
+    assert response["status"] == "in_progress"
+    mock_trigger.assert_called_once()
