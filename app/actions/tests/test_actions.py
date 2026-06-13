@@ -1634,8 +1634,20 @@ async def test_save_backfill_cursor_preserves_last_execution(mocker):
 
 
 @pytest.mark.asyncio
+async def test_save_backfill_cursor_omits_absent_last_execution(mocker):
+    from app.actions.handlers import _save_backfill_cursor
+    sm = mocker.patch("app.actions.handlers.state_manager")
+    sm.set_state.return_value = async_return_local(None)
+    cursor = {"window_index": 0, "source_index": 0}
+    await _save_backfill_cursor("int-1", last_execution=None, cursor=cursor)
+    saved = sm.set_state.call_args.kwargs["state"]
+    assert saved == {"backfill": cursor}
+    assert "last_execution" not in saved
+
+
+@pytest.mark.asyncio
 async def test_pull_source_window_passes_source_and_window_to_er(mocker):
-    from app.actions.handlers import _pull_source_window
+    from app.actions.handlers import _pull_source_window, BATCH_SIZE
     from app.actions.tests.conftest import AsyncIterator
 
     er_client = mocker.MagicMock()
@@ -1655,6 +1667,7 @@ async def test_pull_source_window_passes_source_and_window_to_er(mocker):
     assert kwargs["source_id"] == "src-1"
     assert kwargs["start"] == "2025-01-01T00:00:00+00:00"
     assert kwargs["end"] == "2025-01-02T00:00:00+00:00"
+    assert kwargs["batch_size"] == BATCH_SIZE
 
 
 @pytest.mark.asyncio

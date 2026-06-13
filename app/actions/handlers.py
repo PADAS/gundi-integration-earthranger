@@ -863,7 +863,8 @@ async def _pull_source_window(er_client, source, start, end, *, integration_id):
 
     ``source=None`` means no source filter (whole instance for the window).
     Returns the number of observations forwarded. ER filters server-side, so no
-    client-side source filtering is needed.
+    client-side source filtering is needed. ``er_client`` must already be an
+    entered/open client session (call within ``async with er_client``).
     """
     params = {"start": start, "end": end, "batch_size": BATCH_SIZE}
     if source is not None:
