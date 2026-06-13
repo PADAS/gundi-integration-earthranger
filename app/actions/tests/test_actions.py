@@ -1559,12 +1559,16 @@ async def test_fetch_source_assignments_skips_malformed_records(mocker, caplog):
 
 @pytest.mark.asyncio
 async def test_acquire_backfill_lease_returns_false_when_held(mocker):
-    from app.actions.handlers import _acquire_backfill_lease, BACKFILL_LOCK_SOURCE_ID
+    from app.actions.handlers import _acquire_backfill_lease, BACKFILL_LOCK_SOURCE_ID, LOCK_MARGIN_SECONDS
+    from app import settings
     sm = mocker.patch("app.actions.handlers.state_manager")
     sm.set_if_absent.return_value = async_return_local(False)
     got = await _acquire_backfill_lease("int-1")
     assert got is False
-    assert sm.set_if_absent.call_args.kwargs["source_id"] == BACKFILL_LOCK_SOURCE_ID
+    kwargs = sm.set_if_absent.call_args.kwargs
+    assert kwargs["source_id"] == BACKFILL_LOCK_SOURCE_ID
+    assert kwargs["action_id"] == "pull_observations"
+    assert kwargs["ttl_seconds"] == int(settings.MAX_ACTION_EXECUTION_TIME) + LOCK_MARGIN_SECONDS
 
 
 @pytest.mark.asyncio
@@ -1582,4 +1586,6 @@ async def test_release_backfill_lease_deletes_lock_key(mocker):
     sm = mocker.patch("app.actions.handlers.state_manager")
     sm.delete_state.return_value = async_return_local(None)
     await _release_backfill_lease("int-1")
-    assert sm.delete_state.call_args.kwargs["source_id"] == BACKFILL_LOCK_SOURCE_ID
+    kwargs = sm.delete_state.call_args.kwargs
+    assert kwargs["source_id"] == BACKFILL_LOCK_SOURCE_ID
+    assert kwargs["action_id"] == "pull_observations"

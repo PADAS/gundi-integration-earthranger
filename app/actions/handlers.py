@@ -793,6 +793,8 @@ async def _acquire_backfill_lease(integration_id):
     cheaper than turning a benign no-op into a crash).
     """
     ttl = int(settings.MAX_ACTION_EXECUTION_TIME) + LOCK_MARGIN_SECONDS
+    # NOTE: state_manager.set_if_absent retries on redis.RedisError (stamina),
+    # so a hard Redis outage delays this fail-open path by the retry budget.
     try:
         return await state_manager.set_if_absent(
             integration_id=integration_id,
