@@ -1839,3 +1839,99 @@ async def test_pull_observations_skips_when_lease_held(
     assert response == {"skipped": True, "reason": "backfill_in_progress"}
     mock_erclient_class.return_value.get_observations.assert_not_called()
     mock_state_manager.get_state.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_pull_observations_self_retriggers_when_enabled(
+        mocker, mock_gundi_client_v2, mock_state_manager, mock_erclient_class,
+        mock_get_gundi_api_key, mock_gundi_sensors_client_class, er_integration_v2_provider,
+        mock_publish_event, mock_gundi_client_v2_class, mock_config_manager_er_provider
+):
+    """With continue_immediately on, an in_progress run re-triggers the next chunk."""
+    pull_obs_data = er_integration_v2_provider.get_action_config("pull_observations").data
+    pull_obs_data["continue_immediately"] = True
+
+    cursor = {
+        "start": "2025-01-01T00:00:00+00:00", "end": "2025-01-05T00:00:00+00:00",
+        "subwindow_days": 1, "sources": ["src-a"],
+        "window_index": 0, "source_index": 0, "no_progress_count": 0,
+    }
+    mock_state_manager.get_state.return_value = async_return_local({
+        "last_execution": "2024-12-01T00:00:00+00:00", "backfill": cursor,
+    })
+    # time.monotonic is shared with action_runner, so the absolute call count
+    # before the handler's start_monotonic is irrelevant: advance 300s per call.
+    # start -> first budget check is +300s (< 432 budget, one unit runs), the
+    # next check is +600s (> budget) so the run yields in_progress.
+    mocker.patch(
+        "app.actions.handlers.time.monotonic",
+        side_effect=lambda *a, _n=[0]: (_n.__setitem__(0, _n[0] + 1) or _n[0] * 300.0),
+    )
+    from app.actions.tests.conftest import AsyncIterator
+    mock_erclient_class.return_value.get_observations.side_effect = (
+        lambda **kw: AsyncIterator([[{"id": "o1", "source": "src-a", "recorded_at": "2025-01-01T01:00:00Z"}]])
+    )
+    mock_trigger = mocker.patch("app.actions.handlers.trigger_action")
+    mock_trigger.return_value = async_return_local(None)
+
+    mocker.patch("app.services.action_runner._portal", mock_gundi_client_v2)
+    mocker.patch("app.services.activity_logger.publish_event", mock_publish_event)
+    mocker.patch("app.services.action_runner.publish_event", mock_publish_event)
+    mocker.patch("app.services.action_runner.config_manager", mock_config_manager_er_provider)
+    mocker.patch("app.actions.handlers.state_manager", mock_state_manager)
+    mocker.patch("app.actions.handlers.AsyncERClient", mock_erclient_class)
+    mocker.patch("app.services.gundi.GundiClient", mock_gundi_client_v2_class)
+    mocker.patch("app.services.gundi.GundiDataSenderClient", mock_gundi_sensors_client_class)
+    mocker.patch("app.services.gundi._get_gundi_api_key", mock_get_gundi_api_key)
+
+    response = await execute_action(
+        integration_id=str(er_integration_v2_provider.id),
+        action_id="pull_observations",
+    )
+
+    assert response["status"] == "in_progress"
+    mock_trigger.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_pull_observations_self_retrigger_stops_after_no_progress_limit(
+        mocker, mock_gundi_client_v2, mock_state_manager, mock_erclient_class,
+        mock_get_gundi_api_key, mock_gundi_sensors_client_class, er_integration_v2_provider,
+        mock_publish_event, mock_gundi_client_v2_class, mock_config_manager_er_provider
+):
+    """If consecutive runs make zero progress, self-re-trigger stops (runaway guard)."""
+    pull_obs_data = er_integration_v2_provider.get_action_config("pull_observations").data
+    pull_obs_data["continue_immediately"] = True
+
+    from app.actions.handlers import MAX_NO_PROGRESS_RETRIES
+    cursor = {
+        "start": "2025-01-01T00:00:00+00:00", "end": "2025-01-05T00:00:00+00:00",
+        "subwindow_days": 1, "sources": ["src-a"],
+        "window_index": 0, "source_index": 0,
+        "no_progress_count": MAX_NO_PROGRESS_RETRIES - 1,  # one short of the limit
+    }
+    mock_state_manager.get_state.return_value = async_return_local({
+        "last_execution": "2024-12-01T00:00:00+00:00", "backfill": cursor,
+    })
+    # Budget exceeded immediately (no unit completes → no_progress_count increments to the limit).
+    mocker.patch("app.actions.handlers.time.monotonic", side_effect=lambda *a, _n=[0]: (_n.__setitem__(0, _n[0] + 1) or _n[0] * 10**9))
+    mock_trigger = mocker.patch("app.actions.handlers.trigger_action")
+    mock_trigger.return_value = async_return_local(None)
+
+    mocker.patch("app.services.action_runner._portal", mock_gundi_client_v2)
+    mocker.patch("app.services.activity_logger.publish_event", mock_publish_event)
+    mocker.patch("app.services.action_runner.publish_event", mock_publish_event)
+    mocker.patch("app.services.action_runner.config_manager", mock_config_manager_er_provider)
+    mocker.patch("app.actions.handlers.state_manager", mock_state_manager)
+    mocker.patch("app.actions.handlers.AsyncERClient", mock_erclient_class)
+    mocker.patch("app.services.gundi.GundiClient", mock_gundi_client_v2_class)
+    mocker.patch("app.services.gundi.GundiDataSenderClient", mock_gundi_sensors_client_class)
+    mocker.patch("app.services.gundi._get_gundi_api_key", mock_get_gundi_api_key)
+
+    response = await execute_action(
+        integration_id=str(er_integration_v2_provider.id),
+        action_id="pull_observations",
+    )
+
+    assert response["status"] == "in_progress"
+    mock_trigger.assert_not_called()

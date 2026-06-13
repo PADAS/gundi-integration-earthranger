@@ -22,6 +22,7 @@ from .configurations import AuthenticateConfig, EventFilterDateField, PullObserv
     ERAuthenticationType, ShowPermissionsConfig
 from ..services.activity_logger import activity_logger, log_action_activity
 from ..services.gundi import send_events_to_gundi, send_observations_to_gundi, update_event_in_gundi
+from ..services.action_scheduler import trigger_action
 
 logger = logging.getLogger(__name__)
 
@@ -704,6 +705,18 @@ async def action_pull_observations(integration: Integration, action_config: Pull
                             "pull_observations yielding (budget): window %d/%d source %d/%d",
                             wi, len(subwindows), si, len(cursor["sources"]),
                         )
+                        # Opt-in: immediately re-trigger the next chunk via PubSub,
+                        # unless we're making no progress (runaway guard).
+                        if pull_config.continue_immediately:
+                            if cursor["no_progress_count"] < MAX_NO_PROGRESS_RETRIES:
+                                await trigger_action(integration_id, "pull_observations")
+                            else:
+                                logger.warning(
+                                    "pull_observations not re-triggering: %d consecutive "
+                                    "no-progress runs (runaway guard).",
+                                    cursor["no_progress_count"],
+                                    extra={"attention_needed": True},
+                                )
                         return {
                             "status": "in_progress",
                             "observations_extracted": total_observations,
