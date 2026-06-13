@@ -758,6 +758,13 @@ def _parse_iso(value):
     return dateutil_parser.isoparse(value)
 
 
+def _ensure_utc(dt):
+    """Treat a naive datetime as UTC so naive/aware comparisons never raise."""
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=datetime.timezone.utc)
+    return dt
+
+
 def _to_iso(dt):
     """Render a datetime back to ISO-8601."""
     return dt.isoformat()
@@ -771,8 +778,8 @@ def _iter_subwindows(start_iso, end_iso, subwindow_days):
     Returns an empty list when ``start`` is not before ``end``.
     """
     days = max(1, int(subwindow_days or 1))
-    start = _parse_iso(start_iso)
-    end = _parse_iso(end_iso)
+    start = _ensure_utc(_parse_iso(start_iso))
+    end = _ensure_utc(_parse_iso(end_iso))
     delta = datetime.timedelta(days=days)
     windows = []
     cur = start

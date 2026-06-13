@@ -1457,3 +1457,20 @@ def test_iter_subwindows_floors_subwindow_days_to_one():
     from app.actions.handlers import _iter_subwindows
     windows = _iter_subwindows("2025-01-01T00:00:00+00:00", "2025-01-02T00:00:00+00:00", 0)
     assert len(windows) == 1
+
+
+def test_iter_subwindows_treats_naive_start_as_utc():
+    # A naive start (no offset, e.g. from user config) must not raise when the
+    # end is timezone-aware; the naive value is interpreted as UTC.
+    from app.actions.handlers import _iter_subwindows
+    windows = _iter_subwindows("2025-01-01T00:00:00", "2025-01-02T00:00:00+00:00", 1)
+    assert windows == [("2025-01-01T00:00:00+00:00", "2025-01-02T00:00:00+00:00")]
+
+
+def test_iter_subwindows_multiday_stride():
+    from app.actions.handlers import _iter_subwindows
+    windows = _iter_subwindows("2025-01-01T00:00:00+00:00", "2025-01-15T00:00:00+00:00", 7)
+    assert windows == [
+        ("2025-01-01T00:00:00+00:00", "2025-01-08T00:00:00+00:00"),
+        ("2025-01-08T00:00:00+00:00", "2025-01-15T00:00:00+00:00"),
+    ]
