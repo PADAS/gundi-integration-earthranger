@@ -26,6 +26,7 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_CONNECT_TIMEOUT_SECONDS = 10.0
 BATCH_SIZE = 100
+SUBJECT_ID_CHUNK_SIZE = 25
 state_manager = IntegrationStateManager()
 
 # Maps the operator-selected date field to the corresponding key on ER's
@@ -683,17 +684,72 @@ async def action_pull_observations(integration: Integration, action_config: Pull
     }
 
 
-async def _resolve_source_ids(er_client, group_ids):
+async def _fetch_source_assignments(er_client, subject_ids, *, integration_id=None):
+    """Fetch subjectsources for many subjects, chunked to keep URLs short and
+    each response within a single page.
+
+    ER's ``subjectsources`` endpoint is a single (non-paginated) request: a huge
+    ``subjects=`` query string risks a 414, and a response large enough to
+    paginate would be silently truncated. Chunking subjects into small groups
+    sidesteps both. As a safety net we WARN if any chunk response still carries a
+    ``next`` (the single-page assumption breaking), and we capture diagnostics on
+    unexpected/malformed shapes (problem (b)).
+    """
+    assignments = []
+    malformed = 0
+    for chunk in _chunked(subject_ids, SUBJECT_ID_CHUNK_SIZE):
+        raw = await er_client.get_source_assignments(subject_ids=chunk)
+        if isinstance(raw, dict):
+            if raw.get("next"):
+                logger.warning(
+                    "subjectsources chunk returned a paginated 'next' "
+                    "(count=%s, chunk_size=%d) — sources may be dropped; "
+                    "lower SUBJECT_ID_CHUNK_SIZE.",
+                    raw.get("count"), len(chunk),
+                    extra={"attention_needed": True},
+                )
+            records = raw.get("results", [])
+        elif isinstance(raw, list):
+            records = raw
+        else:
+            logger.warning(
+                "Unexpected subjectsources response type %s: %r",
+                type(raw).__name__, raw,
+                extra={"attention_needed": True},
+            )
+            records = []
+        if records:
+            logger.debug(
+                "subjectsources chunk: response_type=%s records=%d sample=%r",
+                type(raw).__name__, len(records), records[0],
+            )
+        for rec in records:
+            if isinstance(rec, dict) and rec.get("source"):
+                assignments.append(rec)
+            else:
+                malformed += 1
+                logger.warning(
+                    "Skipping malformed subjectsource record: %r", rec,
+                    extra={"attention_needed": True},
+                )
+    if malformed and integration_id:
+        await log_action_activity(
+            integration_id=integration_id,
+            action_id="pull_observations",
+            title="Some source-assignment records were malformed and skipped",
+            level=LogLevel.WARNING,
+            data={"malformed_count": malformed},
+        )
+    return assignments
+
+
+async def _resolve_source_ids(er_client, group_ids, *, integration_id=None):
     """Resolve subject-group UUIDs to a set of source UUIDs.
 
     Walks ER's subjectgroup tree recursively (flat=False). When a matched UUID
-    is found, every descendant subject is included — matching the operator's
-    intuition from `action_show_permissions`, which rolls children up into
-    every ancestor. Then queries `subjectsources` in a single batched call
-    to find the sources currently assigned to those subjects.
-
-    `er_client.get_subjectgroups(flat=False)` returns a list (not an async
-    iterator) — the full tree fits in one response.
+    is found, every descendant subject is included. Then resolves the subjects'
+    current source assignments via ``_fetch_source_assignments`` (chunked, so a
+    large subject list neither overruns the URL nor drops paginated rows).
     """
     if not group_ids:
         return set()
@@ -716,13 +772,10 @@ async def _resolve_source_ids(er_client, group_ids):
     if not subject_ids:
         return set()
 
-    assignments = await er_client.get_source_assignments(subject_ids=sorted(subject_ids))
-    # subjectsources comes back as a paginated envelope, not a flat list — see _as_list.
-    return {
-        str(a["source"])
-        for a in _as_list(assignments)
-        if isinstance(a, dict) and a.get("source")
-    }
+    assignments = await _fetch_source_assignments(
+        er_client, sorted(subject_ids), integration_id=integration_id
+    )
+    return {str(a["source"]) for a in assignments if a.get("source")}
 
 
 # Auxiliary functions

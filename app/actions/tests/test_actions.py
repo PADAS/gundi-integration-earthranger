@@ -1481,3 +1481,68 @@ def test_pull_observations_config_backfill_defaults():
     cfg = PullObservationsConfig(start_datetime="2025-01-01T00:00:00+00:00")
     assert cfg.subwindow_days == 1
     assert cfg.continue_immediately is False
+
+
+# ---------------------------------------------------------------------------
+# _fetch_source_assignments: chunked subjectsources fetch with diagnostics
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_fetch_source_assignments_chunks_subject_ids(mocker):
+    """Subjects are chunked into SUBJECT_ID_CHUNK_SIZE-sized requests and aggregated."""
+    from app.actions.handlers import _fetch_source_assignments
+
+    calls = []
+
+    async def fake_get_source_assignments(subject_ids=None, source_ids=None):
+        calls.append(list(subject_ids))
+        return [{"subject": s, "source": f"src-{s}"} for s in subject_ids]
+
+    er_client = mocker.MagicMock()
+    er_client.get_source_assignments.side_effect = fake_get_source_assignments
+
+    subject_ids = [f"subj-{i}" for i in range(60)]  # > 2 chunks of 25
+    assignments = await _fetch_source_assignments(er_client, subject_ids)
+
+    assert [len(c) for c in calls] == [25, 25, 10]
+    assert len(assignments) == 60
+
+
+@pytest.mark.asyncio
+async def test_fetch_source_assignments_warns_on_paginated_next(mocker, caplog):
+    """A chunk whose envelope carries a 'next' is flagged loudly (data may be dropped)."""
+    import logging
+    from app.actions.handlers import _fetch_source_assignments
+
+    async def fake_get_source_assignments(subject_ids=None, source_ids=None):
+        return {"count": 200, "next": "http://er/subjectsources?cursor=abc",
+                "previous": None, "results": [{"subject": "s", "source": "src-1"}]}
+
+    er_client = mocker.MagicMock()
+    er_client.get_source_assignments.side_effect = fake_get_source_assignments
+
+    with caplog.at_level(logging.WARNING):
+        assignments = await _fetch_source_assignments(er_client, ["s"])
+
+    assert assignments == [{"subject": "s", "source": "src-1"}]
+    assert any("paginated" in r.message.lower() or "next" in r.message.lower()
+               for r in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_fetch_source_assignments_skips_malformed_records(mocker, caplog):
+    """Records that aren't dicts-with-source are skipped, not crashed on."""
+    import logging
+    from app.actions.handlers import _fetch_source_assignments
+
+    async def fake_get_source_assignments(subject_ids=None, source_ids=None):
+        return ["a-bare-string", {"subject": "s"}, {"subject": "s", "source": "src-ok"}]
+
+    er_client = mocker.MagicMock()
+    er_client.get_source_assignments.side_effect = fake_get_source_assignments
+
+    with caplog.at_level(logging.WARNING):
+        assignments = await _fetch_source_assignments(er_client, ["s"])
+
+    assert assignments == [{"subject": "s", "source": "src-ok"}]
