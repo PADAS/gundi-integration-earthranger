@@ -135,7 +135,11 @@ async def test_execute_pull_observations_action(
     mocker.patch("app.services.gundi._get_gundi_api_key", mock_get_gundi_api_key)
     response = await execute_action(
         integration_id=str(er_integration_v2_provider.id),
-        action_id="pull_observations"
+        action_id="pull_observations",
+        # Pin the window to the config's start/end: the mocked last_execution
+        # (2023-11-17) is later than the config end_datetime (2023-11-10), which
+        # would otherwise yield an empty backfill window.
+        config_overrides={"force_run_since_start": True},
     )
 
     assert mock_config_manager_er_provider.get_integration_details.called
@@ -144,6 +148,7 @@ async def test_execute_pull_observations_action(
     assert mock_erclient_class.return_value.get_observations.called
     assert mock_gundi_sensors_client_class.return_value.post_observations.call_count == 2
     assert response == {
+        "status": "complete",
         "observations_extracted": len(observations_batch_one) + len(observations_batch_two),
         "filter_active": False,
         "sources_resolved": None,
@@ -675,6 +680,9 @@ async def test_pull_observations_filters_by_resolved_source_ids(
     """When subject_group_ids is set, only observations whose source is in the resolved set are forwarded."""
     pull_obs_data = er_integration_v2_provider.get_action_config("pull_observations").data
     pull_obs_data["subject_group_ids"] = ["group-uuid"]
+    # Pin the window to the config's start/end (the mocked last_execution is
+    # later than the config end_datetime, which would yield an empty window).
+    pull_obs_data["force_run_since_start"] = True
 
     # Override the er_client mocks to control resolution + observation batch
     async def fake_get_subjectgroups(flat=False):
@@ -696,13 +704,16 @@ async def test_pull_observations_filters_by_resolved_source_ids(
     mocker.patch.object(
         mock_erclient_class.return_value, "get_source_assignments", side_effect=fake_get_source_assignments
     )
-    # Mixed observation batch: 2 keepers, 1 reject
     from app.actions.tests.conftest import AsyncIterator
-    mock_erclient_class.return_value.get_observations.return_value = AsyncIterator([[
-        {"id": "obs-1", "source": "src-keep-1", "recorded_at": "2025-01-01T00:00:00Z"},
-        {"id": "obs-2", "source": "src-reject", "recorded_at": "2025-01-01T00:00:01Z"},
-        {"id": "obs-3", "source": "src-keep-2", "recorded_at": "2025-01-01T00:00:02Z"},
-    ]])
+    per_source = {
+        "src-keep-1": [[{"id": "obs-1", "source": "src-keep-1", "recorded_at": "2025-01-01T00:00:00Z"}]],
+        "src-keep-2": [[{"id": "obs-3", "source": "src-keep-2", "recorded_at": "2025-01-01T00:00:02Z"}]],
+    }
+
+    def fake_get_observations(**kwargs):
+        return AsyncIterator(per_source.get(kwargs.get("source_id"), []))
+
+    mock_erclient_class.return_value.get_observations.side_effect = fake_get_observations
 
     mocker.patch("app.services.action_runner._portal", mock_gundi_client_v2)
     mocker.patch("app.services.activity_logger.publish_event", mock_publish_event)
@@ -720,13 +731,15 @@ async def test_pull_observations_filters_by_resolved_source_ids(
     )
 
     assert response == {
+        "status": "complete",
         "observations_extracted": 2,
         "filter_active": True,
         "sources_resolved": 2,
     }
-    forwarded = mock_gundi_sensors_client_class.return_value.post_observations.call_args.kwargs["data"]
-    # transform_observations_to_gundi_schema prefixes the source with "er-src-"
-    forwarded_sources = {o["source"] for o in forwarded}
+    forwarded_sources = set()
+    for call in mock_gundi_sensors_client_class.return_value.post_observations.call_args_list:
+        for o in call.kwargs["data"]:
+            forwarded_sources.add(o["source"])
     assert forwarded_sources == {"er-src-src-keep-1", "er-src-src-keep-2"}
 
 
@@ -766,6 +779,7 @@ async def test_pull_observations_logs_error_and_skips_state_when_groups_resolve_
     )
 
     assert response == {
+        "status": "skipped_no_sources",
         "observations_extracted": 0,
         "filter_active": True,
         "sources_resolved": 0,
@@ -1688,3 +1702,140 @@ async def test_pull_source_window_none_source_sends_no_source_id(mocker):
     )
 
     assert "source_id" not in er_client.get_observations.call_args.kwargs
+
+
+@pytest.mark.asyncio
+async def test_pull_observations_resumes_from_existing_cursor(
+        mocker, mock_gundi_client_v2, mock_state_manager, mock_erclient_class,
+        mock_get_gundi_api_key, mock_gundi_sensors_client_class, er_integration_v2_provider,
+        mock_publish_event, mock_gundi_client_v2_class, mock_config_manager_er_provider
+):
+    """A live cursor is authoritative: the run resumes from it and does NOT
+    re-resolve sources."""
+    cursor = {
+        "start": "2025-01-01T00:00:00+00:00",
+        "end": "2025-01-02T00:00:00+00:00",
+        "subwindow_days": 1,
+        "sources": ["src-a"],
+        "window_index": 0,
+        "source_index": 0,
+        "no_progress_count": 0,
+    }
+    mock_state_manager.get_state.return_value = async_return_local({
+        "last_execution": "2024-12-01T00:00:00+00:00",
+        "backfill": cursor,
+    })
+
+    from app.actions.tests.conftest import AsyncIterator
+    mock_erclient_class.return_value.get_observations.side_effect = (
+        lambda **kw: AsyncIterator([[{"id": "o1", "source": "src-a", "recorded_at": "2025-01-01T01:00:00Z"}]])
+    )
+
+    mocker.patch("app.services.action_runner._portal", mock_gundi_client_v2)
+    mocker.patch("app.services.activity_logger.publish_event", mock_publish_event)
+    mocker.patch("app.services.action_runner.publish_event", mock_publish_event)
+    mocker.patch("app.services.action_runner.config_manager", mock_config_manager_er_provider)
+    mocker.patch("app.actions.handlers.state_manager", mock_state_manager)
+    mocker.patch("app.actions.handlers.AsyncERClient", mock_erclient_class)
+    mocker.patch("app.services.gundi.GundiClient", mock_gundi_client_v2_class)
+    mocker.patch("app.services.gundi.GundiDataSenderClient", mock_gundi_sensors_client_class)
+    mocker.patch("app.services.gundi._get_gundi_api_key", mock_get_gundi_api_key)
+
+    response = await execute_action(
+        integration_id=str(er_integration_v2_provider.id),
+        action_id="pull_observations",
+    )
+
+    assert response["status"] == "complete"
+    # Resumed run never resolves sources from groups.
+    mock_erclient_class.return_value.get_subjectgroups.assert_not_called()
+    # Final set_state advances the watermark to the window end.
+    final = mock_state_manager.set_state.call_args.kwargs["state"]
+    assert final == {"last_execution": "2025-01-02T00:00:00+00:00"}
+
+
+@pytest.mark.asyncio
+async def test_pull_observations_yields_in_progress_when_budget_exceeded(
+        mocker, mock_gundi_client_v2, mock_state_manager, mock_erclient_class,
+        mock_get_gundi_api_key, mock_gundi_sensors_client_class, er_integration_v2_provider,
+        mock_publish_event, mock_gundi_client_v2_class, mock_config_manager_er_provider
+):
+    """When the soft budget is already spent at the first unit, the run commits a
+    cursor and returns in_progress without fetching observations."""
+    cursor = {
+        "start": "2025-01-01T00:00:00+00:00",
+        "end": "2025-01-05T00:00:00+00:00",
+        "subwindow_days": 1,
+        "sources": ["src-a"],
+        "window_index": 0,
+        "source_index": 0,
+        "no_progress_count": 0,
+    }
+    mock_state_manager.get_state.return_value = async_return_local({
+        "last_execution": "2024-12-01T00:00:00+00:00",
+        "backfill": cursor,
+    })
+    # Force "budget exceeded" at the first unit. Each call advances the clock by
+    # a full budget's worth, so whichever call the handler treats as
+    # start_monotonic, the very next budget check already exceeds the budget.
+    # A function (not a fixed-length list) avoids StopIteration if unrelated
+    # library code also calls time.monotonic during the run.
+    _mono = {"n": 0}
+
+    def fake_monotonic():
+        _mono["n"] += 1
+        return _mono["n"] * 10 ** 9
+
+    mocker.patch("app.actions.handlers.time.monotonic", side_effect=fake_monotonic)
+
+    mocker.patch("app.services.action_runner._portal", mock_gundi_client_v2)
+    mocker.patch("app.services.activity_logger.publish_event", mock_publish_event)
+    mocker.patch("app.services.action_runner.publish_event", mock_publish_event)
+    mocker.patch("app.services.action_runner.config_manager", mock_config_manager_er_provider)
+    mocker.patch("app.actions.handlers.state_manager", mock_state_manager)
+    mocker.patch("app.actions.handlers.AsyncERClient", mock_erclient_class)
+    mocker.patch("app.services.gundi.GundiClient", mock_gundi_client_v2_class)
+    mocker.patch("app.services.gundi.GundiDataSenderClient", mock_gundi_sensors_client_class)
+    mocker.patch("app.services.gundi._get_gundi_api_key", mock_get_gundi_api_key)
+
+    response = await execute_action(
+        integration_id=str(er_integration_v2_provider.id),
+        action_id="pull_observations",
+    )
+
+    assert response["status"] == "in_progress"
+    assert response["window_index"] == 0 and response["source_index"] == 0
+    mock_erclient_class.return_value.get_observations.assert_not_called()
+    # Cursor was persisted (set_state called with a "backfill" key).
+    saved = mock_state_manager.set_state.call_args.kwargs["state"]
+    assert "backfill" in saved
+
+
+@pytest.mark.asyncio
+async def test_pull_observations_skips_when_lease_held(
+        mocker, mock_gundi_client_v2, mock_state_manager, mock_erclient_class,
+        mock_get_gundi_api_key, mock_gundi_sensors_client_class, er_integration_v2_provider,
+        mock_publish_event, mock_gundi_client_v2_class, mock_config_manager_er_provider
+):
+    """An overlapping invocation (lease already held) is a clean no-op: no cursor
+    read, no ER calls."""
+    mock_state_manager.set_if_absent.return_value = async_return_local(False)
+
+    mocker.patch("app.services.action_runner._portal", mock_gundi_client_v2)
+    mocker.patch("app.services.activity_logger.publish_event", mock_publish_event)
+    mocker.patch("app.services.action_runner.publish_event", mock_publish_event)
+    mocker.patch("app.services.action_runner.config_manager", mock_config_manager_er_provider)
+    mocker.patch("app.actions.handlers.state_manager", mock_state_manager)
+    mocker.patch("app.actions.handlers.AsyncERClient", mock_erclient_class)
+    mocker.patch("app.services.gundi.GundiClient", mock_gundi_client_v2_class)
+    mocker.patch("app.services.gundi.GundiDataSenderClient", mock_gundi_sensors_client_class)
+    mocker.patch("app.services.gundi._get_gundi_api_key", mock_get_gundi_api_key)
+
+    response = await execute_action(
+        integration_id=str(er_integration_v2_provider.id),
+        action_id="pull_observations",
+    )
+
+    assert response == {"skipped": True, "reason": "backfill_in_progress"}
+    mock_erclient_class.return_value.get_observations.assert_not_called()
+    mock_state_manager.get_state.assert_not_called()

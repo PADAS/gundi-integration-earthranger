@@ -1,6 +1,7 @@
 import json
 import datetime
 import logging
+import time
 from collections import defaultdict
 from dataclasses import dataclass, field
 from typing import Dict
@@ -604,12 +605,9 @@ async def action_pull_observations(integration: Integration, action_config: Pull
     logger.info(
         f"Extracting observations for integration {integration_id}, with config {action_config}",
     )
-    total_observations = 0
     execution_timestamp = datetime.datetime.now(tz=datetime.timezone.utc).isoformat()
-    # Parse configurations
     pull_config = action_config
     auth_config = get_authentication_config(integration=integration)
-    # Prepare the ER client to extract events
     url_parse = urlparse(integration.base_url)
     er_client = AsyncERClient(
         service_root=f"{url_parse.scheme}://{url_parse.hostname}/api/v1.0",
@@ -620,73 +618,142 @@ async def action_pull_observations(integration: Integration, action_config: Pull
         client_id="das_web_client",
         connect_timeout=DEFAULT_CONNECT_TIMEOUT_SECONDS,
     )
-    # Prepare filters to extract Data Since last execution
-    state = await state_manager.get_state(
-        integration_id=integration_id, action_id="pull_observations"
-    )
-    logger.debug(
-        f"State retrieved for integration {integration_id}, action pull_observations:\n{state}"
-    )
-    last_execution = state.get("last_execution")
-    if not last_execution or pull_config.force_run_since_start:
-        start_datetime = pull_config.start_datetime
-    else:
-        start_datetime = last_execution
-    params = {
-        "start": start_datetime,
-        "batch_size": BATCH_SIZE
-    }
-    if pull_config.end_datetime:
-        params["end"] = pull_config.end_datetime
-    # Process events in batches
-    logger.info(f"Extracting observations with params '{params}'...")
+
+    start_monotonic = time.monotonic()
+    soft_budget = settings.MAX_ACTION_EXECUTION_TIME * BUDGET_FRACTION
+
     async with er_client as earth_ranger:
-        source_id_set = await _resolve_source_ids(
-            earth_ranger, group_ids=pull_config.subject_group_ids
-        )
-        if pull_config.subject_group_ids and not source_id_set:
-            await log_action_activity(
+        # Mutual exclusion: a long backfill may still be running when the next
+        # scheduled tick fires. Without the lease, both would process the same
+        # cursor units concurrently (duplicate sends + cursor races).
+        if not await _acquire_backfill_lease(integration_id):
+            return _skip_quietly(
+                integration_id, "pull_observations",
+                reason="backfill_in_progress",
+                message="Skipping 'pull_observations': another run holds the backfill lease.",
+                log_level=logging.INFO,
+            )
+        try:
+            state = await state_manager.get_state(
+                integration_id=integration_id, action_id="pull_observations"
+            )
+            cursor = state.get("backfill")
+            last_execution = state.get("last_execution")
+
+            if cursor is None:
+                # Fresh run: compute the window and resolve the source list once.
+                last = state.get("last_execution")
+                if not last or pull_config.force_run_since_start:
+                    window_start = pull_config.start_datetime
+                else:
+                    window_start = last
+                window_end = pull_config.end_datetime or execution_timestamp
+
+                source_id_set = await _resolve_source_ids(
+                    earth_ranger,
+                    group_ids=pull_config.subject_group_ids,
+                    integration_id=integration_id,
+                )
+                if pull_config.subject_group_ids and not source_id_set:
+                    await log_action_activity(
+                        integration_id=integration_id,
+                        action_id="pull_observations",
+                        title="Configured subject groups resolved to zero active sources",
+                        level=LogLevel.ERROR,
+                        data={"subject_group_ids": pull_config.subject_group_ids},
+                    )
+                    # Watermark intentionally NOT advanced; operator fix re-pulls.
+                    return {
+                        "status": "skipped_no_sources",
+                        "observations_extracted": 0,
+                        "filter_active": True,
+                        "sources_resolved": 0,
+                    }
+                cursor = _build_backfill_cursor(
+                    start=window_start,
+                    end=window_end,
+                    subwindow_days=pull_config.subwindow_days,
+                    source_ids=source_id_set,
+                )
+
+            filter_active = cursor["sources"] != [None]
+            subwindows = _iter_subwindows(
+                cursor["start"], cursor["end"], cursor["subwindow_days"]
+            )
+
+            total_observations = 0
+            units_completed = 0
+            wi = cursor["window_index"]
+            si = cursor["source_index"]
+
+            while wi < len(subwindows):
+                w_start, w_end = subwindows[wi]
+                while si < len(cursor["sources"]):
+                    # Yield before starting a unit if the soft budget is spent.
+                    if time.monotonic() - start_monotonic >= soft_budget:
+                        cursor["window_index"] = wi
+                        cursor["source_index"] = si
+                        cursor["no_progress_count"] = (
+                            cursor.get("no_progress_count", 0) + 1
+                            if units_completed == 0 else 0
+                        )
+                        await _save_backfill_cursor(
+                            integration_id, last_execution=last_execution, cursor=cursor
+                        )
+                        logger.info(
+                            "pull_observations yielding (budget): window %d/%d source %d/%d",
+                            wi, len(subwindows), si, len(cursor["sources"]),
+                        )
+                        return {
+                            "status": "in_progress",
+                            "observations_extracted": total_observations,
+                            "window_index": wi,
+                            "source_index": si,
+                            "filter_active": filter_active,
+                            "sources_resolved": len(cursor["sources"]) if filter_active else None,
+                        }
+                    source = cursor["sources"][si]
+                    try:
+                        total_observations += await _pull_source_window(
+                            earth_ranger, source, w_start, w_end,
+                            integration_id=integration_id,
+                        )
+                    except Exception as e:
+                        # Don't wedge the backfill on one bad unit: log loudly and
+                        # advance past it (at-least-once; operator can re-pull).
+                        logger.error(
+                            "pull_observations unit failed (source=%r window=%s..%s): %s",
+                            source, w_start, w_end, e,
+                            extra={"attention_needed": True},
+                        )
+                    si += 1
+                    units_completed += 1
+                    cursor["window_index"] = wi
+                    cursor["source_index"] = si
+                    await _save_backfill_cursor(
+                        integration_id, last_execution=last_execution, cursor=cursor
+                    )
+                si = 0
+                wi += 1
+
+            # All units done → advance the watermark to the window end and clear
+            # the cursor (drops "backfill", sets last_execution).
+            await state_manager.set_state(
                 integration_id=integration_id,
                 action_id="pull_observations",
-                title="Configured subject groups resolved to zero active sources",
-                level=LogLevel.ERROR,
-                data={"subject_group_ids": pull_config.subject_group_ids},
+                state={"last_execution": cursor["end"]},
             )
-            # State is intentionally NOT updated — preserves the previous watermark
-            # so a fix on the operator side can re-pull the window.
+            logger.info(
+                f"Extracted {total_observations} observations for integration {integration}."
+            )
             return {
-                "observations_extracted": 0,
-                "filter_active": True,
-                "sources_resolved": 0,
+                "status": "complete",
+                "observations_extracted": total_observations,
+                "filter_active": filter_active,
+                "sources_resolved": len(cursor["sources"]) if filter_active else None,
             }
-
-        filter_active = bool(source_id_set)
-        async for observation_batch in earth_ranger.get_observations(**params):
-            if filter_active:
-                observation_batch = [
-                    o for o in observation_batch
-                    if str(o.get("source", "")) in source_id_set
-                ]
-            transformed_observations = transform_observations_to_gundi_schema(observations=observation_batch)
-            if not transformed_observations:
-                continue  # No data to send
-            logger.info(f"Sending {len(transformed_observations)} observations to Gundi...")
-            await send_observations_to_gundi(observations=transformed_observations, integration_id=integration_id)
-            total_observations += len(transformed_observations)
-    # Update state
-    state = {"last_execution": execution_timestamp}
-    logger.debug(f"Saving state for integration {integration}, action pull_observations:\n{state}")
-    await state_manager.set_state(
-        integration_id=integration_id,
-        action_id="pull_observations",
-        state=state
-    )
-    logger.info(f"Extracted {total_observations} observations for integration {integration}.")
-    return {
-        "observations_extracted": total_observations,
-        "filter_active": filter_active,
-        "sources_resolved": len(source_id_set) if filter_active else None,
-    }
+        finally:
+            await _release_backfill_lease(integration_id)
 
 
 async def _fetch_source_assignments(er_client, subject_ids, *, integration_id=None):
@@ -821,6 +888,18 @@ async def _release_backfill_lease(integration_id):
         logger.warning(
             "Backfill lease release failed (%s); TTL will expire it.", e
         )
+
+
+def _skip_quietly(integration_id, action_id, *, reason, message, log_level=logging.INFO):
+    """Record an expected pull-action skip in the local log only.
+
+    Mirrors ``app.services.action_runner._skip_quietly`` (defined locally to
+    avoid a circular import: action_runner imports app.actions at module load).
+    Used when an overlapping invocation finds the backfill lease already held —
+    an expected, steady-state no-op kept out of the portal activity feed.
+    """
+    logger.log(log_level, f"{message} (integration '{integration_id}')")
+    return {"skipped": True, "reason": reason}
 
 
 def _build_backfill_cursor(*, start, end, subwindow_days, source_ids):
