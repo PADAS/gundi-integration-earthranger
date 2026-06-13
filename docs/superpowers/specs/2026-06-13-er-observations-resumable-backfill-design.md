@@ -1,7 +1,7 @@
 # ER Observations: Resumable Backfill, Pagination & Resilience
 
 **Date:** 2026-06-13
-**Status:** Approved (design)
+**Status:** Implemented — see plan `docs/superpowers/plans/2026-06-13-resumable-observation-backfill.md`
 **Scope:** `app/actions/handlers.py::action_pull_observations` and its helpers.
 `pull_events` is explicitly out of scope (the chunking machinery is built as a
 reusable helper so events can adopt it later).
