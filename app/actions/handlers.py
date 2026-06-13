@@ -335,10 +335,11 @@ async def action_show_permissions(integration: Integration, action_config: ShowP
         response["data"]["Global Permissions"] = _extract_global_permissions(er_user_permissions=user_global_permissions)
         global_category_permissions = _extract_category_permissions(er_user_permissions=user_global_permissions)
         try:  # Get event categories and types from the activity/events/eventtypes endpoint
-            event_types_response = await er_client.get_event_types()
+            event_types_response = _as_list(await er_client.get_event_types())
         except Exception as e:
             response["data"]["Event Categories"]["error"] = f"Error retrieving event categories: {type(e).__name__}:{e}"
         else:
+            event_types_response = [et for et in event_types_response if isinstance(et, dict)]
             response["data"]["Event Categories"] = _merge_event_categories_and_type_perms(
                 global_category_permissions=global_category_permissions,
                 er_event_types=event_types_response
@@ -715,10 +716,34 @@ async def _resolve_source_ids(er_client, group_ids):
         return set()
 
     assignments = await er_client.get_source_assignments(subject_ids=sorted(subject_ids))
-    return {str(a["source"]) for a in assignments if a.get("source")}
+    # subjectsources comes back as a paginated envelope, not a flat list — see _as_list.
+    return {
+        str(a["source"])
+        for a in _as_list(assignments)
+        if isinstance(a, dict) and a.get("source")
+    }
 
 
 # Auxiliary functions
+
+def _as_list(response):
+    """Normalize an ER list response to a plain list of records.
+
+    ER list endpoints (via AsyncERClient, which unwraps the ``data`` envelope)
+    return EITHER a flat list OR a paginated envelope
+    ``{"count", "next", "previous", "results": [...]}``. Iterating the envelope
+    directly walks its string keys and raises
+    ``AttributeError: 'str' object has no attribute 'get'``, so every
+    list-consuming caller must normalize through here first.
+
+    Note: only the first page is returned — callers that need every page must
+    paginate explicitly (the non-generator erclient getters do a single
+    request).
+    """
+    if isinstance(response, dict):
+        return response.get("results", [])
+    return response or []
+
 
 def get_authentication_config(integration):
     configurations = integration.configurations
@@ -781,8 +806,9 @@ async def _fetch_event_type_maps(er_client) -> EventTypeMaps:
             type(e).__name__, e,
         )
     else:
-        for et in v1_types:
-            _absorb_event_type(maps, et, with_category=True)
+        for et in _as_list(v1_types):
+            if isinstance(et, dict):
+                _absorb_event_type(maps, et, with_category=True)
 
     try:
         v2_types = await er_client.get_event_types(version=VERSION_2_0)
@@ -793,10 +819,11 @@ async def _fetch_event_type_maps(er_client) -> EventTypeMaps:
             type(e).__name__, e,
         )
     else:
-        for et in v2_types:
+        for et in _as_list(v2_types):
             # v2 carries category as a bare slug, not as a nested object —
             # we resolve category UUIDs separately below.
-            _absorb_event_type(maps, et, with_category=False)
+            if isinstance(et, dict):
+                _absorb_event_type(maps, et, with_category=False)
 
     # If we got no category UUIDs from the v1 event types (e.g. ER has only
     # v2 types defined), the canonical categories endpoint fills the gap.
@@ -810,7 +837,9 @@ async def _fetch_event_type_maps(er_client) -> EventTypeMaps:
                 type(e).__name__, e,
             )
         else:
-            for cat in categories:
+            for cat in _as_list(categories):
+                if not isinstance(cat, dict):
+                    continue
                 cat_slug = cat.get("value")
                 cat_id = cat.get("id")
                 if cat_slug and cat_id:

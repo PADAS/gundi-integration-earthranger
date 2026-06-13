@@ -534,6 +534,78 @@ async def test_resolve_source_ids_walks_subgroups(mocker):
 
 
 @pytest.mark.asyncio
+async def test_resolve_source_ids_handles_paginated_subjectsources_response(mocker):
+    """ER's subjectsources endpoint returns a paginated envelope
+    ({count,next,previous,results}), not a flat list. _resolve_source_ids must
+    read `results` rather than iterating the dict's (string) keys.
+
+    Regression: pull_observations crashed with
+    "AttributeError: 'str' object has no attribute 'get'".
+    """
+    from app.actions.handlers import _resolve_source_ids
+
+    er_client = mocker.MagicMock()
+
+    async def fake_get_subjectgroups(flat=False):
+        return [{"id": "grp", "subjects": [{"id": "subj-1"}], "subgroups": []}]
+
+    async def fake_get_source_assignments(subject_ids=None, source_ids=None):
+        return {
+            "count": 2,
+            "next": None,
+            "previous": None,
+            "results": [
+                {"subject": "subj-1", "source": "src-1"},
+                {"subject": "subj-1", "source": "src-2"},
+            ],
+        }
+
+    er_client.get_subjectgroups.side_effect = fake_get_subjectgroups
+    er_client.get_source_assignments.side_effect = fake_get_source_assignments
+
+    sources = await _resolve_source_ids(er_client, group_ids=["grp"])
+
+    assert sources == {"src-1", "src-2"}
+
+
+@pytest.mark.asyncio
+async def test_fetch_event_type_maps_handles_paginated_eventtypes_response(mocker):
+    """ER's v2 eventtypes endpoint returns a paginated envelope, like
+    subjectsources. _fetch_event_type_maps iterates the result, so it must
+    normalize the envelope to its `results` list — otherwise it walks the
+    dict's string keys and raises 'str' object has no attribute 'get'
+    (the loop sits in an else-block, so the surrounding try/except wouldn't
+    catch it)."""
+    from erclient import VERSION_2_0
+    from app.actions.handlers import _fetch_event_type_maps
+
+    er_client = mocker.MagicMock()
+
+    async def fake_get_event_types(version=None, **kwargs):
+        if version == VERSION_2_0:
+            return {
+                "count": 1,
+                "next": None,
+                "previous": None,
+                "results": [
+                    {"value": "wildlife_sighting", "display": "Wildlife Sighting", "id": "et-v2"},
+                ],
+            }
+        return []  # v1: nothing
+
+    async def fake_get_event_categories(include_inactive=False):
+        return []
+
+    er_client.get_event_types.side_effect = fake_get_event_types
+    er_client.get_event_categories.side_effect = fake_get_event_categories
+
+    maps = await _fetch_event_type_maps(er_client)
+
+    assert maps.id_by_slug.get("wildlife_sighting") == "et-v2"
+    assert maps.display_by_slug.get("wildlife_sighting") == "Wildlife Sighting"
+
+
+@pytest.mark.asyncio
 async def test_resolve_source_ids_dedups_across_overlapping_groups(mocker):
     """A subject in two configured groups only triggers one assignment lookup."""
     from app.actions.handlers import _resolve_source_ids
