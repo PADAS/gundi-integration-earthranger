@@ -8,6 +8,14 @@ from app.conftest import async_return
 from app.services.action_runner import execute_action
 from app.actions.configurations import PullEventsConfig, PullObservationsConfig
 
+import asyncio as _asyncio
+
+
+def async_return_local(result):
+    f = _asyncio.Future()
+    f.set_result(result)
+    return f
+
 
 @pytest.mark.parametrize("config_cls", [PullEventsConfig, PullObservationsConfig])
 def test_pull_actions_default_run_on_schedule_off(config_cls):
@@ -1547,3 +1555,31 @@ async def test_fetch_source_assignments_skips_malformed_records(mocker, caplog):
 
     assert assignments == [{"subject": "s", "source": "src-ok"}]
     assert any("malformed" in r.message.lower() for r in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_acquire_backfill_lease_returns_false_when_held(mocker):
+    from app.actions.handlers import _acquire_backfill_lease, BACKFILL_LOCK_SOURCE_ID
+    sm = mocker.patch("app.actions.handlers.state_manager")
+    sm.set_if_absent.return_value = async_return_local(False)
+    got = await _acquire_backfill_lease("int-1")
+    assert got is False
+    assert sm.set_if_absent.call_args.kwargs["source_id"] == BACKFILL_LOCK_SOURCE_ID
+
+
+@pytest.mark.asyncio
+async def test_acquire_backfill_lease_fails_open_on_redis_error(mocker):
+    from app.actions.handlers import _acquire_backfill_lease
+    sm = mocker.patch("app.actions.handlers.state_manager")
+    sm.set_if_absent.side_effect = RuntimeError("redis down")
+    # Fail open: a missing lease is a rare duplicate, not a crash.
+    assert await _acquire_backfill_lease("int-1") is True
+
+
+@pytest.mark.asyncio
+async def test_release_backfill_lease_deletes_lock_key(mocker):
+    from app.actions.handlers import _release_backfill_lease, BACKFILL_LOCK_SOURCE_ID
+    sm = mocker.patch("app.actions.handlers.state_manager")
+    sm.delete_state.return_value = async_return_local(None)
+    await _release_backfill_lease("int-1")
+    assert sm.delete_state.call_args.kwargs["source_id"] == BACKFILL_LOCK_SOURCE_ID

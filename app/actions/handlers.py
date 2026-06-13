@@ -14,6 +14,7 @@ from erclient.er_errors import ERClientBadCredentials
 from gundi_client_v2.client import GundiClient
 from gundi_core.events import LogLevel
 from gundi_core.schemas.v2 import Integration
+from app import settings
 from app.services.utils import find_config_for_action
 from app.services.state import IntegrationStateManager
 from .configurations import AuthenticateConfig, EventFilterDateField, PullObservationsConfig, PullEventsConfig, \
@@ -27,6 +28,10 @@ logger = logging.getLogger(__name__)
 DEFAULT_CONNECT_TIMEOUT_SECONDS = 10.0
 BATCH_SIZE = 100
 SUBJECT_ID_CHUNK_SIZE = 25
+BUDGET_FRACTION = 0.8            # fraction of MAX_ACTION_EXECUTION_TIME before yielding
+MAX_NO_PROGRESS_RETRIES = 3      # self-re-trigger runaway guard
+LOCK_MARGIN_SECONDS = 30         # lease TTL margin above the hard timeout
+BACKFILL_LOCK_SOURCE_ID = "backfill-lock"
 state_manager = IntegrationStateManager()
 
 # Maps the operator-selected date field to the corresponding key on ER's
@@ -776,6 +781,44 @@ async def _resolve_source_ids(er_client, group_ids, *, integration_id=None):
         er_client, sorted(subject_ids), integration_id=integration_id
     )
     return {str(a["source"]) for a in assignments if a.get("source")}
+
+
+async def _acquire_backfill_lease(integration_id):
+    """Acquire the per-(integration, pull_observations) lease.
+
+    Returns True if this invocation may proceed, False if another invocation
+    currently holds it. The TTL is the crash backstop: because the handler is
+    hard-killed by asyncio.wait_for at MAX_ACTION_EXECUTION_TIME, a run can never
+    outlive its own lease. Fails OPEN on a state-store error (a rare duplicate is
+    cheaper than turning a benign no-op into a crash).
+    """
+    ttl = int(settings.MAX_ACTION_EXECUTION_TIME) + LOCK_MARGIN_SECONDS
+    try:
+        return await state_manager.set_if_absent(
+            integration_id=integration_id,
+            action_id="pull_observations",
+            source_id=BACKFILL_LOCK_SOURCE_ID,
+            ttl_seconds=ttl,
+        )
+    except Exception as e:
+        logger.warning(
+            "Backfill lease acquire failed (%s); proceeding without lease.", e
+        )
+        return True
+
+
+async def _release_backfill_lease(integration_id):
+    """Release the lease. Best-effort: if this fails, the TTL expires it."""
+    try:
+        await state_manager.delete_state(
+            integration_id=integration_id,
+            action_id="pull_observations",
+            source_id=BACKFILL_LOCK_SOURCE_ID,
+        )
+    except Exception as e:
+        logger.warning(
+            "Backfill lease release failed (%s); TTL will expire it.", e
+        )
 
 
 # Auxiliary functions
