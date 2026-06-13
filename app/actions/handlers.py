@@ -8,6 +8,7 @@ from urllib.parse import urlparse
 
 import httpx
 import stamina
+from dateutil import parser as dateutil_parser
 from erclient import AsyncERClient, ERClientException, VERSION_1_0, VERSION_2_0
 from erclient.er_errors import ERClientBadCredentials
 from gundi_client_v2.client import GundiClient
@@ -750,6 +751,36 @@ def _chunked(seq, size):
     seq = list(seq)
     for i in range(0, len(seq), size):
         yield seq[i:i + size]
+
+
+def _parse_iso(value):
+    """Parse an ISO-8601 string (tolerant of ER's no-colon offsets and 'Z')."""
+    return dateutil_parser.isoparse(value)
+
+
+def _to_iso(dt):
+    """Render a datetime back to ISO-8601."""
+    return dt.isoformat()
+
+
+def _iter_subwindows(start_iso, end_iso, subwindow_days):
+    """Return ascending half-open ``[start, end)`` sub-windows as ISO pairs.
+
+    The window list is deterministic given (start, end, subwindow_days), so a
+    resumed run regenerates the exact same units and continues by index.
+    Returns an empty list when ``start`` is not before ``end``.
+    """
+    days = max(1, int(subwindow_days or 1))
+    start = _parse_iso(start_iso)
+    end = _parse_iso(end_iso)
+    delta = datetime.timedelta(days=days)
+    windows = []
+    cur = start
+    while cur < end:
+        nxt = min(cur + delta, end)
+        windows.append((_to_iso(cur), _to_iso(nxt)))
+        cur = nxt
+    return windows
 
 
 def get_authentication_config(integration):

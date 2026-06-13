@@ -1424,3 +1424,36 @@ def test_chunked_splits_into_fixed_size_groups():
 def test_chunked_empty_yields_nothing():
     from app.actions.handlers import _chunked
     assert list(_chunked([], 3)) == []
+
+
+def test_iter_subwindows_splits_window_by_days():
+    from app.actions.handlers import _iter_subwindows
+    windows = _iter_subwindows("2025-01-01T00:00:00+00:00", "2025-01-03T00:00:00+00:00", 1)
+    assert windows == [
+        ("2025-01-01T00:00:00+00:00", "2025-01-02T00:00:00+00:00"),
+        ("2025-01-02T00:00:00+00:00", "2025-01-03T00:00:00+00:00"),
+    ]
+
+
+def test_iter_subwindows_last_window_clipped_to_end():
+    from app.actions.handlers import _iter_subwindows
+    windows = _iter_subwindows("2025-01-01T00:00:00+00:00", "2025-01-02T12:00:00+00:00", 1)
+    assert windows[-1] == ("2025-01-02T00:00:00+00:00", "2025-01-02T12:00:00+00:00")
+
+
+def test_iter_subwindows_handles_er_offset_without_colon():
+    from app.actions.handlers import _iter_subwindows
+    # ER emits offsets like +0200 (no colon); must not raise.
+    windows = _iter_subwindows("2023-11-17T11:20:00+0200", "2023-11-18T11:20:00+0200", 1)
+    assert len(windows) == 1
+
+
+def test_iter_subwindows_empty_when_start_not_before_end():
+    from app.actions.handlers import _iter_subwindows
+    assert _iter_subwindows("2025-01-02T00:00:00+00:00", "2025-01-01T00:00:00+00:00", 1) == []
+
+
+def test_iter_subwindows_floors_subwindow_days_to_one():
+    from app.actions.handlers import _iter_subwindows
+    windows = _iter_subwindows("2025-01-01T00:00:00+00:00", "2025-01-02T00:00:00+00:00", 0)
+    assert len(windows) == 1
