@@ -823,6 +823,62 @@ async def _release_backfill_lease(integration_id):
         )
 
 
+def _build_backfill_cursor(*, start, end, subwindow_days, source_ids):
+    """Snapshot the work definition + zeroed progress for a new backfill run.
+
+    ``source_ids`` is snapshotted (sorted) so the unit sequence is stable across
+    resumes. An empty set means "no group filter" → a single ``None`` source,
+    i.e. one whole-instance fetch per sub-window.
+    """
+    sources = sorted(source_ids) if source_ids else [None]
+    return {
+        "start": start,
+        "end": end,
+        "subwindow_days": int(subwindow_days or 1),
+        "sources": sources,
+        "window_index": 0,
+        "source_index": 0,
+        "no_progress_count": 0,
+    }
+
+
+async def _save_backfill_cursor(integration_id, *, last_execution, cursor):
+    """Persist the cursor alongside the (unchanged) watermark.
+
+    The watermark is only advanced on completion; until then it is preserved so
+    a failure never loses the previously-confirmed window.
+    """
+    state = {"backfill": cursor}
+    if last_execution is not None:
+        state["last_execution"] = last_execution
+    await state_manager.set_state(
+        integration_id=integration_id,
+        action_id="pull_observations",
+        state=state,
+    )
+
+
+async def _pull_source_window(er_client, source, start, end, *, integration_id):
+    """Drain one (source × sub-window) unit and forward to Gundi.
+
+    ``source=None`` means no source filter (whole instance for the window).
+    Returns the number of observations forwarded. ER filters server-side, so no
+    client-side source filtering is needed.
+    """
+    params = {"start": start, "end": end, "batch_size": BATCH_SIZE}
+    if source is not None:
+        params["source_id"] = source
+    sent = 0
+    async for observation_batch in er_client.get_observations(**params):
+        transformed = transform_observations_to_gundi_schema(observations=observation_batch)
+        if not transformed:
+            continue
+        logger.info(f"Sending {len(transformed)} observations to Gundi...")
+        await send_observations_to_gundi(observations=transformed, integration_id=integration_id)
+        sent += len(transformed)
+    return sent
+
+
 # Auxiliary functions
 
 def _as_list(response):

@@ -1589,3 +1589,89 @@ async def test_release_backfill_lease_deletes_lock_key(mocker):
     kwargs = sm.delete_state.call_args.kwargs
     assert kwargs["source_id"] == BACKFILL_LOCK_SOURCE_ID
     assert kwargs["action_id"] == "pull_observations"
+
+
+def test_build_backfill_cursor_with_sources():
+    from app.actions.handlers import _build_backfill_cursor
+    cursor = _build_backfill_cursor(
+        start="2025-01-01T00:00:00+00:00",
+        end="2025-01-03T00:00:00+00:00",
+        subwindow_days=1,
+        source_ids={"src-b", "src-a"},
+    )
+    assert cursor == {
+        "start": "2025-01-01T00:00:00+00:00",
+        "end": "2025-01-03T00:00:00+00:00",
+        "subwindow_days": 1,
+        "sources": ["src-a", "src-b"],  # sorted, deterministic
+        "window_index": 0,
+        "source_index": 0,
+        "no_progress_count": 0,
+    }
+
+
+def test_build_backfill_cursor_without_sources_uses_none_sentinel():
+    from app.actions.handlers import _build_backfill_cursor
+    cursor = _build_backfill_cursor(
+        start="2025-01-01T00:00:00+00:00",
+        end="2025-01-02T00:00:00+00:00",
+        subwindow_days=1,
+        source_ids=set(),
+    )
+    # No group filter → one synthetic source (None) = whole-instance per window.
+    assert cursor["sources"] == [None]
+
+
+@pytest.mark.asyncio
+async def test_save_backfill_cursor_preserves_last_execution(mocker):
+    from app.actions.handlers import _save_backfill_cursor
+    sm = mocker.patch("app.actions.handlers.state_manager")
+    sm.set_state.return_value = async_return_local(None)
+    cursor = {"window_index": 1, "source_index": 0}
+    await _save_backfill_cursor("int-1", last_execution="2023-01-01T00:00:00+00:00", cursor=cursor)
+    saved = sm.set_state.call_args.kwargs["state"]
+    assert saved == {"last_execution": "2023-01-01T00:00:00+00:00", "backfill": cursor}
+
+
+@pytest.mark.asyncio
+async def test_pull_source_window_passes_source_and_window_to_er(mocker):
+    from app.actions.handlers import _pull_source_window
+    from app.actions.tests.conftest import AsyncIterator
+
+    er_client = mocker.MagicMock()
+    er_client.get_observations.return_value = AsyncIterator([[
+        {"id": "o1", "source": "src-1", "recorded_at": "2025-01-01T00:00:00Z"},
+    ]])
+    sent = mocker.patch("app.actions.handlers.send_observations_to_gundi")
+    sent.return_value = async_return_local(None)
+
+    count = await _pull_source_window(
+        er_client, "src-1", "2025-01-01T00:00:00+00:00",
+        "2025-01-02T00:00:00+00:00", integration_id="int-1",
+    )
+
+    assert count == 1
+    kwargs = er_client.get_observations.call_args.kwargs
+    assert kwargs["source_id"] == "src-1"
+    assert kwargs["start"] == "2025-01-01T00:00:00+00:00"
+    assert kwargs["end"] == "2025-01-02T00:00:00+00:00"
+
+
+@pytest.mark.asyncio
+async def test_pull_source_window_none_source_sends_no_source_id(mocker):
+    from app.actions.handlers import _pull_source_window
+    from app.actions.tests.conftest import AsyncIterator
+
+    er_client = mocker.MagicMock()
+    er_client.get_observations.return_value = AsyncIterator([[
+        {"id": "o1", "source": "src-x", "recorded_at": "2025-01-01T00:00:00Z"},
+    ]])
+    sent = mocker.patch("app.actions.handlers.send_observations_to_gundi")
+    sent.return_value = async_return_local(None)
+
+    await _pull_source_window(
+        er_client, None, "2025-01-01T00:00:00+00:00",
+        "2025-01-02T00:00:00+00:00", integration_id="int-1",
+    )
+
+    assert "source_id" not in er_client.get_observations.call_args.kwargs
