@@ -764,6 +764,13 @@ async def action_pull_observations(integration: Integration, action_config: Pull
             # All units done → advance the watermark to the window end and clear
             # the cursor (drops "backfill", sets last_execution).
             units_failed = cursor.get("units_failed", 0)
+            # Advance the watermark first (durable record of completion) so a
+            # failure publishing the warning below can't force a full re-run.
+            await state_manager.set_state(
+                integration_id=integration_id,
+                action_id="pull_observations",
+                state={"last_execution": cursor["end"]},
+            )
             if units_failed:
                 await log_action_activity(
                     integration_id=integration_id,
@@ -772,18 +779,13 @@ async def action_pull_observations(integration: Integration, action_config: Pull
                     level=LogLevel.WARNING,
                     data={"units_failed": units_failed, "window_end": cursor["end"]},
                 )
-            await state_manager.set_state(
-                integration_id=integration_id,
-                action_id="pull_observations",
-                state={"last_execution": cursor["end"]},
-            )
             logger.info(
                 f"Extracted {total_observations} observations for integration {integration}."
             )
             return {
                 "status": "complete",
                 "observations_extracted": total_observations,
-                "units_failed": cursor.get("units_failed", 0),
+                "units_failed": units_failed,
                 "filter_active": filter_active,
                 "sources_resolved": len(cursor["sources"]) if filter_active else None,
             }

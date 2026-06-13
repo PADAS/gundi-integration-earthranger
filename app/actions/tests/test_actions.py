@@ -2099,6 +2099,9 @@ async def test_pull_observations_resume_round_trip_completes(
     r1 = await execute_action(integration_id=integration_id, action_id="pull_observations")
     assert r1["status"] == "in_progress"
     assert ("backfill" in fake_sm.store.get((integration_id, "pull_observations", "no-source"), {}))
+    assert r1["units_failed"] == 0
+    # Invocation 1 advanced to (but did not start) window index 2 of 3.
+    assert r1["window_index"] == 1
 
     # Keep resuming until complete (bounded loop so a bug can't hang the test).
     last = r1
@@ -2113,3 +2116,5 @@ async def test_pull_observations_resume_round_trip_completes(
     final = fake_sm.store[(integration_id, "pull_observations", "no-source")]
     assert final == {"last_execution": "2025-01-04T00:00:00+00:00"}
     assert "backfill" not in final
+    # Correct resume processes each of the 3 windows exactly once (no re-processing).
+    assert mock_erclient_class.return_value.get_observations.call_count == 3
