@@ -504,7 +504,13 @@ async def action_pull_events(integration: Integration, action_config: PullEvents
         json_filter = json.dumps(event_filter)
         logger.info(f"Extracting events with filter '{event_filter}'...")
 
-        async for event_batch in earth_ranger.get_events(filter=json_filter, batch_size=BATCH_SIZE):
+        # include_notes is required: ER's events-list endpoint omits the notes
+        # array unless explicitly requested, so without this each er_event comes
+        # back without notes and no note update_event is ever emitted (the
+        # ER-note → downstream-comment path silently never fires).
+        async for event_batch in earth_ranger.get_events(
+            filter=json_filter, batch_size=BATCH_SIZE, include_notes=True
+        ):
             for er_event in event_batch:
                 er_event_uuid = er_event.get("id")
                 if not er_event_uuid:
