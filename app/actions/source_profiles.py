@@ -37,6 +37,8 @@ class Assignment(BaseModel):
 
     def covers(self, when: datetime) -> bool:
         when = _ensure_utc(when)
+        if when is None:
+            return False
         lower = _ensure_utc(self.lower)
         upper = _ensure_utc(self.upper)
         if when < lower:

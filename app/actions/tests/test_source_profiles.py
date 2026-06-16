@@ -104,6 +104,21 @@ def test_resolve_overlapping_picks_latest_starting():
     assert r.source_name == "New"
 
 
+def test_assignment_covers_none_when():
+    """Assignment.covers(None) must return False, never raise TypeError."""
+    a = Assignment(lower=_dt("2026-01-01T00:00:00"), upper=None, subject_name="X")
+    assert a.covers(None) is False
+
+
+def test_resolve_source_none_recorded_at():
+    """resolve_source with recorded_at=None: identity resolved, no subject, no exception."""
+    p = SourceProfile(manufacturer_id="S", assignments=[
+        Assignment(lower=_dt("2026-01-01T00:00:00"), upper=None, subject_name="Tau", subject_type="elephant"),
+    ])
+    r = resolve_source(p, "src-1", None)
+    assert r == ResolvedSource(external_source_id="S", source_name=None, subject_type=None)
+
+
 import pytest
 from app.actions.source_profiles import SourceProfileResolver
 
