@@ -1,6 +1,6 @@
 # app/actions/source_profiles.py
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Iterable, List, Optional
 
 from pydantic import BaseModel
@@ -12,6 +12,23 @@ logger = logging.getLogger(__name__)
 SOURCE_ID_CHUNK_SIZE = 25
 
 
+def _ensure_utc(dt: Optional[datetime]) -> Optional[datetime]:
+    """Return dt normalised to UTC-aware, or None if dt is None.
+
+    If dt has no tzinfo, attach UTC (ER sometimes returns offset-less ISO strings).
+    Otherwise convert to UTC so comparisons are always tz-homogeneous.
+    """
+    if dt is None:
+        return None
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
+def _parse_dt(value):
+    return _ensure_utc(datetime.fromisoformat(value)) if value else None
+
+
 class Assignment(BaseModel):
     lower: datetime
     upper: Optional[datetime] = None  # None = still assigned (open-ended)
@@ -19,9 +36,12 @@ class Assignment(BaseModel):
     subject_type: Optional[str] = None
 
     def covers(self, when: datetime) -> bool:
-        if when < self.lower:
+        when = _ensure_utc(when)
+        lower = _ensure_utc(self.lower)
+        upper = _ensure_utc(self.upper)
+        if when < lower:
             return False
-        if self.upper is not None and when >= self.upper:  # half-open [lower, upper)
+        if upper is not None and when >= upper:  # half-open [lower, upper)
             return False
         return True
 
@@ -43,11 +63,6 @@ def _chunked(seq, size):
         yield seq[i:i + size]
 
 
-def _parse_dt(value):
-    from datetime import datetime
-    return datetime.fromisoformat(value) if value else None
-
-
 def resolve_source(profile: Optional[SourceProfile], source_uuid: str, recorded_at: datetime) -> ResolvedSource:
     """Pure: map a source UUID + observation time to its Gundi identifiers.
 
@@ -60,7 +75,7 @@ def resolve_source(profile: Optional[SourceProfile], source_uuid: str, recorded_
         return ResolvedSource(external_source_id=fallback)
     external = profile.manufacturer_id or fallback
     covering = [a for a in profile.assignments if a.covers(recorded_at)]
-    chosen = max(covering, key=lambda a: a.lower) if covering else None
+    chosen = max(covering, key=lambda a: _ensure_utc(a.lower)) if covering else None
     return ResolvedSource(
         external_source_id=external,
         source_name=chosen.subject_name if chosen else None,
@@ -85,16 +100,9 @@ class SourceProfileResolver:
         missing = sorted({u for u in source_uuids if u and u not in self._cache})
         if not missing:
             return
-        try:
-            ranges_by_source = await self._fetch_ranges(missing)
-        except Exception as e:
-            logger.warning(
-                "Source assignments fetch failed for %s sources (%s); using UUID fallback for all.",
-                len(missing), e, extra={"attention_needed": True},
-            )
-            for uuid in missing:
-                self._cache[uuid] = SourceProfile()
-            return
+        # _fetch_ranges is now per-chunk resilient and never raises; always returns
+        # whatever it managed to collect before any failing chunk.
+        ranges_by_source = await self._fetch_ranges(missing)
         for uuid in missing:
             try:
                 self._cache[uuid] = await self._build_profile(uuid, ranges_by_source.get(uuid, []))
@@ -109,14 +117,36 @@ class SourceProfileResolver:
         return resolve_source(self._cache.get(source_uuid), source_uuid, recorded_at)
 
     async def _fetch_ranges(self, source_uuids):
-        """source UUID -> list of (lower, upper, subject_uuid) from /subjectsources."""
+        """source UUID -> list of (lower, upper, subject_uuid) from /subjectsources.
+
+        Chunks the request to keep URLs short. Per-chunk failures are logged and
+        skipped; successfully collected chunks are always returned. The fallback
+        to an empty SourceProfile() happens in ensure() for sources whose UUID
+        is absent from the returned dict.
+        """
         out = {}
         for chunk in _chunked(source_uuids, SOURCE_ID_CHUNK_SIZE):
             try:
                 raw = await self._er.get_source_assignments(source_ids=list(chunk))
-            except Exception:
-                raise  # handled per-source by ensure() fallback below
-            records = raw.get("results", []) if isinstance(raw, dict) else raw
+            except Exception as e:
+                logger.warning(
+                    "Source assignments chunk fetch failed for %d sources (%s); "
+                    "skipping chunk, already-collected results are preserved.",
+                    len(chunk), e, extra={"attention_needed": True},
+                )
+                continue
+            if isinstance(raw, dict):
+                if raw.get("next"):
+                    logger.warning(
+                        "subjectsources chunk returned a paginated 'next' "
+                        "(count=%s, chunk_size=%d) — sources may be dropped; "
+                        "lower SOURCE_ID_CHUNK_SIZE.",
+                        raw.get("count"), len(chunk),
+                        extra={"attention_needed": True},
+                    )
+                records = raw.get("results", [])
+            else:
+                records = raw
             for rec in records or []:
                 src = rec.get("source")
                 rng = rec.get("assigned_range") or {}
@@ -128,7 +158,10 @@ class SourceProfileResolver:
         return out
 
     async def _build_profile(self, source_uuid, ranges):
-        detail = await self._er.get_source_by_manufacturer_id(source_uuid)  # source/{uuid}/
+        # ER's get_source_by_manufacturer_id GETs /source/{id}/ — despite the method
+        # name it resolves by source PK (UUID), not manufacturer_id. No clearer method
+        # exists on AsyncERClient; see: dir(erclient.AsyncERClient) → no get_source/get_source_by_id.
+        detail = await self._er.get_source_by_manufacturer_id(source_uuid)
         manufacturer_id = (detail or {}).get("manufacturer_id")
         subjects = await self._er.get_source_subjects(source_uuid)
         subj_by_id = {s.get("id"): s for s in (subjects or [])}
