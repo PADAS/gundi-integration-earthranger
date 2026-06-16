@@ -1300,30 +1300,45 @@ def transform_events_to_gundi_schema(events, event_type_display_by_slug=None, er
     return transformed_data
 
 
-def transform_observations_to_gundi_schema(observations):
+def transform_observations_to_gundi_schema(observations, resolver=None):
     transformed_data = []
     for observation in observations:
         try:
             transformed_observation = {}
-            # Set base fields
-            if recorded_at := observation.get("recorded_at"):
+            recorded_at = observation.get("recorded_at")
+            if recorded_at:
                 transformed_observation["recorded_at"] = recorded_at
-            if source := observation.get("source"):
-                transformed_observation["source"] = f"er-src-{source}"
+            source_uuid = observation.get("source")
+            if source_uuid:
+                if resolver is not None:
+                    from datetime import datetime
+                    when = datetime.fromisoformat(recorded_at) if recorded_at else None
+                    resolved = resolver.resolve(source_uuid, when)
+                    transformed_observation["source"] = resolved.external_source_id
+                    if resolved.source_name:
+                        transformed_observation["source_name"] = resolved.source_name
+                    if resolved.subject_type:
+                        transformed_observation["subject_type"] = resolved.subject_type
+                else:
+                    transformed_observation["source"] = f"er-src-{source_uuid}"
             if location := observation.get("location"):
                 transformed_observation["location"] = {
                     "lon": location.get("longitude"),
-                    "lat": location.get("latitude")
+                    "lat": location.get("latitude"),
                 }
-            # Save others fields in additional
-            transformed_observation["additional"] = {
+            # Everything not already mapped goes to additional; preserve the raw
+            # ER source UUID for traceability/reconciliation after the identity change.
+            additional = {
                 key: value for key, value in observation.items()
-                if key not in transformed_observation.keys()
+                if key not in transformed_observation.keys() and key != "source"
             }
+            if source_uuid:
+                additional["er_source_id"] = source_uuid
+            transformed_observation["additional"] = additional
         except Exception as e:
             logger.error(
                 f"Error transforming observation {observation}: {e}",
-                extra={"attention_needed": True}
+                extra={"attention_needed": True},
             )
             continue
         else:
