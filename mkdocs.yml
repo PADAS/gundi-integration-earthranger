@@ -1,0 +1,58 @@
+site_name: EarthRanger Action Runner
+site_description: A Gundi v2 integration that pulls events and observations from EarthRanger and forwards them to Gundi.
+repo_url: https://github.com/PADAS/gundi-integration-earthranger
+repo_name: PADAS/gundi-integration-earthranger
+edit_uri: edit/main/docs/
+
+theme:
+  name: material
+  features:
+    - navigation.sections
+    - navigation.top
+    - navigation.tracking
+    - content.code.copy
+    - toc.follow
+    - search.suggest
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: green
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: green
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+
+markdown_extensions:
+  - admonition
+  - tables
+  - toc:
+      permalink: true
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.superfences
+  - pymdownx.inlinehilite
+  - pymdownx.snippets
+
+# Brainstorming specs live under docs/superpowers/ — keep them out of the site.
+exclude_docs: |
+  superpowers/
+
+nav:
+  - Home: index.md
+  - Architecture: architecture.md
+  - Actions:
+      - Overview: actions/index.md
+      - auth: actions/auth.md
+      - pull_events: actions/pull-events.md
+      - pull_observations: actions/pull-observations.md
+      - show_permissions: actions/show-permissions.md
+  - Data flow: data-flow.md
+  - State & scheduling: state-and-scheduling.md
+  - Configuration reference: configuration.md
+  - Local development: local-development.md
+  - Contributing: contributing.md
