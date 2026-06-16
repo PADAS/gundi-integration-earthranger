@@ -2195,3 +2195,19 @@ def test_transform_observation_without_resolver_keeps_legacy_fallback():
     out = transform_observations_to_gundi_schema(obs)
     assert out[0]["source"] == "er-src-src-1"
     assert "source_name" not in out[0]
+    assert out[0]["additional"]["er_source_id"] == "src-1"
+
+
+def test_transform_observation_enriches_with_z_timestamp():
+    prof = SourceProfile(manufacturer_id="SERIAL-Z", assignments=[
+        Assignment(lower=datetime(2026,1,1,tzinfo=timezone.utc), upper=None, subject_name="Zeta", subject_type="lion"),
+    ])
+    obs = [{
+        "source": "src-z",
+        "recorded_at": "2026-06-01T00:00:00Z",
+        "location": {"longitude": 10.0, "latitude": -1.0},
+    }]
+    out = transform_observations_to_gundi_schema(obs, resolver=_StaticResolver(prof))
+    assert len(out) == 1, "Observation with Z-suffix timestamp must not be dropped"
+    assert out[0]["source"] == "SERIAL-Z"
+    assert out[0]["source_name"] == "Zeta"

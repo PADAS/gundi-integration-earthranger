@@ -1311,8 +1311,8 @@ def transform_observations_to_gundi_schema(observations, resolver=None):
             source_uuid = observation.get("source")
             if source_uuid:
                 if resolver is not None:
-                    from datetime import datetime
-                    when = datetime.fromisoformat(recorded_at) if recorded_at else None
+                    recorded_at_norm = recorded_at.replace("Z", "+00:00") if recorded_at else None
+                    when = datetime.datetime.fromisoformat(recorded_at_norm) if recorded_at_norm else None
                     resolved = resolver.resolve(source_uuid, when)
                     transformed_observation["source"] = resolved.external_source_id
                     if resolved.source_name:
@@ -1330,7 +1330,7 @@ def transform_observations_to_gundi_schema(observations, resolver=None):
             # ER source UUID for traceability/reconciliation after the identity change.
             additional = {
                 key: value for key, value in observation.items()
-                if key not in transformed_observation.keys() and key != "source"
+                if key not in transformed_observation.keys() and key not in ("source", "er_source_id")
             }
             if source_uuid:
                 additional["er_source_id"] = source_uuid
