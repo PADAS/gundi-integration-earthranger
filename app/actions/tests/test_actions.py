@@ -2211,3 +2211,37 @@ def test_transform_observation_enriches_with_z_timestamp():
     assert len(out) == 1, "Observation with Z-suffix timestamp must not be dropped"
     assert out[0]["source"] == "SERIAL-Z"
     assert out[0]["source_name"] == "Zeta"
+
+
+@pytest.mark.asyncio
+async def test_pull_source_window_enriches_via_resolver(mocker):
+    from app.actions.tests.conftest import AsyncIterator
+    from app.actions import handlers
+
+    er = mocker.MagicMock()
+    er.get_observations.return_value = AsyncIterator([[
+        {"source": "src-1", "recorded_at": "2026-06-01T00:00:00+00:00",
+         "location": {"longitude": 1.0, "latitude": 2.0}},
+    ]])
+    sent = {}
+
+    async def fake_send(observations, integration_id):
+        sent["observations"] = observations
+        return {}
+
+    mocker.patch.object(handlers, "send_observations_to_gundi", side_effect=fake_send)
+
+    resolver = mocker.MagicMock()
+    from app.actions.source_profiles import ResolvedSource
+    resolver.ensure = mocker.AsyncMock()
+    resolver.resolve.return_value = ResolvedSource(
+        external_source_id="SERIAL-9", source_name="Tau", subject_type="elephant")
+
+    count = await handlers._pull_source_window(
+        er, "src-1", "2026-06-01T00:00:00+00:00", "2026-06-02T00:00:00+00:00",
+        integration_id="int-1", resolver=resolver,
+    )
+    assert count == 1
+    resolver.ensure.assert_awaited()                       # sources prefetched
+    assert sent["observations"][0]["source"] == "SERIAL-9"
+    assert sent["observations"][0]["source_name"] == "Tau"
