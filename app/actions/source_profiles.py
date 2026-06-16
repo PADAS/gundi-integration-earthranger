@@ -35,3 +35,23 @@ class ResolvedSource(BaseModel):
     external_source_id: str
     source_name: Optional[str] = None
     subject_type: Optional[str] = None
+
+
+def resolve_source(profile: Optional[SourceProfile], source_uuid: str, recorded_at: datetime) -> ResolvedSource:
+    """Pure: map a source UUID + observation time to its Gundi identifiers.
+
+    external_source_id = manufacturer_id, falling back to er-src-{uuid}. The
+    subject name/type come from the assignment whose half-open [lower, upper)
+    range contains recorded_at; on overlap the latest-starting assignment wins.
+    """
+    fallback = f"er-src-{source_uuid}"
+    if profile is None:
+        return ResolvedSource(external_source_id=fallback)
+    external = profile.manufacturer_id or fallback
+    covering = [a for a in profile.assignments if a.covers(recorded_at)]
+    chosen = max(covering, key=lambda a: a.lower) if covering else None
+    return ResolvedSource(
+        external_source_id=external,
+        source_name=chosen.subject_name if chosen else None,
+        subject_type=chosen.subject_type if chosen else None,
+    )
