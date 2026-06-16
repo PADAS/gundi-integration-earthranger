@@ -461,6 +461,39 @@ async def test_pull_events_event_type_and_category_filter_passed_to_er(
     assert er_filter["event_category"] == ["6b359461-aa53-4116-bf2c-04cc580de4ef"]  # monitoring
 
 
+@pytest.mark.asyncio
+async def test_pull_events_requests_notes_from_er(
+        mocker, mock_gundi_client_v2, mock_state_manager, mock_erclient_class,
+        mock_get_gundi_api_key, mock_gundi_sensors_client_class, er_integration_v2_provider,
+        mock_publish_event, mock_gundi_client_v2_class, mock_config_manager_er_provider
+):
+    """pull_events must pass include_notes to ER's events endpoint.
+
+    ER's events-list endpoint omits the notes array unless include_notes is
+    requested. Without it, er_event["notes"] is always empty, so a note added
+    in ER never produces a {"notes": [...]} update_event and the downstream
+    note → comment path silently never fires. Regression for GUNDI-5386.
+    """
+    mocker.patch("app.services.activity_logger.publish_event", mock_publish_event)
+    mocker.patch("app.services.action_runner.publish_event", mock_publish_event)
+    mocker.patch("app.services.action_runner.config_manager", mock_config_manager_er_provider)
+    mocker.patch("app.services.action_runner._portal", mock_gundi_client_v2)
+    mocker.patch("app.actions.handlers.state_manager", mock_state_manager)
+    mocker.patch("app.actions.handlers.AsyncERClient", mock_erclient_class)
+    mocker.patch("app.services.gundi.GundiClient", mock_gundi_client_v2_class)
+    mocker.patch("app.services.gundi.GundiDataSenderClient", mock_gundi_sensors_client_class)
+    mocker.patch("app.services.gundi._get_gundi_api_key", mock_get_gundi_api_key)
+
+    await execute_action(
+        integration_id=str(er_integration_v2_provider.id),
+        action_id="pull_events",
+    )
+
+    assert mock_erclient_class.return_value.get_events.called
+    call_kwargs = mock_erclient_class.return_value.get_events.call_args.kwargs
+    assert call_kwargs.get("include_notes") is True
+
+
 @pytest.mark.parametrize(
     "filter_date_field, expected_er_key",
     [
