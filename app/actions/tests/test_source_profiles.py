@@ -65,3 +65,48 @@ def test_resolve_overlapping_picks_latest_starting():
     ])
     r = resolve_source(p, "abc-123", _dt("2026-06-01T00:00:00"))
     assert r.source_name == "New"
+
+
+import pytest
+from app.actions.source_profiles import SourceProfileResolver
+
+
+class _FakeER:
+    def __init__(self):
+        self.assignment_calls = []
+        self.source_detail_calls = []
+    async def get_source_assignments(self, subject_ids=None, source_ids=None):
+        self.assignment_calls.append(tuple(source_ids or []))
+        return [{
+            "assigned_range": {"lower": "2026-01-01T00:00:00+00:00", "upper": None},
+            "source": "src-1", "subject": "subj-1",
+        }]
+    async def get_source_subjects(self, source_id):
+        return [{"id": "subj-1", "name": "Tau", "subject_type": "elephant"}]
+    async def get_source_by_manufacturer_id(self, source_id):  # source/{uuid}/
+        self.source_detail_calls.append(source_id)
+        return {"id": "src-1", "manufacturer_id": "SERIAL-9"}
+
+
+@pytest.mark.asyncio
+async def test_resolver_builds_profile_and_caches():
+    er = _FakeER()
+    r = SourceProfileResolver(er)
+    await r.ensure(["src-1"])
+    await r.ensure(["src-1"])  # second call must hit cache, not refetch
+    assert er.source_detail_calls == ["src-1"]            # fetched once
+    assert er.assignment_calls == [("src-1",)]            # fetched once
+    res = r.resolve("src-1", _dt("2026-06-01T00:00:00"))
+    assert res.external_source_id == "SERIAL-9"
+    assert res.source_name == "Tau" and res.subject_type == "elephant"
+
+
+@pytest.mark.asyncio
+async def test_resolver_fetch_error_falls_back(mocker):
+    er = _FakeER()
+    mocker.patch.object(er, "get_source_assignments", side_effect=RuntimeError("boom"))
+    r = SourceProfileResolver(er)
+    await r.ensure(["src-1"])
+    res = r.resolve("src-1", _dt("2026-06-01T00:00:00"))
+    assert res.external_source_id == "er-src-src-1"       # fallback, never raises
+    assert res.source_name is None
