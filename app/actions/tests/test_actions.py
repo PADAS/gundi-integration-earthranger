@@ -2242,6 +2242,7 @@ async def test_pull_source_window_enriches_via_resolver(mocker):
         integration_id="int-1", resolver=resolver,
     )
     assert count == 1
-    resolver.ensure.assert_awaited()                       # sources prefetched
+    resolver.ensure.assert_awaited_once_with({"src-1"})    # exact source-UUID set computed correctly
     assert sent["observations"][0]["source"] == "SERIAL-9"
     assert sent["observations"][0]["source_name"] == "Tau"
+    assert sent["observations"][0]["subject_type"] == "elephant"
