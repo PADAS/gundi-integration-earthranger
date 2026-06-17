@@ -334,3 +334,47 @@ async def test_fetch_ranges_per_chunk_resilience(mocker):
     # Sources from the second (failed) chunk: _build_profile raises → UUID fallback
     res_last = r.resolve(f"src-{SOURCE_ID_CHUNK_SIZE}", _dt("2026-06-01T00:00:00"))
     assert res_last.external_source_id == f"er-src-src-{SOURCE_ID_CHUNK_SIZE}"
+
+
+@pytest.mark.asyncio
+async def test_resolver_handles_real_er_shapes_with_z_timestamps(mocker):
+    """Regression for the live shapes captured from stage ER.
+
+    ER serializes assigned_range bounds with a 'Z' suffix
+    (e.g. "9999-12-31T23:59:59.999999Z") and returns assignments as a
+    paginated {"results": [...]} dict. The resolver must parse those ranges
+    (not silently drop them on a fromisoformat error), so source_name /
+    subject_type populate alongside manufacturer_id.
+    """
+    er = mocker.MagicMock()
+    er.get_source_by_manufacturer_id = mocker.AsyncMock(
+        return_value={"id": "src-1", "manufacturer_id": "2356469"}
+    )
+    er.get_source_assignments = mocker.AsyncMock(
+        return_value={
+            "count": 1, "next": None, "previous": None,
+            "results": [{
+                "assigned_range": {
+                    "lower": "0001-01-01T00:00:00Z",
+                    "upper": "9999-12-31T23:59:59.999999Z",
+                    "bounds": "[)",
+                },
+                "source": "src-1", "subject": "subj-1",
+            }],
+        }
+    )
+    er.get_source_subjects = mocker.AsyncMock(
+        return_value=[{
+            "id": "subj-1",
+            "name": "South Sudan JTEBB71J-104001956",
+            "subject_type": "vehicle",
+        }]
+    )
+
+    r = SourceProfileResolver(er)
+    await r.ensure(["src-1"])
+    res = r.resolve("src-1", _dt("2026-06-01T00:00:00"))
+
+    assert res.external_source_id == "2356469"
+    assert res.source_name == "South Sudan JTEBB71J-104001956"
+    assert res.subject_type == "vehicle"

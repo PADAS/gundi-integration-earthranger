@@ -26,7 +26,14 @@ def _ensure_utc(dt: Optional[datetime]) -> Optional[datetime]:
 
 
 def _parse_dt(value):
-    return _ensure_utc(datetime.fromisoformat(value)) if value else None
+    if not value:
+        return None
+    # ER serializes assigned_range bounds with a trailing 'Z'
+    # (e.g. "9999-12-31T23:59:59.999999Z"), which datetime.fromisoformat
+    # rejects on Python 3.10. Normalize to a +00:00 offset before parsing.
+    if isinstance(value, str) and value.endswith("Z"):
+        value = value[:-1] + "+00:00"
+    return _ensure_utc(datetime.fromisoformat(value))
 
 
 class Assignment(BaseModel):
