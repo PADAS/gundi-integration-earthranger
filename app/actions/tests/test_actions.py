@@ -2153,3 +2153,96 @@ async def test_pull_observations_resume_round_trip_completes(
     assert "backfill" not in final
     # Correct resume processes each of the 3 windows exactly once (no re-processing).
     assert mock_erclient_class.return_value.get_observations.call_count == 3
+
+
+# ---------------------------------------------------------------------------
+# Task 5: transform_observations_to_gundi_schema — resolver enrichment
+# ---------------------------------------------------------------------------
+from datetime import datetime, timezone
+from app.actions.handlers import transform_observations_to_gundi_schema
+from app.actions.source_profiles import SourceProfile, Assignment, SourceProfileResolver
+
+
+class _StaticResolver:
+    def __init__(self, profile):
+        self._p = profile
+    def resolve(self, source_uuid, recorded_at):
+        from app.actions.source_profiles import resolve_source
+        return resolve_source(self._p, source_uuid, recorded_at)
+
+
+def test_transform_observation_enriches_with_profile():
+    prof = SourceProfile(manufacturer_id="SERIAL-9", assignments=[
+        Assignment(lower=datetime(2026,1,1,tzinfo=timezone.utc), upper=None, subject_name="Tau", subject_type="elephant"),
+    ])
+    obs = [{
+        "source": "src-1",
+        "recorded_at": "2026-06-01T00:00:00+00:00",
+        "location": {"longitude": -72.7, "latitude": -51.7},
+        "speed_kmph": 4,
+    }]
+    out = transform_observations_to_gundi_schema(obs, resolver=_StaticResolver(prof))
+    assert out[0]["source"] == "SERIAL-9"
+    assert out[0]["source_name"] == "Tau"
+    assert out[0]["subject_type"] == "elephant"
+    assert out[0]["location"] == {"lon": -72.7, "lat": -51.7}
+    assert out[0]["additional"]["er_source_id"] == "src-1"
+    assert out[0]["additional"]["speed_kmph"] == 4
+
+
+def test_transform_observation_without_resolver_keeps_legacy_fallback():
+    obs = [{"source": "src-1", "recorded_at": "2026-06-01T00:00:00+00:00"}]
+    out = transform_observations_to_gundi_schema(obs)
+    assert out[0]["source"] == "er-src-src-1"
+    assert "source_name" not in out[0]
+    assert out[0]["additional"]["er_source_id"] == "src-1"
+
+
+def test_transform_observation_enriches_with_z_timestamp():
+    prof = SourceProfile(manufacturer_id="SERIAL-Z", assignments=[
+        Assignment(lower=datetime(2026,1,1,tzinfo=timezone.utc), upper=None, subject_name="Zeta", subject_type="lion"),
+    ])
+    obs = [{
+        "source": "src-z",
+        "recorded_at": "2026-06-01T00:00:00Z",
+        "location": {"longitude": 10.0, "latitude": -1.0},
+    }]
+    out = transform_observations_to_gundi_schema(obs, resolver=_StaticResolver(prof))
+    assert len(out) == 1, "Observation with Z-suffix timestamp must not be dropped"
+    assert out[0]["source"] == "SERIAL-Z"
+    assert out[0]["source_name"] == "Zeta"
+
+
+@pytest.mark.asyncio
+async def test_pull_source_window_enriches_via_resolver(mocker):
+    from app.actions.tests.conftest import AsyncIterator
+    from app.actions import handlers
+
+    er = mocker.MagicMock()
+    er.get_observations.return_value = AsyncIterator([[
+        {"source": "src-1", "recorded_at": "2026-06-01T00:00:00+00:00",
+         "location": {"longitude": 1.0, "latitude": 2.0}},
+    ]])
+    sent = {}
+
+    async def fake_send(observations, integration_id):
+        sent["observations"] = observations
+        return {}
+
+    mocker.patch.object(handlers, "send_observations_to_gundi", side_effect=fake_send)
+
+    resolver = mocker.MagicMock()
+    from app.actions.source_profiles import ResolvedSource
+    resolver.ensure = mocker.AsyncMock()
+    resolver.resolve.return_value = ResolvedSource(
+        external_source_id="SERIAL-9", source_name="Tau", subject_type="elephant")
+
+    count = await handlers._pull_source_window(
+        er, "src-1", "2026-06-01T00:00:00+00:00", "2026-06-02T00:00:00+00:00",
+        integration_id="int-1", resolver=resolver,
+    )
+    assert count == 1
+    resolver.ensure.assert_awaited_once_with({"src-1"})    # exact source-UUID set computed correctly
+    assert sent["observations"][0]["source"] == "SERIAL-9"
+    assert sent["observations"][0]["source_name"] == "Tau"
+    assert sent["observations"][0]["subject_type"] == "elephant"

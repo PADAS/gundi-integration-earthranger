@@ -20,6 +20,7 @@ from app.services.utils import find_config_for_action
 from app.services.state import IntegrationStateManager
 from .configurations import AuthenticateConfig, EventFilterDateField, PullObservationsConfig, PullEventsConfig, \
     ERAuthenticationType, ShowPermissionsConfig
+from .source_profiles import SourceProfileResolver
 from ..services.activity_logger import activity_logger, log_action_activity
 from ..services.gundi import send_events_to_gundi, send_observations_to_gundi, update_event_in_gundi
 from ..services.action_scheduler import trigger_action
@@ -641,6 +642,10 @@ async def action_pull_observations(integration: Integration, action_config: Pull
                 log_level=logging.INFO,
             )
         try:
+            # One resolver per run: lazily fetches + caches per-source profiles
+            # (manufacturer_id, subject assignment history) so observations are
+            # labelled with the device's natural id and time-correct subject name.
+            resolver = SourceProfileResolver(earth_ranger, integration_id=integration_id)
             state = await state_manager.get_state(
                 integration_id=integration_id, action_id="pull_observations"
             )
@@ -752,7 +757,7 @@ async def action_pull_observations(integration: Integration, action_config: Pull
                     try:
                         total_observations += await _pull_source_window(
                             earth_ranger, source, w_start, w_end,
-                            integration_id=integration_id,
+                            integration_id=integration_id, resolver=resolver,
                         )
                     except Exception as e:
                         # Don't wedge the backfill on one bad unit: log loudly and
@@ -986,20 +991,28 @@ async def _save_backfill_cursor(integration_id, *, last_execution, cursor):
     )
 
 
-async def _pull_source_window(er_client, source, start, end, *, integration_id):
+async def _pull_source_window(er_client, source, start, end, *, integration_id, resolver=None):
     """Drain one (source × sub-window) unit and forward to Gundi.
 
     ``source=None`` means no source filter (whole instance for the window).
     Returns the number of observations forwarded. ER filters server-side, so no
     client-side source filtering is needed. ``er_client`` must already be an
     entered/open client session (call within ``async with er_client``).
+
+    When ``resolver`` is given, each batch's source UUIDs are prefetched (so the
+    resolver caches per-source profiles) and passed into the transform to enrich
+    observations with ``manufacturer_id``/``source_name``/``subject_type``.
     """
     params = {"start": start, "end": end, "batch_size": BATCH_SIZE}
     if source is not None:
         params["source_id"] = source
     sent = 0
     async for observation_batch in er_client.get_observations(**params):
-        transformed = transform_observations_to_gundi_schema(observations=observation_batch)
+        if resolver is not None:
+            await resolver.ensure({o.get("source") for o in observation_batch if o.get("source")})
+        transformed = transform_observations_to_gundi_schema(
+            observations=observation_batch, resolver=resolver
+        )
         if not transformed:
             continue
         logger.info(f"Sending {len(transformed)} observations to Gundi...")
@@ -1300,30 +1313,45 @@ def transform_events_to_gundi_schema(events, event_type_display_by_slug=None, er
     return transformed_data
 
 
-def transform_observations_to_gundi_schema(observations):
+def transform_observations_to_gundi_schema(observations, resolver=None):
     transformed_data = []
     for observation in observations:
         try:
             transformed_observation = {}
-            # Set base fields
-            if recorded_at := observation.get("recorded_at"):
+            recorded_at = observation.get("recorded_at")
+            if recorded_at:
                 transformed_observation["recorded_at"] = recorded_at
-            if source := observation.get("source"):
-                transformed_observation["source"] = f"er-src-{source}"
+            source_uuid = observation.get("source")
+            if source_uuid:
+                if resolver is not None:
+                    recorded_at_norm = recorded_at.replace("Z", "+00:00") if recorded_at else None
+                    when = datetime.datetime.fromisoformat(recorded_at_norm) if recorded_at_norm else None
+                    resolved = resolver.resolve(source_uuid, when)
+                    transformed_observation["source"] = resolved.external_source_id
+                    if resolved.source_name:
+                        transformed_observation["source_name"] = resolved.source_name
+                    if resolved.subject_type:
+                        transformed_observation["subject_type"] = resolved.subject_type
+                else:
+                    transformed_observation["source"] = f"er-src-{source_uuid}"
             if location := observation.get("location"):
                 transformed_observation["location"] = {
                     "lon": location.get("longitude"),
-                    "lat": location.get("latitude")
+                    "lat": location.get("latitude"),
                 }
-            # Save others fields in additional
-            transformed_observation["additional"] = {
+            # Everything not already mapped goes to additional; preserve the raw
+            # ER source UUID for traceability/reconciliation after the identity change.
+            additional = {
                 key: value for key, value in observation.items()
-                if key not in transformed_observation.keys()
+                if key not in transformed_observation.keys() and key not in ("source", "er_source_id")
             }
+            if source_uuid:
+                additional["er_source_id"] = source_uuid
+            transformed_observation["additional"] = additional
         except Exception as e:
             logger.error(
                 f"Error transforming observation {observation}: {e}",
-                extra={"attention_needed": True}
+                extra={"attention_needed": True},
             )
             continue
         else:
