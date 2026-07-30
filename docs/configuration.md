@@ -30,6 +30,7 @@ The ER **base URL** comes from the integration record, not this config.
 | `force_run_since_start` | bool | `False` | Reset the watermark for one run. |
 | `event_types` | list[str] | `[]` | ER event-type slugs. Empty = no filter. |
 | `event_categories` | list[str] | `[]` | ER event-category slugs (AND-combined with types). Empty = no filter. |
+| `include_attachments` | bool | `False` | Forward files attached to ER events (photos, documents) to Gundi as event attachments. Off by default. |
 | `run_on_schedule` | bool | `False` | Enable scheduled pulling. |
 
 ## `PullObservationsConfig` — `pull_observations`

@@ -24,7 +24,16 @@ seen, **updates** (new notes and changed fields).
         change** (each new note, and each changed `status` / `priority` / `title`).
 5. **Advance the watermark** to the run's start time once all events are processed.
 
-It returns counts: `events_extracted`, `events_updated`, `updates_emitted`, `events_skipped_unchanged`.
+It returns counts: `events_extracted`, `events_updated`, `updates_emitted`, `events_skipped_unchanged`,
+`attachments_forwarded`.
+
+### Forward Event Attachments (`include_attachments`)
+
+Off by default. When enabled, files attached to ER events (photos, documents)
+are forwarded to Gundi as event attachments and delivered to destinations that
+support them (EarthRanger, CMORE). Each file is forwarded once (tracked
+per-event in Redis as `seen_file_ids`); files added to an event later are
+picked up on the next pull. Files over 20 MB are skipped with a warning.
 
 !!! note "`include_notes` is load-bearing"
     ER's events-*list* endpoint omits the notes array unless `include_notes=true` is requested. The action
@@ -42,4 +51,5 @@ It returns counts: `events_extracted`, `events_updated`, `updates_emitted`, `eve
 | `force_run_since_start` | bool | `False` | Reset the watermark for one run. Toggle off after the catch-up, or every run re-pulls from `start_datetime`. |
 | `event_types` | list[str] | `[]` | ER event-type slugs to pull (e.g. `wildlife_sighting_rep`). Empty = no type filter. Find slugs via [`show_permissions`](show-permissions.md). |
 | `event_categories` | list[str] | `[]` | ER event-category slugs. Combined with types using ER's AND semantics. Empty = no category filter. |
+| `include_attachments` | bool | `False` | Forward files attached to ER events (photos, documents) to Gundi as event attachments. See below. |
 | `run_on_schedule` | bool | `False` | Enable scheduled pulling. Off by default — turn on per connection that should pull events. |

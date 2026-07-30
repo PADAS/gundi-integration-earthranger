@@ -126,6 +126,7 @@ async def test_execute_pull_events_action(
         "events_updated": 0,
         "updates_emitted": 0,
         "events_skipped_unchanged": 0,
+        "attachments_forwarded": 0,
     }
 
 
@@ -2266,3 +2267,179 @@ async def test_forward_event_files_oversized_file_marked_seen_and_skipped(mocker
     assert forwarded == 0
     assert seen == ["f-big"]
     send_mock.assert_not_awaited()
+
+
+# ---------------------------------------------------------------------------
+# action_pull_events wiring: include_attachments forwards ER event files to
+# Gundi and persists seen_file_ids per event so a file is never re-sent.
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_pull_events_forwards_files_when_flag_enabled(
+    mocker,
+    mock_erclient_class,
+    mock_state_manager,
+    mock_publish_event,
+    er_integration_v2_provider,
+):
+    from app.actions.handlers import action_pull_events
+    from app.actions.configurations import PullEventsConfig
+    from app.actions.tests.conftest import AsyncIterator
+
+    mocker.patch("app.services.activity_logger.publish_event", mock_publish_event)
+    mocker.patch("app.actions.handlers.AsyncERClient", mock_erclient_class)
+    mocker.patch("app.actions.handlers.state_manager", mock_state_manager)
+    # Never-seen event → new-event path.
+    mock_state_manager.get_state.return_value = async_return({})
+
+    # One event carrying one file.
+    file_response = mocker.MagicMock()
+    file_response.content = b"jpegbytes"
+    erclient_instance = mock_erclient_class.return_value.__aenter__.return_value
+    erclient_instance.get_file = mocker.AsyncMock(return_value=file_response)
+    er_event = {
+        "id": "er-uuid-1",
+        "updated_at": "2026-07-30T00:00:00Z",
+        "title": "Rhino carcass",
+        "files": [{
+            "id": "f-1",
+            "filename": "photo.jpg",
+            "url": "https://er.test/api/v1.0/activity/event/er-uuid-1/file/f-1/",
+            "file_type": "image",
+        }],
+    }
+    erclient_instance.get_events.return_value = AsyncIterator([[er_event]])
+
+    send_events_mock = mocker.patch(
+        "app.actions.handlers.send_events_to_gundi",
+        mocker.AsyncMock(return_value=[{"object_id": "gundi-obj-1"}]),
+    )
+    send_attachments_mock = mocker.patch(
+        "app.actions.handlers.send_event_attachments_to_gundi",
+        mocker.AsyncMock(return_value={"object_id": "att-1"}),
+    )
+
+    config = PullEventsConfig(
+        start_datetime="2026-01-01T00:00:00Z", include_attachments=True
+    )
+    result = await action_pull_events(er_integration_v2_provider, config)
+
+    send_events_mock.assert_awaited_once()
+    send_attachments_mock.assert_awaited_once()
+    assert send_attachments_mock.await_args.kwargs["event_id"] == "gundi-obj-1"
+    assert send_attachments_mock.await_args.kwargs["attachments"] == [("photo.jpg", b"jpegbytes")]
+    assert result["attachments_forwarded"] == 1
+    # seen_file_ids persisted so the file isn't re-sent next run.
+    saved_states = [c.kwargs for c in mock_state_manager.set_state.call_args_list]
+    per_event_state = next(s for s in saved_states if s.get("source_id") == "er-uuid-1")
+    assert per_event_state["state"]["seen_file_ids"] == ["f-1"]
+
+
+@pytest.mark.asyncio
+async def test_pull_events_ignores_files_when_flag_disabled(
+    mocker,
+    mock_erclient_class,
+    mock_state_manager,
+    mock_publish_event,
+    er_integration_v2_provider,
+):
+    from app.actions.handlers import action_pull_events
+    from app.actions.configurations import PullEventsConfig
+    from app.actions.tests.conftest import AsyncIterator
+
+    mocker.patch("app.services.activity_logger.publish_event", mock_publish_event)
+    mocker.patch("app.actions.handlers.AsyncERClient", mock_erclient_class)
+    mocker.patch("app.actions.handlers.state_manager", mock_state_manager)
+    mock_state_manager.get_state.return_value = async_return({})
+
+    erclient_instance = mock_erclient_class.return_value.__aenter__.return_value
+    erclient_instance.get_file = mocker.AsyncMock()
+    er_event = {
+        "id": "er-uuid-1",
+        "updated_at": "2026-07-30T00:00:00Z",
+        "title": "Rhino carcass",
+        "files": [{
+            "id": "f-1",
+            "filename": "photo.jpg",
+            "url": "https://er.test/api/v1.0/activity/event/er-uuid-1/file/f-1/",
+            "file_type": "image",
+        }],
+    }
+    erclient_instance.get_events.return_value = AsyncIterator([[er_event]])
+
+    mocker.patch(
+        "app.actions.handlers.send_events_to_gundi",
+        mocker.AsyncMock(return_value=[{"object_id": "gundi-obj-1"}]),
+    )
+    send_attachments_mock = mocker.patch(
+        "app.actions.handlers.send_event_attachments_to_gundi", mocker.AsyncMock()
+    )
+
+    config = PullEventsConfig(start_datetime="2026-01-01T00:00:00Z")  # flag off
+    result = await action_pull_events(er_integration_v2_provider, config)
+
+    send_attachments_mock.assert_not_awaited()
+    erclient_instance.get_file.assert_not_awaited()
+    assert result["attachments_forwarded"] == 0
+
+
+@pytest.mark.asyncio
+async def test_pull_events_forwards_late_added_file_on_seen_event(
+    mocker,
+    mock_erclient_class,
+    mock_state_manager,
+    mock_publish_event,
+    er_integration_v2_provider,
+):
+    from app.actions.handlers import action_pull_events
+    from app.actions.configurations import PullEventsConfig
+    from app.actions.tests.conftest import AsyncIterator
+
+    mocker.patch("app.services.activity_logger.publish_event", mock_publish_event)
+    mocker.patch("app.actions.handlers.AsyncERClient", mock_erclient_class)
+    mocker.patch("app.actions.handlers.state_manager", mock_state_manager)
+    # Previously-seen event: f-1 already forwarded; ER shows a new f-2.
+    mock_state_manager.get_state.return_value = async_return({
+        "gundi_object_id": "gundi-obj-1",
+        "updated_at": "2026-07-29T00:00:00Z",
+        "title": "Rhino carcass",
+        "seen_note_ids": [],
+        "seen_file_ids": ["f-1"],
+    })
+
+    file_response = mocker.MagicMock()
+    file_response.content = b"newbytes"
+    erclient_instance = mock_erclient_class.return_value.__aenter__.return_value
+    erclient_instance.get_file = mocker.AsyncMock(return_value=file_response)
+    er_event = {
+        "id": "er-uuid-1",
+        "updated_at": "2026-07-30T00:00:00Z",  # advanced → update path runs
+        "title": "Rhino carcass",
+        "files": [
+            {"id": "f-1", "filename": "photo.jpg",
+             "url": "https://er.test/api/v1.0/activity/event/er-uuid-1/file/f-1/",
+             "file_type": "image"},
+            {"id": "f-2", "filename": "second.jpg",
+             "url": "https://er.test/api/v1.0/activity/event/er-uuid-1/file/f-2/",
+             "file_type": "image"},
+        ],
+    }
+    erclient_instance.get_events.return_value = AsyncIterator([[er_event]])
+
+    send_attachments_mock = mocker.patch(
+        "app.actions.handlers.send_event_attachments_to_gundi",
+        mocker.AsyncMock(return_value={"object_id": "att-2"}),
+    )
+    mocker.patch("app.actions.handlers.update_event_in_gundi", mocker.AsyncMock())
+
+    config = PullEventsConfig(
+        start_datetime="2026-01-01T00:00:00Z", include_attachments=True
+    )
+    result = await action_pull_events(er_integration_v2_provider, config)
+
+    send_attachments_mock.assert_awaited_once()
+    assert send_attachments_mock.await_args.kwargs["attachments"] == [("second.jpg", b"newbytes")]
+    assert result["attachments_forwarded"] == 1
+    saved_states = [c.kwargs for c in mock_state_manager.set_state.call_args_list]
+    per_event_state = next(s for s in saved_states if s.get("source_id") == "er-uuid-1")
+    assert per_event_state["state"]["seen_file_ids"] == ["f-1", "f-2"]

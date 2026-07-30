@@ -428,6 +428,7 @@ async def action_pull_events(integration: Integration, action_config: PullEvents
     events_updated = 0  # distinct events that had at least one change emitted
     updates_emitted = 0  # individual update_event calls (notes + field changes)
     events_skipped_unchanged = 0
+    attachments_forwarded = 0
     async with er_client as earth_ranger:
         # One get_event_types() call powers two things:
         #   1) Operator-configured event_type / event_category slugs must be
@@ -473,6 +474,7 @@ async def action_pull_events(integration: Integration, action_config: PullEvents
                 "events_updated": 0,
                 "updates_emitted": 0,
                 "events_skipped_unchanged": 0,
+                "attachments_forwarded": 0,
                 "skipped_reason": "no_resolvable_event_types",
             }
         if pull_config.event_categories and not resolved_category_ids:
@@ -488,6 +490,7 @@ async def action_pull_events(integration: Integration, action_config: PullEvents
                 "events_updated": 0,
                 "updates_emitted": 0,
                 "events_skipped_unchanged": 0,
+                "attachments_forwarded": 0,
                 "skipped_reason": "no_resolvable_event_categories",
             }
 
@@ -552,6 +555,16 @@ async def action_pull_events(integration: Integration, action_config: PullEvents
                             extra={"er_event_id": er_event_uuid, "response": response},
                         )
                         continue
+                    # Forward files attached to the event (photos, documents)
+                    # before persisting state: a crash between post and save
+                    # re-runs this event next pull and the seen-list dedupes.
+                    seen_file_ids = []
+                    if pull_config.include_attachments:
+                        forwarded, seen_file_ids = await _forward_event_files(
+                            earth_ranger, er_event, gundi_object_id,
+                            integration_id, [],
+                        )
+                        attachments_forwarded += forwarded
                     # Mark all existing notes as already-seen (no bulk-forward on first sight).
                     note_ids = [n["id"] for n in er_event.get("notes") or [] if n.get("id")]
                     await _save_event_state(
@@ -560,6 +573,7 @@ async def action_pull_events(integration: Integration, action_config: PullEvents
                         gundi_object_id=gundi_object_id,
                         er_event=er_event,
                         seen_note_ids=note_ids,
+                        seen_file_ids=seen_file_ids,
                     )
                     events_new += 1
                     continue
@@ -578,6 +592,13 @@ async def action_pull_events(integration: Integration, action_config: PullEvents
                 updates_emitted += emitted
                 if emitted > 0:
                     events_updated += 1
+                seen_file_ids = state_record.get("seen_file_ids", [])
+                if pull_config.include_attachments:
+                    forwarded, seen_file_ids = await _forward_event_files(
+                        earth_ranger, er_event, state_record["gundi_object_id"],
+                        integration_id, seen_file_ids,
+                    )
+                    attachments_forwarded += forwarded
                 # Refresh state to reflect what we forwarded this run.
                 await _save_event_state(
                     integration_id=integration_id,
@@ -585,6 +606,7 @@ async def action_pull_events(integration: Integration, action_config: PullEvents
                     gundi_object_id=state_record["gundi_object_id"],
                     er_event=er_event,
                     seen_note_ids=new_seen_note_ids,
+                    seen_file_ids=seen_file_ids,
                 )
     # Save watermark.
     state = {"last_execution": execution_timestamp}
@@ -596,13 +618,15 @@ async def action_pull_events(integration: Integration, action_config: PullEvents
     )
     logger.info(
         f"pull_events done. new={events_new} updated={events_updated} "
-        f"updates_emitted={updates_emitted} skipped_unchanged={events_skipped_unchanged}"
+        f"updates_emitted={updates_emitted} skipped_unchanged={events_skipped_unchanged} "
+        f"attachments_forwarded={attachments_forwarded}"
     )
     return {
         "events_extracted": events_new,
         "events_updated": events_updated,
         "updates_emitted": updates_emitted,
         "events_skipped_unchanged": events_skipped_unchanged,
+        "attachments_forwarded": attachments_forwarded,
     }
 
 
@@ -1360,7 +1384,8 @@ def _extract_object_id_from_post_events_response(response):
     return None
 
 
-async def _save_event_state(integration_id, er_event_uuid, gundi_object_id, er_event, seen_note_ids):
+async def _save_event_state(integration_id, er_event_uuid, gundi_object_id, er_event,
+                            seen_note_ids, seen_file_ids=None):
     """Persist per-event state under (pull_events, er_event_uuid)."""
     await state_manager.set_state(
         integration_id=integration_id,
@@ -1373,6 +1398,7 @@ async def _save_event_state(integration_id, er_event_uuid, gundi_object_id, er_e
             "priority": er_event.get("priority"),
             "title": er_event.get("title"),
             "seen_note_ids": list(seen_note_ids),
+            "seen_file_ids": list(seen_file_ids or []),
         },
     )
 
