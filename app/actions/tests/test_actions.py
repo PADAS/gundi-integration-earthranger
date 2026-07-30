@@ -2165,3 +2165,104 @@ async def test_pull_observations_resume_round_trip_completes(
     assert "backfill" not in final
     # Correct resume processes each of the 3 windows exactly once (no re-processing).
     assert mock_erclient_class.return_value.get_observations.call_count == 3
+
+
+def _file_entry(file_id="f-1", filename="photo.jpg"):
+    return {
+        "id": file_id,
+        "filename": filename,
+        "url": f"https://er.test/api/v1.0/activity/event/e-1/file/{file_id}/",
+        "file_type": "image",
+    }
+
+
+def _mock_er_client_for_files(mocker, content=b"jpegbytes"):
+    er_client = mocker.MagicMock()
+    response = mocker.MagicMock()
+    response.content = content
+    er_client.get_file = mocker.AsyncMock(return_value=response)
+    return er_client
+
+
+@pytest.mark.asyncio
+async def test_forward_event_files_downloads_and_posts_new_files(mocker):
+    from app.actions.handlers import _forward_event_files
+
+    er_client = _mock_er_client_for_files(mocker)
+    send_mock = mocker.patch(
+        "app.actions.handlers.send_event_attachments_to_gundi",
+        mocker.AsyncMock(return_value={"object_id": "att-1"}),
+    )
+
+    er_event = {"id": "e-1", "files": [_file_entry("f-1"), _file_entry("f-2", "map.pdf")]}
+    forwarded, seen = await _forward_event_files(
+        er_client, er_event, "gundi-obj-1", "int-1", seen_file_ids=[]
+    )
+
+    assert forwarded == 2
+    assert seen == ["f-1", "f-2"]
+    assert send_mock.await_count == 2
+    first_call = send_mock.await_args_list[0]
+    assert first_call.kwargs["event_id"] == "gundi-obj-1"
+    assert first_call.kwargs["attachments"] == [("photo.jpg", b"jpegbytes")]
+    assert first_call.kwargs["integration_id"] == "int-1"
+
+
+@pytest.mark.asyncio
+async def test_forward_event_files_skips_already_seen(mocker):
+    from app.actions.handlers import _forward_event_files
+
+    er_client = _mock_er_client_for_files(mocker)
+    send_mock = mocker.patch(
+        "app.actions.handlers.send_event_attachments_to_gundi", mocker.AsyncMock()
+    )
+
+    er_event = {"id": "e-1", "files": [_file_entry("f-1"), _file_entry("f-2")]}
+    forwarded, seen = await _forward_event_files(
+        er_client, er_event, "gundi-obj-1", "int-1", seen_file_ids=["f-1"]
+    )
+
+    assert forwarded == 1
+    assert seen == ["f-1", "f-2"]
+    send_mock.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_forward_event_files_failure_leaves_file_unseen_for_retry(mocker):
+    from app.actions.handlers import _forward_event_files
+
+    er_client = _mock_er_client_for_files(mocker)
+    er_client.get_file = mocker.AsyncMock(side_effect=Exception("boom"))
+    send_mock = mocker.patch(
+        "app.actions.handlers.send_event_attachments_to_gundi", mocker.AsyncMock()
+    )
+
+    er_event = {"id": "e-1", "files": [_file_entry("f-1")]}
+    forwarded, seen = await _forward_event_files(
+        er_client, er_event, "gundi-obj-1", "int-1", seen_file_ids=[]
+    )
+
+    # Failed file is NOT marked seen → retried on the next pull.
+    assert forwarded == 0
+    assert seen == []
+    send_mock.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_forward_event_files_oversized_file_marked_seen_and_skipped(mocker):
+    from app.actions.handlers import _forward_event_files, MAX_ATTACHMENT_BYTES
+
+    er_client = _mock_er_client_for_files(mocker, content=b"x" * (MAX_ATTACHMENT_BYTES + 1))
+    send_mock = mocker.patch(
+        "app.actions.handlers.send_event_attachments_to_gundi", mocker.AsyncMock()
+    )
+
+    er_event = {"id": "e-1", "files": [_file_entry("f-big", "huge.mp4")]}
+    forwarded, seen = await _forward_event_files(
+        er_client, er_event, "gundi-obj-1", "int-1", seen_file_ids=[]
+    )
+
+    # Oversized: skipped, but marked seen so it isn't re-downloaded forever.
+    assert forwarded == 0
+    assert seen == ["f-big"]
+    send_mock.assert_not_awaited()

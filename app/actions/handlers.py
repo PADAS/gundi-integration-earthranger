@@ -21,7 +21,7 @@ from app.services.state import IntegrationStateManager
 from .configurations import AuthenticateConfig, EventFilterDateField, PullObservationsConfig, PullEventsConfig, \
     ERAuthenticationType, ShowPermissionsConfig
 from ..services.activity_logger import activity_logger, log_action_activity
-from ..services.gundi import send_events_to_gundi, send_observations_to_gundi, update_event_in_gundi
+from ..services.gundi import send_events_to_gundi, send_observations_to_gundi, update_event_in_gundi, send_event_attachments_to_gundi
 from ..services.action_scheduler import trigger_action
 
 logger = logging.getLogger(__name__)
@@ -1416,4 +1416,58 @@ async def _emit_event_updates(er_event, state_record, integration_id):
         emitted += 1
 
     return emitted, seen_note_ids
+
+
+# Guardrail: don't pull pathological uploads (videos, raw camera dumps) into
+# runner memory / the attachments bucket. Oversized files are marked seen so
+# they aren't re-downloaded on every run.
+MAX_ATTACHMENT_BYTES = 20 * 1024 * 1024
+
+
+async def _forward_event_files(er_client, er_event, gundi_object_id, integration_id, seen_file_ids):
+    """Forward not-yet-seen ER event files to Gundi as event attachments.
+
+    Unlike notes (marked seen-without-forwarding on first sight), files ARE
+    forwarded the first time an event is seen — the attachment is part of the
+    event itself, not conversation history.
+
+    Returns (forwarded_count, updated_seen_file_ids). A per-file failure is
+    logged and the file is left out of seen_file_ids so the next run retries
+    it; one bad file never blocks the rest of the event (or the run).
+    """
+    seen = list(seen_file_ids)
+    seen_set = set(seen)
+    forwarded = 0
+    for entry in er_event.get("files") or []:
+        file_id = entry.get("id")
+        url = entry.get("url")
+        if not file_id or file_id in seen_set or not url:
+            continue
+        filename = entry.get("filename") or f"attachment-{file_id}"
+        try:
+            response = await er_client.get_file(url)
+            content = response.content
+            if len(content) > MAX_ATTACHMENT_BYTES:
+                logger.warning(
+                    "Skipping oversized ER file %s (%d bytes) on event %s.",
+                    file_id, len(content), er_event.get("id"),
+                )
+                seen.append(file_id)
+                seen_set.add(file_id)
+                continue
+            await send_event_attachments_to_gundi(
+                event_id=gundi_object_id,
+                attachments=[(filename, content)],
+                integration_id=integration_id,
+            )
+        except Exception:
+            logger.exception(
+                "Failed to forward ER file %s on event %s; will retry next run.",
+                file_id, er_event.get("id"),
+            )
+            continue
+        seen.append(file_id)
+        seen_set.add(file_id)
+        forwarded += 1
+    return forwarded, seen
 
