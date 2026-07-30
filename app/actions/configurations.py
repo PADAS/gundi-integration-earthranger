@@ -245,6 +245,18 @@ class PullEventsConfig(PullActionConfiguration):
             "otherwise every subsequent run will re-pull from start_datetime."
         ),
     )
+    include_attachments: bool = FieldWithUIOptions(
+        False,
+        title="Forward Event Attachments",
+        description=(
+            "When enabled, files attached to ER events (photos, documents) are "
+            "forwarded to Gundi as event attachments, so destinations that "
+            "support them (e.g. EarthRanger, CMORE) receive the files. Files "
+            "added to an event after it was first forwarded are picked up on "
+            "subsequent runs. Off by default: enabling changes what existing "
+            "downstream destinations receive."
+        ),
+    )
     event_types: List[str] = Field(
         default_factory=list,
         title="Event Types",
@@ -279,6 +291,6 @@ class PullEventsConfig(PullActionConfiguration):
     )
 
     ui_global_options: GlobalUISchemaOptions = GlobalUISchemaOptions(
-        order=["start_datetime", "end_datetime", "filter_date_field", "event_types", "event_categories", "force_run_since_start", "run_on_schedule"],
+        order=["start_datetime", "end_datetime", "filter_date_field", "event_types", "event_categories", "force_run_since_start", "include_attachments", "run_on_schedule"],
     )
 

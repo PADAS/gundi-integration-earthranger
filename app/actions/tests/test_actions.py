@@ -28,6 +28,18 @@ def test_pull_actions_default_run_on_schedule_off(config_cls):
     assert enabled.run_on_schedule is True
 
 
+def test_pull_events_config_attachments_flag_defaults_off():
+    from app.actions.configurations import PullEventsConfig
+
+    config = PullEventsConfig(start_datetime="2026-01-01T00:00:00Z")
+    assert config.include_attachments is False
+
+    config = PullEventsConfig(
+        start_datetime="2026-01-01T00:00:00Z", include_attachments=True
+    )
+    assert config.include_attachments is True
+
+
 @pytest.mark.asyncio
 async def test_execute_auth_action_with_valid_credentials(
         mocker, mock_gundi_client_v2, mock_erclient_class, er_integration_v2_provider,
