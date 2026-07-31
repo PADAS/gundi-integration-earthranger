@@ -59,10 +59,15 @@ contract.
 
 | Gundi field | Source |
 |-------------|--------|
-| `source` | `er-src-<ER source UUID>`. |
+| `source` (external_source_id) | `Source.manufacturer_id`, falling back to `er-src-<ER source UUID>` when absent. |
+| `source_name` | `Subject.name` for the subject assigned at the observation's `recorded_at` (time-accurate via `assigned_range`). |
+| `subject_type` | the assigned subject's type. |
 | `recorded_at` | ER `recorded_at`. |
 | `location` | ER `{longitude, latitude}` → `{lon, lat}`. |
-| `additional` | Any remaining ER fields. |
+| `additional.er_source_id` | the raw ER source UUID, preserved for traceability. |
+| `additional` | remaining ER fields. |
+
+Enrichment is best-effort — if the device or subject can't be resolved, the observation still sends under `er-src-<uuid>` with no name.
 
 Observations are sent with `send_observations_to_gundi()` (a batched POST). All Gundi send functions retry
 with exponential backoff on HTTP errors.

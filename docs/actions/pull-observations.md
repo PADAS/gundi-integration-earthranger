@@ -25,8 +25,7 @@ Designed to backfill large historical windows safely and resumably.
    no-progress runs).
 6. **Advance the watermark** only when the entire window is complete.
 
-Observations are transformed with a `source` of `er-src-<source-uuid>` and a `{lon, lat}` location; all
-other ER fields are carried in `additional`. See [Data flow](../data-flow.md#observations).
+Observations are transformed with `external_source_id = manufacturer_id` (falling back to `er-src-{uuid}`), `source_name = time-accurate Subject.name`, and `subject_type`; location is mapped to `{lon, lat}`; and all other ER fields are carried in `additional`. See [Data flow](../data-flow.md#observations).
 
 ## Configuration — `PullObservationsConfig`
 

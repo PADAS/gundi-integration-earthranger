@@ -1,0 +1,44 @@
+{
+  "_note": "Captured from stage ER (gundi-dev.staging.pamdas.org) via dev/spike_source_profile.py on 2026-06-16. Confirms the live shapes SourceProfileResolver depends on: source detail carries manufacturer_id; assignments come back as a paginated {results:[...]} dict with Z-suffixed assigned_range bounds and a 'bounds' inclusivity flag; source/{id}/subjects is a plain list with name/subject_type.",
+  "source_uuid": "6ab62baf-44a3-441f-94c5-c8778b62f4e0",
+  "source_detail": {
+    "id": "6ab62baf-44a3-441f-94c5-c8778b62f4e0",
+    "source_type": null,
+    "manufacturer_id": "2356469",
+    "model_name": "generic:gundi_tracpoint_9d7720a0-881e-4f2e-bb21-5a7e3d29b807",
+    "additional": {},
+    "provider": "gundi_tracpoint_9d7720a0-881e-4f2e-bb21-5a7e3d29b807",
+    "content_type": "observations.source"
+  },
+  "assignments": {
+    "count": 1,
+    "next": null,
+    "previous": null,
+    "results": [
+      {
+        "id": "30214ab2-d37b-4569-9026-60f9fad34217",
+        "assigned_range": {
+          "lower": "0001-01-01T00:00:00Z",
+          "upper": "9999-12-31T23:59:59.999999Z",
+          "bounds": "[)"
+        },
+        "source": "6ab62baf-44a3-441f-94c5-c8778b62f4e0",
+        "subject": "75f26e4d-4120-4b20-8b67-de377b0c72d4",
+        "additional": {},
+        "location": null
+      }
+    ]
+  },
+  "subjects": [
+    {
+      "content_type": "observations.subject",
+      "id": "75f26e4d-4120-4b20-8b67-de377b0c72d4",
+      "name": "South Sudan JTEBB71J-104001956",
+      "subject_type": "vehicle",
+      "subject_subtype": "truck",
+      "common_name": null,
+      "additional": {},
+      "is_active": true
+    }
+  ]
+}
