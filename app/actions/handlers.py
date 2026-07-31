@@ -511,12 +511,14 @@ async def action_pull_events(integration: Integration, action_config: PullEvents
         # array unless explicitly requested, so without this each er_event comes
         # back without notes and no note update_event is ever emitted (the
         # ER-note → downstream-comment path silently never fires). include_files
-        # is likewise load-bearing: without it, event files silently aren't
-        # returned, so _forward_event_files has nothing to forward even with
-        # include_attachments enabled — the feature would silently no-op if the
-        # server default for include_files ever differs from what we assume here.
+        # is likewise load-bearing when attachment forwarding is on: without it,
+        # event files silently aren't returned and _forward_event_files has
+        # nothing to forward — the feature would silently no-op if the server
+        # default ever differs from what we assume. It follows the flag so
+        # flag-off connections don't pay for file payloads they never read.
         async for event_batch in earth_ranger.get_events(
-            filter=json_filter, batch_size=BATCH_SIZE, include_notes=True, include_files=True
+            filter=json_filter, batch_size=BATCH_SIZE, include_notes=True,
+            include_files=pull_config.include_attachments,
         ):
             for er_event in event_batch:
                 er_event_uuid = er_event.get("id")
@@ -1511,7 +1513,8 @@ async def _forward_event_files(er_client, er_event, gundi_object_id, integration
             )
         except Exception:
             logger.exception(
-                "Failed to forward ER file %s on event %s; will retry next run.",
+                "Failed to forward ER file %s on event %s; it will be retried "
+                "when the event is next updated in ER (or on a forced re-run).",
                 file_id, er_event.get("id"),
             )
             continue
