@@ -19,6 +19,7 @@ async def test_register_integration_with_slug_setting(
     mock_get_webhook_handler_for_fixed_json_payload,
 ):
     mocker.patch("app.services.self_registration.INTEGRATION_TYPE_SLUG", "x_tracker")
+    mocker.patch("app.services.self_registration.INTEGRATION_TYPE_NAME", None)
     mocker.patch("app.services.self_registration.action_handlers", mock_action_handlers)
     mocker.patch(
         "app.services.self_registration.get_webhook_handler",
@@ -146,6 +147,7 @@ async def test_register_integration_with_slug_arg(
     mock_action_handlers,
     mock_get_webhook_handler_for_fixed_json_payload,
 ):
+    mocker.patch("app.services.self_registration.INTEGRATION_TYPE_NAME", None)
     mocker.patch("app.services.action_runner.action_handlers", mock_action_handlers)
     mocker.patch("app.services.self_registration.action_handlers", mock_action_handlers)
     mocker.patch(
@@ -276,6 +278,7 @@ async def test_register_integration_with_service_url_arg(
     mock_get_webhook_handler_for_fixed_json_payload,
 ):
     mocker.patch("app.services.self_registration.INTEGRATION_TYPE_SLUG", "x_tracker")
+    mocker.patch("app.services.self_registration.INTEGRATION_TYPE_NAME", None)
     mocker.patch("app.services.self_registration.action_handlers", mock_action_handlers)
     mocker.patch(
         "app.services.self_registration.get_webhook_handler",
@@ -408,6 +411,7 @@ async def test_register_integration_with_service_url_setting(
 ):
     service_url = "https://xtracker-actions-runner-jabcutl8yb-uc.a.run.app"
     mocker.patch("app.services.self_registration.INTEGRATION_TYPE_SLUG", "x_tracker")
+    mocker.patch("app.services.self_registration.INTEGRATION_TYPE_NAME", None)
     mocker.patch("app.services.self_registration.INTEGRATION_SERVICE_URL", service_url)
     mocker.patch("app.services.self_registration.action_handlers", mock_action_handlers)
     mocker.patch(
@@ -541,6 +545,7 @@ async def test_register_integration_with_executable_action(
     mock_get_webhook_handler_for_fixed_json_payload,
 ):
     mocker.patch("app.services.self_registration.INTEGRATION_TYPE_SLUG", "x_tracker")
+    mocker.patch("app.services.self_registration.INTEGRATION_TYPE_NAME", None)
     mocker.patch(
         "app.services.self_registration.action_handlers", mock_auth_action_handlers
     )
@@ -677,6 +682,7 @@ async def test_register_integration_with_action_title(
     mock_get_webhook_handler_for_fixed_json_payload,
 ):
     mocker.patch("app.services.self_registration.INTEGRATION_TYPE_SLUG", "x_tracker")
+    mocker.patch("app.services.self_registration.INTEGRATION_TYPE_NAME", None)
     mock_action_handlers["pull_observations"][0].action_title = "Fetch Collar Positions"
     mocker.patch("app.services.self_registration.action_handlers", mock_action_handlers)
     mocker.patch(
