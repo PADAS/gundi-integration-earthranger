@@ -22,7 +22,7 @@ from .configurations import AuthenticateConfig, EventFilterDateField, PullObserv
     ERAuthenticationType, ShowPermissionsConfig
 from .source_profiles import SourceProfileResolver
 from ..services.activity_logger import activity_logger, log_action_activity
-from ..services.gundi import send_events_to_gundi, send_observations_to_gundi, update_event_in_gundi
+from ..services.gundi import send_events_to_gundi, send_observations_to_gundi, update_event_in_gundi, send_event_attachments_to_gundi
 from ..services.action_scheduler import trigger_action
 
 logger = logging.getLogger(__name__)
@@ -429,6 +429,7 @@ async def action_pull_events(integration: Integration, action_config: PullEvents
     events_updated = 0  # distinct events that had at least one change emitted
     updates_emitted = 0  # individual update_event calls (notes + field changes)
     events_skipped_unchanged = 0
+    attachments_forwarded = 0
     async with er_client as earth_ranger:
         # One get_event_types() call powers two things:
         #   1) Operator-configured event_type / event_category slugs must be
@@ -474,6 +475,7 @@ async def action_pull_events(integration: Integration, action_config: PullEvents
                 "events_updated": 0,
                 "updates_emitted": 0,
                 "events_skipped_unchanged": 0,
+                "attachments_forwarded": 0,
                 "skipped_reason": "no_resolvable_event_types",
             }
         if pull_config.event_categories and not resolved_category_ids:
@@ -489,6 +491,7 @@ async def action_pull_events(integration: Integration, action_config: PullEvents
                 "events_updated": 0,
                 "updates_emitted": 0,
                 "events_skipped_unchanged": 0,
+                "attachments_forwarded": 0,
                 "skipped_reason": "no_resolvable_event_categories",
             }
 
@@ -508,9 +511,15 @@ async def action_pull_events(integration: Integration, action_config: PullEvents
         # include_notes is required: ER's events-list endpoint omits the notes
         # array unless explicitly requested, so without this each er_event comes
         # back without notes and no note update_event is ever emitted (the
-        # ER-note → downstream-comment path silently never fires).
+        # ER-note → downstream-comment path silently never fires). include_files
+        # is likewise load-bearing when attachment forwarding is on: without it,
+        # event files silently aren't returned and _forward_event_files has
+        # nothing to forward — the feature would silently no-op if the server
+        # default ever differs from what we assume. It follows the flag so
+        # flag-off connections don't pay for file payloads they never read.
         async for event_batch in earth_ranger.get_events(
-            filter=json_filter, batch_size=BATCH_SIZE, include_notes=True
+            filter=json_filter, batch_size=BATCH_SIZE, include_notes=True,
+            include_files=pull_config.include_attachments,
         ):
             for er_event in event_batch:
                 er_event_uuid = er_event.get("id")
@@ -553,6 +562,16 @@ async def action_pull_events(integration: Integration, action_config: PullEvents
                             extra={"er_event_id": er_event_uuid, "response": response},
                         )
                         continue
+                    # Forward files attached to the event (photos, documents)
+                    # before persisting state: a crash between post and save
+                    # re-runs this event next pull and the seen-list dedupes.
+                    seen_file_ids = []
+                    if pull_config.include_attachments:
+                        forwarded, seen_file_ids = await _forward_event_files(
+                            earth_ranger, er_event, gundi_object_id,
+                            integration_id, [],
+                        )
+                        attachments_forwarded += forwarded
                     # Mark all existing notes as already-seen (no bulk-forward on first sight).
                     note_ids = [n["id"] for n in er_event.get("notes") or [] if n.get("id")]
                     await _save_event_state(
@@ -561,6 +580,7 @@ async def action_pull_events(integration: Integration, action_config: PullEvents
                         gundi_object_id=gundi_object_id,
                         er_event=er_event,
                         seen_note_ids=note_ids,
+                        seen_file_ids=seen_file_ids,
                     )
                     events_new += 1
                     continue
@@ -579,6 +599,13 @@ async def action_pull_events(integration: Integration, action_config: PullEvents
                 updates_emitted += emitted
                 if emitted > 0:
                     events_updated += 1
+                seen_file_ids = state_record.get("seen_file_ids", [])
+                if pull_config.include_attachments:
+                    forwarded, seen_file_ids = await _forward_event_files(
+                        earth_ranger, er_event, state_record["gundi_object_id"],
+                        integration_id, seen_file_ids,
+                    )
+                    attachments_forwarded += forwarded
                 # Refresh state to reflect what we forwarded this run.
                 await _save_event_state(
                     integration_id=integration_id,
@@ -586,6 +613,7 @@ async def action_pull_events(integration: Integration, action_config: PullEvents
                     gundi_object_id=state_record["gundi_object_id"],
                     er_event=er_event,
                     seen_note_ids=new_seen_note_ids,
+                    seen_file_ids=seen_file_ids,
                 )
     # Save watermark.
     state = {"last_execution": execution_timestamp}
@@ -597,13 +625,15 @@ async def action_pull_events(integration: Integration, action_config: PullEvents
     )
     logger.info(
         f"pull_events done. new={events_new} updated={events_updated} "
-        f"updates_emitted={updates_emitted} skipped_unchanged={events_skipped_unchanged}"
+        f"updates_emitted={updates_emitted} skipped_unchanged={events_skipped_unchanged} "
+        f"attachments_forwarded={attachments_forwarded}"
     )
     return {
         "events_extracted": events_new,
         "events_updated": events_updated,
         "updates_emitted": updates_emitted,
         "events_skipped_unchanged": events_skipped_unchanged,
+        "attachments_forwarded": attachments_forwarded,
     }
 
 
@@ -1388,7 +1418,8 @@ def _extract_object_id_from_post_events_response(response):
     return None
 
 
-async def _save_event_state(integration_id, er_event_uuid, gundi_object_id, er_event, seen_note_ids):
+async def _save_event_state(integration_id, er_event_uuid, gundi_object_id, er_event,
+                            seen_note_ids, seen_file_ids=None):
     """Persist per-event state under (pull_events, er_event_uuid)."""
     await state_manager.set_state(
         integration_id=integration_id,
@@ -1401,6 +1432,7 @@ async def _save_event_state(integration_id, er_event_uuid, gundi_object_id, er_e
             "priority": er_event.get("priority"),
             "title": er_event.get("title"),
             "seen_note_ids": list(seen_note_ids),
+            "seen_file_ids": list(seen_file_ids or []),
         },
     )
 
@@ -1444,4 +1476,78 @@ async def _emit_event_updates(er_event, state_record, integration_id):
         emitted += 1
 
     return emitted, seen_note_ids
+
+
+# Guardrail: don't pull pathological uploads (videos, raw camera dumps) into
+# runner memory / the attachments bucket. Oversized files are marked seen so
+# they aren't re-downloaded on every run.
+#
+# Known limitation: erclient's get_file() is non-streaming (it reads the full
+# response body into memory before we ever see response.content), so this cap
+# is only enforced after the whole file is already in memory — it does not
+# bound peak memory usage for oversized files. A pre-download size check
+# (e.g. via a HEAD request or Content-Length) is a known follow-up.
+MAX_ATTACHMENT_BYTES = 20 * 1024 * 1024
+
+
+async def _forward_event_files(er_client, er_event, gundi_object_id, integration_id, seen_file_ids):
+    """Forward not-yet-seen ER event files to Gundi as event attachments.
+
+    Unlike notes (marked seen-without-forwarding on first sight), files ARE
+    forwarded the first time an event is seen — the attachment is part of the
+    event itself, not conversation history.
+
+    Returns (forwarded_count, updated_seen_file_ids). A per-file failure is
+    logged and the file is left out of seen_file_ids, so it is retried the
+    next time the event is updated in ER (or on a forced re-run) — NOT on the
+    very next pull, since the watermark advances and the seen-event freshness
+    check (unchanged `updated_at`) skips the event entirely until it changes
+    again; one bad file never blocks the rest of the event (or the run).
+
+    Note: get_file() is non-streaming, so the MAX_ATTACHMENT_BYTES cap below is
+    only enforced after the full file body is already in memory (see the
+    comment on MAX_ATTACHMENT_BYTES).
+    """
+    seen = list(seen_file_ids)
+    seen_set = set(seen)
+    forwarded = 0
+    for entry in er_event.get("files") or []:
+        file_id = entry.get("id")
+        url = entry.get("url")
+        if file_id and file_id in seen_set:
+            continue
+        if not file_id or not url:
+            logger.warning(
+                "Skipping malformed ER file entry on event %s; missing id or url. keys=%r",
+                er_event.get("id"), sorted(entry.keys()),
+            )
+            continue
+        filename = entry.get("filename") or f"attachment-{file_id}"
+        try:
+            response = await er_client.get_file(url)
+            content = response.content
+            if len(content) > MAX_ATTACHMENT_BYTES:
+                logger.warning(
+                    "Skipping oversized ER file %s (%d bytes) on event %s.",
+                    file_id, len(content), er_event.get("id"),
+                )
+                seen.append(file_id)
+                seen_set.add(file_id)
+                continue
+            await send_event_attachments_to_gundi(
+                event_id=gundi_object_id,
+                attachments=[(filename, content)],
+                integration_id=integration_id,
+            )
+        except Exception:
+            logger.exception(
+                "Failed to forward ER file %s on event %s; it will be retried "
+                "when the event is next updated in ER (or on a forced re-run).",
+                file_id, er_event.get("id"),
+            )
+            continue
+        seen.append(file_id)
+        seen_set.add(file_id)
+        forwarded += 1
+    return forwarded, seen
 
