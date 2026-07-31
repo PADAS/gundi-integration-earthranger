@@ -2537,3 +2537,28 @@ async def test_pull_source_window_enriches_via_resolver(mocker):
     assert sent["observations"][0]["source"] == "SERIAL-9"
     assert sent["observations"][0]["source_name"] == "Tau"
     assert sent["observations"][0]["subject_type"] == "elephant"
+
+
+# ---------------------------------------------------------------------------
+# Auth type dropdown labels (PADAS/gundi-integration-earthranger#35)
+# ---------------------------------------------------------------------------
+
+def test_authenticate_config_schema_has_auth_type_display_labels():
+    from app.actions.configurations import AuthenticateConfig
+
+    schema = AuthenticateConfig.schema()
+    auth_type = schema["properties"]["authentication_type"]
+
+    assert auth_type == {
+        "type": "string",
+        "title": "Authentication Type",
+        "description": "Type of authentication to use.",
+        "default": "token",
+        "oneOf": [
+            {"const": "token", "title": "Token"},
+            {"const": "username_password", "title": "Username & Password"},
+        ],
+    }
+    # The bare-enum definition may linger in "definitions" (pydantic v1 adds
+    # definitions after schema_extra), but nothing may reference it anymore.
+    assert "$ref" not in str(schema["properties"]["authentication_type"])
