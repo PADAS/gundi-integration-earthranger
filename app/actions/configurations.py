@@ -261,19 +261,19 @@ class PullEventsConfig(PullActionConfiguration):
         default_factory=list,
         title="Event Types",
         description=(
-            "List of ER event-type slugs to pull, e.g. ['wildlife_sighting_rep', 'poacher_sighting_rep']. "
+            "ER event-type slugs to pull. Add one slug per item, e.g. wildlife_sighting_rep. "
             "Run the 'show_permissions' action to see the slugs available for this account. "
             "Combined with Event Categories using ER's AND semantics. "
-            "An empty list applies no event-type constraint."
+            "Leave empty to apply no event-type constraint."
         ),
     )
     event_categories: List[str] = Field(
         default_factory=list,
         title="Event Categories",
         description=(
-            "List of ER event-category slugs, e.g. ['wildlife', 'monitoring']. "
+            "ER event-category slugs. Add one slug per item, e.g. wildlife. "
             "ER applies type and category filters with AND semantics. "
-            "An empty list applies no category constraint."
+            "Leave empty to apply no category constraint."
         ),
     )
     # This integration is most often used only as a destination, so scheduled
