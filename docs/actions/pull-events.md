@@ -33,7 +33,13 @@ Off by default. When enabled, files attached to ER events (photos, documents)
 are forwarded to Gundi as event attachments and delivered to destinations that
 support them (EarthRanger, CMORE). Each file is forwarded once (tracked
 per-event in Redis as `seen_file_ids`); files added to an event later are
-picked up on the next pull. Files over 20 MB are skipped with a warning.
+picked up on the next pull. Files over 20 MB are skipped with a warning. A file
+that fails to forward is *not* retried on the very next pull — the watermark
+still advances and the per-event freshness check skips unchanged events — so
+it's retried the next time the event is updated in ER (or on a forced re-run
+via `force_run_since_start`). Note also that an event first synced while this
+flag was off has an empty seen-file list, so its first update after enabling
+`include_attachments` forwards all of its existing files at once.
 
 !!! note "`include_notes` is load-bearing"
     ER's events-*list* endpoint omits the notes array unless `include_notes=true` is requested. The action

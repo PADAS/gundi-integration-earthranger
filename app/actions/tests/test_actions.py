@@ -2243,7 +2243,8 @@ async def test_forward_event_files_failure_leaves_file_unseen_for_retry(mocker):
         er_client, er_event, "gundi-obj-1", "int-1", seen_file_ids=[]
     )
 
-    # Failed file is NOT marked seen → retried on the next pull.
+    # Failed file is NOT marked seen → retried the next time the event is
+    # updated in ER (or on a forced re-run), not on the very next pull.
     assert forwarded == 0
     assert seen == []
     send_mock.assert_not_awaited()

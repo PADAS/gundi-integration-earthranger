@@ -510,9 +510,13 @@ async def action_pull_events(integration: Integration, action_config: PullEvents
         # include_notes is required: ER's events-list endpoint omits the notes
         # array unless explicitly requested, so without this each er_event comes
         # back without notes and no note update_event is ever emitted (the
-        # ER-note → downstream-comment path silently never fires).
+        # ER-note → downstream-comment path silently never fires). include_files
+        # is likewise load-bearing: without it, event files silently aren't
+        # returned, so _forward_event_files has nothing to forward even with
+        # include_attachments enabled — the feature would silently no-op if the
+        # server default for include_files ever differs from what we assume here.
         async for event_batch in earth_ranger.get_events(
-            filter=json_filter, batch_size=BATCH_SIZE, include_notes=True
+            filter=json_filter, batch_size=BATCH_SIZE, include_notes=True, include_files=True
         ):
             for er_event in event_batch:
                 er_event_uuid = er_event.get("id")
@@ -1447,6 +1451,12 @@ async def _emit_event_updates(er_event, state_record, integration_id):
 # Guardrail: don't pull pathological uploads (videos, raw camera dumps) into
 # runner memory / the attachments bucket. Oversized files are marked seen so
 # they aren't re-downloaded on every run.
+#
+# Known limitation: erclient's get_file() is non-streaming (it reads the full
+# response body into memory before we ever see response.content), so this cap
+# is only enforced after the whole file is already in memory — it does not
+# bound peak memory usage for oversized files. A pre-download size check
+# (e.g. via a HEAD request or Content-Length) is a known follow-up.
 MAX_ATTACHMENT_BYTES = 20 * 1024 * 1024
 
 
@@ -1458,8 +1468,15 @@ async def _forward_event_files(er_client, er_event, gundi_object_id, integration
     event itself, not conversation history.
 
     Returns (forwarded_count, updated_seen_file_ids). A per-file failure is
-    logged and the file is left out of seen_file_ids so the next run retries
-    it; one bad file never blocks the rest of the event (or the run).
+    logged and the file is left out of seen_file_ids, so it is retried the
+    next time the event is updated in ER (or on a forced re-run) — NOT on the
+    very next pull, since the watermark advances and the seen-event freshness
+    check (unchanged `updated_at`) skips the event entirely until it changes
+    again; one bad file never blocks the rest of the event (or the run).
+
+    Note: get_file() is non-streaming, so the MAX_ATTACHMENT_BYTES cap below is
+    only enforced after the full file body is already in memory (see the
+    comment on MAX_ATTACHMENT_BYTES).
     """
     seen = list(seen_file_ids)
     seen_set = set(seen)
@@ -1467,7 +1484,13 @@ async def _forward_event_files(er_client, er_event, gundi_object_id, integration
     for entry in er_event.get("files") or []:
         file_id = entry.get("id")
         url = entry.get("url")
-        if not file_id or file_id in seen_set or not url:
+        if file_id and file_id in seen_set:
+            continue
+        if not file_id or not url:
+            logger.warning(
+                "Skipping malformed ER file entry on event %s; missing id or url. keys=%r",
+                er_event.get("id"), sorted(entry.keys()),
+            )
             continue
         filename = entry.get("filename") or f"attachment-{file_id}"
         try:
