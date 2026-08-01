@@ -2544,21 +2544,27 @@ async def test_pull_source_window_enriches_via_resolver(mocker):
 # ---------------------------------------------------------------------------
 
 def test_authenticate_config_schema_has_auth_type_display_labels():
-    from app.actions.configurations import AuthenticateConfig
+    from app.actions.configurations import AuthenticateConfig, ERAuthenticationType
 
     schema = AuthenticateConfig.schema()
     auth_type = schema["properties"]["authentication_type"]
 
-    assert auth_type == {
-        "type": "string",
-        "title": "Authentication Type",
-        "description": "Type of authentication to use.",
-        "default": "token",
-        "oneOf": [
-            {"const": "token", "title": "Token"},
-            {"const": "username_password", "title": "Username & Password"},
-        ],
-    }
-    # The bare-enum definition may linger in "definitions" (pydantic v1 adds
-    # definitions after schema_extra), but nothing may reference it anymore.
-    assert "$ref" not in str(schema["properties"]["authentication_type"])
+    # The enum $ref is replaced with an inline oneOf. The bare-enum definition
+    # may linger in "definitions" (pydantic v1 adds definitions after
+    # schema_extra), but nothing may reference it anymore.
+    assert "$ref" not in str(auth_type)
+    assert "allOf" not in auth_type
+
+    # Generated Field metadata is preserved alongside the inline oneOf.
+    assert auth_type["type"] == "string"
+    assert auth_type["title"] == "Authentication Type"
+    assert auth_type["description"] == "Type of authentication to use."
+    assert auth_type["default"] == ERAuthenticationType.TOKEN.value
+
+    # Every enum member gets a dropdown entry; known members get their
+    # display labels. Deliberately not exact-dict equality, so adding a new
+    # enum member doesn't break this test.
+    options = {option["const"]: option["title"] for option in auth_type["oneOf"]}
+    assert set(options) == {member.value for member in ERAuthenticationType}
+    assert options["token"] == "Token"
+    assert options["username_password"] == "Username & Password"

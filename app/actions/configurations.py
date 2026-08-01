@@ -69,24 +69,27 @@ class AuthenticateConfig(AuthActionConfiguration, ExecutableActionMixin):
             schema["properties"].pop("username", None)
             schema["properties"].pop("password", None)
 
-            # Inline oneOf of const/title pairs so the portal shows display
-            # labels instead of raw enum values. Stored values are unchanged,
-            # so existing configs and the if/then/else below keep working.
-            schema["properties"]["authentication_type"] = {
-                "type": "string",
-                "title": "Authentication Type",
-                "description": "Type of authentication to use.",
-                "default": ERAuthenticationType.TOKEN.value,
-                "oneOf": [
-                    {
-                        "const": member.value,
-                        "title": AUTH_TYPE_DISPLAY_NAMES.get(
-                            member, member.value.replace("_", " ").title()
-                        ),
-                    }
-                    for member in ERAuthenticationType
-                ],
-            }
+            # Replace the enum $ref with an inline oneOf of const/title pairs
+            # so the portal shows display labels instead of raw enum values.
+            # Generated metadata (description, default) is kept in place so it
+            # can't drift from the Field definition; pydantic v1 emits no
+            # property-level title for enum fields, so set it here. Stored
+            # values are unchanged, so existing configs and the if/then/else
+            # below keep working.
+            auth_type = schema["properties"]["authentication_type"]
+            auth_type.pop("allOf", None)
+            auth_type.pop("$ref", None)
+            auth_type.setdefault("title", "Authentication Type")
+            auth_type["type"] = "string"
+            auth_type["oneOf"] = [
+                {
+                    "const": member.value,
+                    "title": AUTH_TYPE_DISPLAY_NAMES.get(
+                        member, member.value.replace("_", " ").title()
+                    ),
+                }
+                for member in ERAuthenticationType
+            ]
             # Note: the ERAuthenticationType entry in "definitions" stays —
             # pydantic v1 attaches definitions after schema_extra runs — but
             # it's unreferenced now, so rjsf ignores it.
