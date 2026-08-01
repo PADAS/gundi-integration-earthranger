@@ -13,6 +13,14 @@ class ERAuthenticationType(str, Enum):
     USERNAME_PASSWORD = "username_password"
 
 
+# Display labels for the portal's Authentication Type dropdown. A bare JSON
+# Schema enum carries no labels, so rjsf would render the raw values.
+AUTH_TYPE_DISPLAY_NAMES = {
+    ERAuthenticationType.TOKEN: "Token",
+    ERAuthenticationType.USERNAME_PASSWORD: "Username & Password",
+}
+
+
 class EventFilterDateField(str, Enum):
     """Which ER timestamp on an Event the start/end window applies to.
 
@@ -60,6 +68,31 @@ class AuthenticateConfig(AuthActionConfiguration, ExecutableActionMixin):
             schema["properties"].pop("token", None)
             schema["properties"].pop("username", None)
             schema["properties"].pop("password", None)
+
+            # Replace the enum $ref with an inline oneOf of const/title pairs
+            # so the portal shows display labels instead of raw enum values.
+            # Generated metadata (description, default) is kept in place so it
+            # can't drift from the Field definition; pydantic v1 emits no
+            # property-level title for enum fields, so set it here. Stored
+            # values are unchanged, so existing configs and the if/then/else
+            # below keep working.
+            auth_type = schema["properties"]["authentication_type"]
+            auth_type.pop("allOf", None)
+            auth_type.pop("$ref", None)
+            auth_type.setdefault("title", "Authentication Type")
+            auth_type["type"] = "string"
+            auth_type["oneOf"] = [
+                {
+                    "const": member.value,
+                    "title": AUTH_TYPE_DISPLAY_NAMES.get(
+                        member, member.value.replace("_", " ").title()
+                    ),
+                }
+                for member in ERAuthenticationType
+            ]
+            # Note: the ERAuthenticationType entry in "definitions" stays —
+            # pydantic v1 attaches definitions after schema_extra runs — but
+            # it's unreferenced now, so rjsf ignores it.
 
             # Show token OR username & password based on authentication_type
             schema.update({
