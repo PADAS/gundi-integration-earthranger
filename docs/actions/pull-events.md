@@ -55,7 +55,7 @@ flag was off has an empty seen-file list, so its first update after enabling
 | `end_datetime` | ISO-8601 string | none | Optional ceiling; sent on every run. Leave empty for ongoing pulls; set only for bounded backfills. |
 | `filter_date_field` | enum: `updated_at` / `created_at` / `event_time` | `updated_at` | Which ER timestamp the window applies to. `updated_at` catches edits and backdated events; `event_time` can silently miss backdated events — use it only for bounded backfills. |
 | `force_run_since_start` | bool | `False` | Reset the watermark for one run. Toggle off after the catch-up, or every run re-pulls from `start_datetime`. |
-| `event_types` | list[str] | `[]` | ER event-type slugs to pull (e.g. `wildlife_sighting_rep`). Empty = no type filter. Find slugs via [`show_permissions`](show-permissions.md). |
-| `event_categories` | list[str] | `[]` | ER event-category slugs. Combined with types using ER's AND semantics. Empty = no category filter. |
+| `event_types` | list[str] | `[]` | ER event-type slugs to pull (e.g. `wildlife_sighting_rep`). Empty = no type filter. In a supporting portal each item is a live dropdown ([reference actions](reference-actions.md#used-by-this-runners-own-form-too)); slugs are also listed by [`show_permissions`](show-permissions.md). |
+| `event_categories` | list[str] | `[]` | ER event-category slugs. Combined with types using ER's AND semantics. Empty = no category filter. In a supporting portal each item is a live dropdown ([reference actions](reference-actions.md#used-by-this-runners-own-form-too)). |
 | `include_attachments` | bool | `False` | Forward files attached to ER events (photos, documents) to Gundi as event attachments. See below. |
 | `run_on_schedule` | bool | `False` | Enable scheduled pulling. Off by default — turn on per connection that should pull events. |

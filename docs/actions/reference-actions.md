@@ -1,6 +1,6 @@
 # Reference actions
 
-Three config-time lookups the Gundi portal calls while an operator is filling out a form — e.g.
+Config-time lookups the Gundi portal calls while an operator is filling out a form — e.g.
 populating an "Event Type" dropdown, or the values for a choice field on that event type. They are
 **not** scheduled and have no configuration of their own: the caller supplies query params per-call via
 `config_overrides`, and each returns a `ReferenceDataResponse` (an `options` list plus a
@@ -9,11 +9,12 @@ populating an "Event Type" dropdown, or the values for a choice field on that ev
 | Action | Query model | Purpose |
 |--------|-------------|---------|
 | `list_event_types` | `ListEventTypesQuery` (no fields) | Every **v2** ER event-type slug visible to this integration's credentials, grouped by event category. Classic v1 event types are not offered — see [Scope](#scope-v2-event-types-only). |
+| `list_event_categories` | `ListEventCategoriesQuery` (no fields) | Every ER event-category slug visible to this integration's credentials. |
 | `list_event_type_fields` | `ListEventTypeFieldsQuery` (`event_type`) | The field keys defined on one event type's schema. |
 | `list_event_field_values` | `ListEventFieldValuesQuery` (`event_type`, `field_key`) | The allowed values for one choice field on that event type. |
 
-`action_list_event_types` / `action_list_event_type_fields` / `action_list_event_field_values` —
-`app/actions/handlers.py`.
+`action_list_event_types` / `action_list_event_categories` / `action_list_event_type_fields` /
+`action_list_event_field_values` — `app/actions/handlers.py`.
 
 ## Why these exist
 
@@ -21,8 +22,17 @@ CMORE's mapping form lets an operator pick an ER event type and one of its field
 map onto a CMORE tag field. Those are source-side (ER) values, so the CMORE runner's config form needs to
 resolve them from *this* runner — that's `target: "provider"` in the
 [reference-data design](https://github.com/PADAS/gundi-integration-cmore/blob/main/docs/rfc-reference-data-portal-support.md).
-These three actions are what the portal calls to make that dropdown chain (event type → its fields → a
-field's values) work.
+`list_event_types`, `list_event_type_fields` and `list_event_field_values` are what the portal calls
+to make that dropdown chain (event type → its fields → a field's values) work.
+
+## Used by this runner's own form too
+
+`pull_events`' **Event Types** and **Event Categories** config fields carry
+`gundi:reference` annotations with `target: "self"` — in a supporting portal,
+each list item renders as a live dropdown backed by `list_event_types` /
+`list_event_categories` on this very integration, so operators pick slugs
+instead of copying them from `show_permissions` output. Older portals ignore
+the annotation and keep plain text inputs.
 
 ## Scope: v2 event types only
 

@@ -327,9 +327,40 @@ class PullEventsConfig(PullActionConfiguration):
         order=["start_datetime", "end_datetime", "filter_date_field", "event_types", "event_categories", "force_run_since_start", "include_attachments", "run_on_schedule"],
     )
 
+    @classmethod
+    def ui_schema(cls, *args, **kwargs):
+        """Annotate the slug-list fields with gundi:reference so the portal
+        renders each list item as a live dropdown fed by this integration's
+        own reference actions (target "self" — the form being configured IS
+        the ER integration that can answer). Deliberately no ui:widget:
+        portals without reference support keep plain text inputs. The
+        annotation sits on the array's ``items`` node so rjsf applies it to
+        every element. Spec:
+        https://github.com/PADAS/gundi-integration-cmore/blob/main/docs/superpowers/specs/2026-07-31-reference-data-config-ui-design.md
+        """
+        base = super().ui_schema(*args, **kwargs)
+        base["event_types"] = {"items": {"gundi:reference": _reference("list_event_types")}}
+        base["event_categories"] = {"items": {"gundi:reference": _reference("list_event_categories")}}
+        return base
+
+
+def _reference(action: str, params: Optional[dict] = None) -> dict:
+    """Build a gundi:reference ui_schema annotation (mirrors the helper in
+    gundi-integration-cmore's configurations.py; ER only needs target "self")."""
+    return {
+        "action": action,
+        "target": "self",
+        "params": params or {},
+        "allow_free_text": True,
+    }
+
 
 class ListEventTypesQuery(ReferenceActionConfiguration):
     """List the ER event types visible to this integration's credentials."""
+
+
+class ListEventCategoriesQuery(ReferenceActionConfiguration):
+    """List the ER event categories visible to this integration's credentials."""
 
 
 class ListEventTypeFieldsQuery(ReferenceActionConfiguration):
