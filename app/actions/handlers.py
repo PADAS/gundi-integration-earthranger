@@ -1422,8 +1422,11 @@ def transform_observations_to_gundi_schema(observations, resolver=None):
 # ---------------------------------------------------------------------------
 # Reference actions: config-time lookups the Gundi portal calls while an
 # operator is filling out a form (e.g. populating an "Event Type" dropdown).
-# Stateless — they read only the integration's auth config and propagate
-# upstream ER errors rather than swallowing them (see
+# Stateless — they read only the integration's auth config. Errors from the
+# load-bearing fetches (event types, schemas) propagate rather than being
+# swallowed; the one exception is list_event_types' category-display lookup,
+# which is best-effort enrichment for grouping and degrades to ungrouped
+# options on failure (see
 # docs/superpowers/specs/2026-07-31-reference-data-config-ui-design.md).
 # ---------------------------------------------------------------------------
 
@@ -1432,6 +1435,11 @@ def _build_er_client(integration: Integration) -> AsyncERClient:
     (mirrors action_pull_events / action_pull_observations)."""
     auth_config = get_authentication_config(integration=integration)
     url_parse = urlparse(integration.base_url)
+    if not url_parse.hostname:
+        # Schemeless/empty base_urls occur in Gundi; without this guard the
+        # client would be built against "https://None/...". Same message as
+        # action_auth's validation for consistency.
+        raise ValueError(f"Site URL is empty or invalid: '{integration.base_url}'")
     return AsyncERClient(
         service_root=f"{url_parse.scheme}://{url_parse.hostname}/api/v1.0",
         username=auth_config.username or None,

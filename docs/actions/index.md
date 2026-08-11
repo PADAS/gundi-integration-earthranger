@@ -1,7 +1,9 @@
 # Actions
 
-The runner exposes seven actions, all implemented in `app/actions/handlers.py` as `action_*` functions
-with a matching config model in `app/actions/configurations.py`.
+The runner implements seven actions in `app/actions/handlers.py` as `action_*` functions
+with a matching config model in `app/actions/configurations.py`. Four self-register
+unconditionally; the three reference actions register only when
+[`REGISTER_REFERENCE_ACTIONS`](../configuration.md#register_reference_actions) is enabled.
 
 | Action | Type | Purpose |
 |--------|------|---------|

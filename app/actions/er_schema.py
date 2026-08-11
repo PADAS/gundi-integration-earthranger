@@ -22,7 +22,8 @@ choice fields instead carry a ``$ref`` to an external choices.json list that
 must be fetched separately (``choices_ref`` / ``choice_list`` /
 ``parse_choices_json``). This repo only ever calls the pre-rendered endpoint,
 and every choice field observed in the captured fixture
-(``tests/fixtures/rhino_carcass_schema_from_api.json``) is fully inlined —
+(``app/actions/tests/fixtures/rhino_carcass_schema_from_api.json``) is fully
+inlined —
 so that ref-resolution machinery is dropped here as dead code for this call
 site. Restore it from the CMORE source if a future field is found that isn't
 inlined even under pre_render.
@@ -154,6 +155,13 @@ async def fetch_prerendered_event_schema(er_client, base_url: str, event_type: s
     doesn't model this /schema sub-resource, so we call it directly with the
     client's own auth headers (works for both token and username/password auth)."""
     url_parse = urlparse(base_url)
+    if not url_parse.hostname:
+        # Schemeless base_urls do occur in Gundi (see the _ensure_scheme guard in
+        # gundi-integration-cmore's CLI); urlparse leaves hostname None for them,
+        # which would otherwise build a "https://None/..." URL.
+        raise ValueError(f"Site URL is empty or invalid: '{base_url}'")
+    # scheme://hostname (dropping any port) is the deliberate convention — it
+    # matches every AsyncERClient construction site in handlers.py.
     url = f"{url_parse.scheme}://{url_parse.hostname}/api/v2.0/activity/eventtypes/{quote(event_type, safe='')}/schema"
     headers = await er_client.auth_headers()
     async with httpx.AsyncClient(headers=headers, timeout=30.0) as http:

@@ -324,3 +324,21 @@ async def test_list_event_field_values_unknown_event_type_raises(
             er_integration_v2_provider,
             ListEventFieldValuesQuery(event_type="no_such_type", field_key="animal_sex"),
         )
+
+
+# --- base_url validation in _build_er_client ----------------------------------
+
+
+@pytest.mark.asyncio
+async def test_reference_action_with_schemeless_base_url_raises_clean_error(
+    mocker, er_integration_v2_provider
+):
+    """A schemeless/empty integration.base_url must fail with the same clean
+    'Site URL is empty or invalid' message action_auth uses, not a confusing
+    downstream error against https://None/..."""
+    from app.actions.handlers import action_list_event_types
+    from app.actions.configurations import ListEventTypesQuery
+
+    mocker.patch.object(er_integration_v2_provider, "base_url", "gundi-er.pamdas.org")
+    with pytest.raises(ValueError, match="Site URL is empty or invalid: 'gundi-er.pamdas.org'"):
+        await action_list_event_types(er_integration_v2_provider, ListEventTypesQuery())

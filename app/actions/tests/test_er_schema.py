@@ -134,3 +134,23 @@ async def test_fetch_prerendered_event_schema_raises_on_404():
         await fetch_prerendered_event_schema(
             er_client, base_url="https://er.example.com", event_type="unknown_type"
         )
+
+
+# --- base_url validation -----------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_fetch_prerendered_event_schema_rejects_schemeless_base_url():
+    # Schemeless base_urls occur in Gundi; urlparse leaves hostname None for
+    # them, which would otherwise build a "https://None/..." URL.
+    er_client = AsyncMock()
+    with pytest.raises(ValueError, match="Site URL is empty or invalid: 'gundi-er.pamdas.org'"):
+        await fetch_prerendered_event_schema(er_client, "gundi-er.pamdas.org", "rhino_carcass")
+    er_client.auth_headers.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_fetch_prerendered_event_schema_rejects_empty_base_url():
+    er_client = AsyncMock()
+    with pytest.raises(ValueError, match="Site URL is empty or invalid"):
+        await fetch_prerendered_event_schema(er_client, "", "rhino_carcass")
