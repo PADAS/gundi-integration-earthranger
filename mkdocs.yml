@@ -51,6 +51,7 @@ nav:
       - pull_events: actions/pull-events.md
       - pull_observations: actions/pull-observations.md
       - show_permissions: actions/show-permissions.md
+      - Reference actions: actions/reference-actions.md
   - Data flow: data-flow.md
   - State & scheduling: state-and-scheduling.md
   - Configuration reference: configuration.md

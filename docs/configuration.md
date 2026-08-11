@@ -51,3 +51,29 @@ The ER **base URL** comes from the integration record, not this config.
     pulling is opt-in per connection.
 
 See [State & scheduling](state-and-scheduling.md) for watermark, backfill, and scheduling semantics.
+
+## `ListEventTypesQuery` / `ListEventTypeFieldsQuery` / `ListEventFieldValuesQuery` — reference actions
+
+| Model | Field | Type | Notes |
+|-------|-------|------|-------|
+| `ListEventTypesQuery` | — | — | No fields; lists every event type visible to this integration's credentials. |
+| `ListEventTypeFieldsQuery` | `event_type` | string | ER event-type slug (e.g. `rhino_carcass`). Unknown slug → error. |
+| `ListEventFieldValuesQuery` | `event_type` | string | Same as above. |
+| `ListEventFieldValuesQuery` | `field_key` | string | Field key from that event type's schema. Unknown key → error. |
+
+These are stateless config-time lookups, not scheduled actions — see [Reference actions](actions/reference-actions.md)
+for what they return and how the portal uses them.
+
+## Environment variables
+
+### `REGISTER_REFERENCE_ACTIONS`
+
+Default: `False`.
+
+Gates whether `list_event_types`, `list_event_type_fields`, and `list_event_field_values` are included
+when this runner self-registers with Gundi. They would register with `"type": "reference"`, a type the
+Gundi API doesn't accept yet — flipping this on before the platform side
+([PADAS/cdip#461](https://github.com/PADAS/cdip/pull/461)) is merged **and** deployed would 400 the
+whole registration call, not just these three actions. Leave it off in every environment until that lands;
+flip it on afterward to expose the actions (mirrors CMORE's identically-named, identically-gated flag from
+its own Phase 0 reference-actions work).

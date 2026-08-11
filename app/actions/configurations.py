@@ -5,7 +5,7 @@ from typing import List, Optional
 from pydantic import Field, SecretStr
 
 from app.services.utils import FieldWithUIOptions, GlobalUISchemaOptions, UIOptions
-from .core import AuthActionConfiguration, GenericActionConfiguration, PullActionConfiguration, ExecutableActionMixin
+from .core import AuthActionConfiguration, GenericActionConfiguration, PullActionConfiguration, ExecutableActionMixin, ReferenceActionConfiguration
 
 
 class ERAuthenticationType(str, Enum):
@@ -326,4 +326,17 @@ class PullEventsConfig(PullActionConfiguration):
     ui_global_options: GlobalUISchemaOptions = GlobalUISchemaOptions(
         order=["start_datetime", "end_datetime", "filter_date_field", "event_types", "event_categories", "force_run_since_start", "include_attachments", "run_on_schedule"],
     )
+
+
+class ListEventTypesQuery(ReferenceActionConfiguration):
+    """List the ER event types visible to this integration's credentials."""
+
+
+class ListEventTypeFieldsQuery(ReferenceActionConfiguration):
+    event_type: str
+
+
+class ListEventFieldValuesQuery(ReferenceActionConfiguration):
+    event_type: str
+    field_key: str
 
