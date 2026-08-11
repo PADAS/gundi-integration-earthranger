@@ -56,6 +56,21 @@ not an interim gap to close later.
   which fields have a fixed value set; free-text fields return no choices for `list_event_field_values`
   (an empty `options` list, not an error — the field is legitimately free text in ER).
 
+## Multiple providers on one destination
+
+These actions answer for **one** ER integration — the one whose credentials the
+runner holds. When a destination (e.g. a CMORE integration) is connected to
+*several* ER providers, it's the **portal** that fans a dropdown's query out to
+each provider separately and merges the results: options are unioned and
+deduped by value, and a provider that errors for a given query (say, an event
+type it doesn't define) is skipped as long as at least one provider answers.
+Nothing in this runner needs to know about the other providers — each instance
+only ever reports its own site's vocabulary.
+
+Practical upshot for operators: a shared destination's "Event Type" dropdown
+shows every connected site's event types; type-specific field/value lookups
+come from whichever site(s) define that type.
+
 ## Error semantics
 
 - Unknown `event_type` or `field_key` → the handler raises `ValueError`, which the runner turns into an
