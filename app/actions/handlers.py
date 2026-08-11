@@ -18,8 +18,11 @@ from gundi_core.schemas.v2 import Integration
 from app import settings
 from app.services.utils import find_config_for_action
 from app.services.state import IntegrationStateManager
+from .core import ReferenceDataResponse, ReferenceOption
+from .er_schema import fetch_prerendered_event_schema, parse_er_event_schema
 from .configurations import AuthenticateConfig, EventFilterDateField, PullObservationsConfig, PullEventsConfig, \
-    ERAuthenticationType, ShowPermissionsConfig
+    ERAuthenticationType, ShowPermissionsConfig, ListEventTypesQuery, ListEventTypeFieldsQuery, \
+    ListEventFieldValuesQuery
 from .source_profiles import SourceProfileResolver
 from ..services.activity_logger import activity_logger, log_action_activity
 from ..services.gundi import send_events_to_gundi, send_observations_to_gundi, update_event_in_gundi, send_event_attachments_to_gundi
@@ -1140,10 +1143,25 @@ class EventTypeMaps:
       slugs must be resolved before being sent in the filter blob.
     - ``category_id_by_slug``: category slug → ER EventCategory UUID. Same
       story for ``event_type__category__id__in``.
+    - ``category_slug_by_type_slug``: event-type slug → its category slug.
+      Used by the ``list_event_types`` reference action to group options by
+      category. v1 carries this as the nested category dict's ``value``; v2
+      carries it as a bare string.
+    - ``category_display_by_slug``: category slug → human-readable display
+      name. Same reference-action grouping use as above.
+    - ``v2_slugs``: event-type slugs that came from the v2 endpoint. Used by
+      the ``list_event_types`` reference action to offer only v2 event
+      types — ER's v2 pre-rendered schema endpoint 404s for classic v1
+      event types, which would dead-end the list_event_type_fields /
+      list_event_field_values cascade, so reference actions don't offer
+      them at all.
     """
     display_by_slug: Dict[str, str] = field(default_factory=dict)
     id_by_slug: Dict[str, str] = field(default_factory=dict)
     category_id_by_slug: Dict[str, str] = field(default_factory=dict)
+    category_slug_by_type_slug: Dict[str, str] = field(default_factory=dict)
+    category_display_by_slug: Dict[str, str] = field(default_factory=dict)
+    v2_slugs: set = field(default_factory=set)
 
 
 async def _fetch_event_type_maps(er_client) -> EventTypeMaps:
@@ -1194,7 +1212,7 @@ async def _fetch_event_type_maps(er_client) -> EventTypeMaps:
             # v2 carries category as a bare slug, not as a nested object —
             # we resolve category UUIDs separately below.
             if isinstance(et, dict):
-                _absorb_event_type(maps, et, with_category=False)
+                _absorb_event_type(maps, et, with_category=False, is_v2=True)
 
     # If we got no category UUIDs from the v1 event types (e.g. ER has only
     # v2 types defined), the canonical categories endpoint fills the gap.
@@ -1215,11 +1233,13 @@ async def _fetch_event_type_maps(er_client) -> EventTypeMaps:
                 cat_id = cat.get("id")
                 if cat_slug and cat_id:
                     maps.category_id_by_slug.setdefault(cat_slug, cat_id)
+                if cat_slug and cat.get("display"):
+                    maps.category_display_by_slug.setdefault(cat_slug, cat["display"])
 
     return maps
 
 
-def _absorb_event_type(maps: EventTypeMaps, et: dict, *, with_category: bool) -> None:
+def _absorb_event_type(maps: EventTypeMaps, et: dict, *, with_category: bool, is_v2: bool = False) -> None:
     """Merge one ER event-type record into the shared maps.
 
     Uses ``setdefault`` so v1 and v2 entries for the same slug (shouldn't
@@ -1233,13 +1253,23 @@ def _absorb_event_type(maps: EventTypeMaps, et: dict, *, with_category: bool) ->
         maps.display_by_slug.setdefault(slug, et["display"])
     if et.get("id"):
         maps.id_by_slug.setdefault(slug, et["id"])
-    if with_category:
-        category = et.get("category") or {}
-        if isinstance(category, dict):
-            cat_slug = category.get("value")
-            cat_id = category.get("id")
-            if cat_slug and cat_id:
-                maps.category_id_by_slug.setdefault(cat_slug, cat_id)
+    if is_v2:
+        maps.v2_slugs.add(slug)
+    category = et.get("category")
+    if isinstance(category, dict):
+        # v1: nested category object with its own slug/id/display.
+        cat_slug = category.get("value")
+        cat_id = category.get("id")
+        if cat_slug:
+            maps.category_slug_by_type_slug.setdefault(slug, cat_slug)
+            if category.get("display"):
+                maps.category_display_by_slug.setdefault(cat_slug, category["display"])
+        if with_category and cat_slug and cat_id:
+            maps.category_id_by_slug.setdefault(cat_slug, cat_id)
+    elif isinstance(category, str) and category:
+        # v2: category is a bare slug string; no display name available here
+        # (resolved via the categories-endpoint fallback above, if needed).
+        maps.category_slug_by_type_slug.setdefault(slug, category)
 
 
 def _resolve_slugs(configured_slugs, slug_to_id):
@@ -1387,6 +1417,161 @@ def transform_observations_to_gundi_schema(observations, resolver=None):
         else:
             transformed_data.append(transformed_observation)
     return transformed_data
+
+
+# ---------------------------------------------------------------------------
+# Reference actions: config-time lookups the Gundi portal calls while an
+# operator is filling out a form (e.g. populating an "Event Type" dropdown).
+# Stateless — they read only the integration's auth config. Errors from the
+# load-bearing fetches (event types, schemas) propagate rather than being
+# swallowed; the one exception is list_event_types' category-display lookup,
+# which is best-effort enrichment for grouping and degrades to ungrouped
+# options on failure (see
+# docs/superpowers/specs/2026-07-31-reference-data-config-ui-design.md).
+# ---------------------------------------------------------------------------
+
+def _build_er_client(integration: Integration) -> AsyncERClient:
+    """Standard AsyncERClient construction shared by the reference actions
+    (mirrors action_pull_events / action_pull_observations)."""
+    auth_config = get_authentication_config(integration=integration)
+    url_parse = urlparse(integration.base_url)
+    if not url_parse.hostname:
+        # Schemeless/empty base_urls occur in Gundi; without this guard the
+        # client would be built against "https://None/...". Same message as
+        # action_auth's validation for consistency.
+        raise ValueError(f"Site URL is empty or invalid: '{integration.base_url}'")
+    return AsyncERClient(
+        service_root=f"{url_parse.scheme}://{url_parse.hostname}/api/v1.0",
+        username=auth_config.username or None,
+        password=auth_config.password.get_secret_value() if auth_config.password else None,
+        token=auth_config.token.get_secret_value() if auth_config.token else None,
+        token_url=f"{url_parse.scheme}://{url_parse.hostname}/oauth2/token",
+        client_id="das_web_client",
+        connect_timeout=DEFAULT_CONNECT_TIMEOUT_SECONDS,
+    )
+
+
+async def _fetch_category_display_map(er_client) -> Dict[str, str]:
+    """Best-effort category slug → display name, unconditionally fetched.
+
+    Unlike `_fetch_event_type_maps`'s `category_id_by_slug` fallback (which
+    only hits `get_event_categories` when v1 records didn't already supply
+    category UUIDs — a condition tuned for `pull_events`' filter-resolution
+    needs), `list_event_types` needs display names for every category that
+    has a v2 event type in it, regardless of what v1 already resolved. A
+    v1-heavy merge can leave category_id_by_slug non-empty (skipping that
+    fallback) while a v2-only category's display name is still unknown, so
+    this reference action always fetches the categories endpoint itself.
+    """
+    try:
+        categories = await er_client.get_event_categories()
+    except Exception as e:
+        logger.warning(
+            "Could not fetch ER event categories for list_event_types grouping: %s: %s.",
+            type(e).__name__, e,
+        )
+        return {}
+    return {
+        cat["value"]: cat["display"]
+        for cat in _as_list(categories)
+        if isinstance(cat, dict) and cat.get("value") and cat.get("display")
+    }
+
+
+async def action_list_event_types(integration: Integration, action_config: ListEventTypesQuery):
+    """Reference action: v2 ER event types visible to this integration's credentials.
+
+    Reuses `_fetch_event_type_maps`'s v1+v2 merge but offers only the v2-
+    sourced slugs: ER's v2 pre-rendered schema endpoint 404s for classic v1
+    event types, which would dead-end the list_event_type_fields /
+    list_event_field_values cascade for them, so they're excluded here
+    rather than offered and then failing one step later. Options are
+    grouped by ER event category (falling back to no group when the
+    category has no known display name), sorted by group then label.
+    """
+    async with _build_er_client(integration) as earth_ranger:
+        maps = await _fetch_event_type_maps(earth_ranger)
+        category_display = await _fetch_category_display_map(earth_ranger)
+
+    # The unconditional fetch above is authoritative (covers every category,
+    # regardless of what `_fetch_event_type_maps` already resolved from v1);
+    # `maps.category_display_by_slug` fills any gap if that fetch failed.
+    group_display_by_slug = {**maps.category_display_by_slug, **category_display}
+
+    options = [
+        ReferenceOption(
+            value=slug,
+            label=maps.display_by_slug.get(slug, slug),
+            group=group_display_by_slug.get(maps.category_slug_by_type_slug.get(slug)),
+        )
+        for slug in maps.v2_slugs
+    ]
+    options.sort(key=lambda o: (o.group or "", o.label or o.value))
+    return ReferenceDataResponse(options=options, truncated=False).dict()
+
+
+async def _fetch_event_type_fields(er_client, base_url: str, event_type: str):
+    """Fetch + parse an ER event type's pre-rendered schema into ERFields.
+
+    A 404 from ER (unknown event type, or a classic v1 event type — the v2
+    schema endpoint 404s for those too) is translated to a ValueError so it
+    reads naturally as a config-form error; any other upstream failure
+    (e.g. a 5xx) propagates unchanged.
+    """
+    try:
+        raw_schema = await fetch_prerendered_event_schema(er_client, base_url, event_type)
+    except httpx.HTTPStatusError as e:
+        if e.response.status_code == 404:
+            raise ValueError(
+                f"Event type '{event_type}' has no v2 schema in EarthRanger "
+                "(classic v1 event types are not supported by reference actions)."
+            ) from e
+        raise
+    return parse_er_event_schema(raw_schema)
+
+
+async def action_list_event_type_fields(integration: Integration, action_config: ListEventTypeFieldsQuery):
+    """Reference action: field keys defined on one ER event type's schema."""
+    async with _build_er_client(integration) as earth_ranger:
+        fields = await _fetch_event_type_fields(
+            earth_ranger, integration.base_url, action_config.event_type
+        )
+
+    options = [
+        ReferenceOption(
+            value=f.key,
+            label=f.title or f.key,
+            description="choices" if f.is_enum else None,
+        )
+        for f in fields
+    ]
+    return ReferenceDataResponse(options=options).dict()
+
+
+async def action_list_event_field_values(integration: Integration, action_config: ListEventFieldValuesQuery):
+    """Reference action: allowed values for one choice field on an ER event type.
+
+    Non-enum fields legitimately return an empty options list — they are
+    free-text in ER, so there is nothing to suggest.
+    """
+    async with _build_er_client(integration) as earth_ranger:
+        fields = await _fetch_event_type_fields(
+            earth_ranger, integration.base_url, action_config.event_type
+        )
+
+    field_match = next((f for f in fields if f.key == action_config.field_key), None)
+    if field_match is None:
+        raise ValueError(
+            f"Field '{action_config.field_key}' not found on event type "
+            f"'{action_config.event_type}' in EarthRanger."
+        )
+    if not field_match.is_enum:
+        return ReferenceDataResponse(options=[]).dict()
+    options = [
+        ReferenceOption(value=choice.value, label=choice.display)
+        for choice in field_match.choices
+    ]
+    return ReferenceDataResponse(options=options).dict()
 
 
 # Maps an ER event field name to the corresponding key the sensors-API
