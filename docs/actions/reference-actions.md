@@ -8,7 +8,7 @@ populating an "Event Type" dropdown, or the values for a choice field on that ev
 
 | Action | Query model | Purpose |
 |--------|-------------|---------|
-| `list_event_types` | `ListEventTypesQuery` (no fields) | Every ER event-type slug visible to this integration's credentials, grouped by event category. |
+| `list_event_types` | `ListEventTypesQuery` (no fields) | Every **v2** ER event-type slug visible to this integration's credentials, grouped by event category. Classic v1 event types are not offered — see [Scope](#scope-v2-event-types-only). |
 | `list_event_type_fields` | `ListEventTypeFieldsQuery` (`event_type`) | The field keys defined on one event type's schema. |
 | `list_event_field_values` | `ListEventFieldValuesQuery` (`event_type`, `field_key`) | The allowed values for one choice field on that event type. |
 
@@ -24,13 +24,31 @@ resolve them from *this* runner — that's `target: "provider"` in the
 These three actions are what the portal calls to make that dropdown chain (event type → its fields → a
 field's values) work.
 
+## Scope: v2 event types only
+
+`list_event_types` offers only **v2**-sourced event types. ER's v2 pre-rendered schema endpoint (the one
+`list_event_type_fields` / `list_event_field_values` depend on) 404s for classic v1 event types — offering
+a v1 slug here would dead-end the dropdown cascade one step later, with a "not supported" error where an
+operator would expect a list of fields. Rather than offer a type that can't be followed, `list_event_types`
+excludes v1 slugs entirely.
+
+This doesn't block an operator from referencing a v1 event type in a mapping — the `gundi:reference`
+widget contract degrades to a plain free-text input whenever the reference fetch has nothing to offer (or
+fails), so a v1 `event_type` / `event_details` key can still be typed in by hand; it just doesn't get
+autocomplete. No further integration-side work is planned for v1 — this is the intended long-term shape,
+not an interim gap to close later.
+
 ## How they're implemented
 
 - `list_event_types` reuses the same `_fetch_event_type_maps` helper `pull_events` uses to resolve
-  operator-configured slugs (queries ER's v1 and v2 event-type endpoints and merges the results, falling
-  back to the categories endpoint for any category display name neither version's response carried).
-  Options are grouped by category display name (or ungrouped, if no display name could be resolved) and
-  sorted by group then label.
+  operator-configured slugs (queries ER's v1 and v2 event-type endpoints and merges the results), but
+  narrows the result to `EventTypeMaps.v2_slugs` before building options. Category display names can come
+  from either version's response; unlike `_fetch_event_type_maps`'s own categories-endpoint fallback (which
+  only fires when v1 didn't already resolve category UUIDs — tuned for `pull_events`' filter-resolution
+  need), `list_event_types` always fetches `get_event_categories` itself, so a v2-only category's display
+  name resolves even when a v1 type elsewhere already satisfied that fallback's trigger condition. Options
+  are grouped by category display name (or ungrouped, if no display name could be resolved) and sorted by
+  group then label.
 - `list_event_type_fields` and `list_event_field_values` both fetch ER's pre-rendered event-type schema
   (`/api/v2.0/activity/eventtypes/{event_type}/schema?pre_render=true&s_format=enum` — not modeled by
   `erclient`, so called directly with the client's own auth headers) and parse it with
@@ -42,7 +60,9 @@ field's values) work.
 
 - Unknown `event_type` or `field_key` → the handler raises `ValueError`, which the runner turns into an
   error response (never a leaked config, per the reference-action error carve-out — see
-  [Configuration reference](../configuration.md#register_reference_actions)).
+  [Configuration reference](../configuration.md#register_reference_actions)). A classic v1 `event_type`
+  passed to `list_event_type_fields` / `list_event_field_values` surfaces the same way (ER's 404), with
+  wording that calls out the v1/v2 distinction rather than implying the slug is simply unknown.
 - Any other upstream ER failure (e.g. a 5xx) propagates unchanged.
 
 ## Registration is gated

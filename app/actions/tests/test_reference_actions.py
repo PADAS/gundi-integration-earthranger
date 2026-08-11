@@ -68,9 +68,11 @@ def mock_fetch_schema(mocker):
 async def test_list_event_types_groups_by_category(
     er_integration_v2_provider, mock_er_client
 ):
-    """v1 and v2 event types are merged; options are grouped by category
-    display name (from v1's nested category dict, including for a v2-only
-    type sharing that category slug) and sorted by group then label."""
+    """Only v2 event types are offered (see
+    test_list_event_types_excludes_v1_only_types), grouped by category
+    display name and sorted by group then label. Category display names can
+    come from either version's response — here both groups are known via
+    v1's nested category dict."""
     from erclient import VERSION_1_0, VERSION_2_0
 
     async def fake_get_event_types(version=VERSION_1_0, **kwargs):
@@ -87,22 +89,89 @@ async def test_list_event_types_groups_by_category(
             ]
         if version == VERSION_2_0:
             return [
-                # v2-only type sharing the "wildlife" category slug seen from v1.
+                # v2-only types, one sharing the "wildlife" category slug seen from v1.
                 {"value": "coyote_carcass", "display": "Coyote Carcass", "id": "id3", "category": "wildlife"},
+                {"value": "sit_rep_v2", "display": "Sit Rep", "id": "id4", "category": "security"},
             ]
+        return []
+
+    mock_er_client.get_event_types = fake_get_event_types
+    mock_er_client.get_event_categories = AsyncMock(return_value=[])
+
+    result = await action_list_event_types(er_integration_v2_provider, ListEventTypesQuery())
+
+    values = [(o["value"], o["label"], o["group"]) for o in result["options"]]
+    assert values == [
+        ("sit_rep_v2", "Sit Rep", "Security"),
+        ("coyote_carcass", "Coyote Carcass", "Wildlife"),
+    ]
+    assert result["truncated"] is False
+
+
+@pytest.mark.asyncio
+async def test_list_event_types_excludes_v1_only_types(
+    er_integration_v2_provider, mock_er_client
+):
+    """Classic v1 event types dead-end the list_event_type_fields /
+    list_event_field_values cascade (ER's v2 schema endpoint 404s for them),
+    so list_event_types must not offer them at all — only v2-sourced slugs
+    appear, even though the v1 type is known (it contributes display_by_slug
+    and category info, just not an option)."""
+    from erclient import VERSION_1_0, VERSION_2_0
+
+    async def fake_get_event_types(version=VERSION_1_0, **kwargs):
+        if version == VERSION_1_0:
+            return [{"value": "rhino_carcass", "display": "Rhino Carcass", "id": "id1", "category": {}}]
+        if version == VERSION_2_0:
+            return [{"value": "coyote_carcass", "display": "Coyote Carcass", "id": "id2", "category": {}}]
         return []
 
     mock_er_client.get_event_types = fake_get_event_types
 
     result = await action_list_event_types(er_integration_v2_provider, ListEventTypesQuery())
 
-    values = [(o["value"], o["label"], o["group"]) for o in result["options"]]
-    assert values == [
-        ("accident_rep", "Accident Report", "Security"),
-        ("coyote_carcass", "Coyote Carcass", "Wildlife"),
-        ("rhino_carcass", "Rhino Carcass", "Wildlife"),
+    assert [o["value"] for o in result["options"]] == ["coyote_carcass"]
+
+
+@pytest.mark.asyncio
+async def test_list_event_types_group_resolves_via_unconditional_categories_fetch(
+    er_integration_v2_provider, mock_er_client
+):
+    """A v1 event type already populates category_id_by_slug, which would
+    normally suppress `_fetch_event_type_maps`'s own categories-endpoint
+    fallback (that fallback is tuned for pull_events' UUID-resolution need,
+    not display names). list_event_types must still resolve display names
+    for categories only seen via v2 — via its own unconditional
+    get_event_categories fetch — rather than leaving them ungrouped."""
+    from erclient import VERSION_1_0, VERSION_2_0
+
+    async def fake_get_event_types(version=VERSION_1_0, **kwargs):
+        if version == VERSION_1_0:
+            return [
+                {
+                    "value": "rhino_carcass", "display": "Rhino Carcass", "id": "id1",
+                    "category": {"value": "wildlife", "id": "catw", "display": "Wildlife"},
+                },
+            ]
+        if version == VERSION_2_0:
+            # v2-only type in a category v1 never mentioned.
+            return [{"value": "lone_type", "display": "Lone Type", "id": "id2", "category": "mystery"}]
+        return []
+
+    mock_er_client.get_event_types = fake_get_event_types
+    mock_er_client.get_event_categories = AsyncMock(
+        return_value=[{"value": "mystery", "id": "catm", "display": "Mystery"}]
+    )
+
+    result = await action_list_event_types(er_integration_v2_provider, ListEventTypesQuery())
+
+    # rhino_carcass (v1-only) is excluded; lone_type's group resolved to
+    # "Mystery" via the unconditional fetch even though category_id_by_slug
+    # was already non-empty from v1.
+    assert result["options"] == [
+        {"value": "lone_type", "label": "Lone Type", "description": None, "group": "Mystery"}
     ]
-    assert result["truncated"] is False
+    mock_er_client.get_event_categories.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -166,7 +235,10 @@ async def test_list_event_type_fields_unknown_event_type_raises(
         "Not Found", request=MagicMock(), response=MagicMock(status_code=404)
     )
 
-    with pytest.raises(ValueError, match="rhino_carcass.*not found in EarthRanger"):
+    with pytest.raises(
+        ValueError,
+        match="rhino_carcass.*has no v2 schema in EarthRanger.*classic v1 event types are not supported",
+    ):
         await action_list_event_type_fields(
             er_integration_v2_provider, ListEventTypeFieldsQuery(event_type="rhino_carcass")
         )
@@ -247,7 +319,7 @@ async def test_list_event_field_values_unknown_event_type_raises(
         "Not Found", request=MagicMock(), response=MagicMock(status_code=404)
     )
 
-    with pytest.raises(ValueError, match="not found in EarthRanger"):
+    with pytest.raises(ValueError, match="has no v2 schema in EarthRanger"):
         await action_list_event_field_values(
             er_integration_v2_provider,
             ListEventFieldValuesQuery(event_type="no_such_type", field_key="animal_sex"),
