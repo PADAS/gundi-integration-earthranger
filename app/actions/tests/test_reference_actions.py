@@ -369,6 +369,26 @@ async def test_list_event_categories_returns_sorted_options(mock_er_client, er_i
 
 
 @pytest.mark.asyncio
+async def test_list_event_categories_unwraps_paginated_envelope(mock_er_client, er_integration_v2_provider):
+    """ER can return the categories list wrapped in a paginated envelope
+    ({"results": [...]}); the handler normalizes via _as_list."""
+    from app.actions.handlers import action_list_event_categories
+    from app.actions.configurations import ListEventCategoriesQuery
+
+    mock_er_client.get_event_categories = AsyncMock(return_value={
+        "results": [
+            {"value": "security", "display": "Security"},
+            {"value": "monitoring", "display": "Monitoring"},
+        ]
+    })
+    result = await action_list_event_categories(er_integration_v2_provider, ListEventCategoriesQuery())
+    assert [(o["value"], o["label"]) for o in result["options"]] == [
+        ("monitoring", "Monitoring"),
+        ("security", "Security"),
+    ]
+
+
+@pytest.mark.asyncio
 async def test_list_event_categories_upstream_error_propagates(mock_er_client, er_integration_v2_provider):
     from app.actions.handlers import action_list_event_categories
     from app.actions.configurations import ListEventCategoriesQuery
