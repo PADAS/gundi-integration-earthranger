@@ -10,7 +10,7 @@
 
 ## Global Constraints
 
-- The framework port (Task 1) must be a faithful copy of CMORE's diff — do not redesign. Source files: `/Users/chrisdo/padas/gundi-integration-cmore/app/actions/core.py:64-87` (+`List` import), `app/services/core.py:9`, `app/services/self_registration.py:15,21,57-62,66-67`, `app/services/action_runner.py:19,242-244,248,294-304,323,329`, `app/settings/integration.py:14-19`.
+- The framework port (Task 1) must be a faithful copy of CMORE's diff — do not redesign. Source files: `gundi-integration-cmore/app/actions/core.py:64-87` (+`List` import), `app/services/core.py:9`, `app/services/self_registration.py:15,21,57-62,66-67`, `app/services/action_runner.py:19,242-244,248,294-304,323,329`, `app/settings/integration.py:14-19`.
 - `REGISTER_REFERENCE_ACTIONS` defaults **False** (the Gundi API PR PADAS/cdip#461 is not merged/deployed yet; registering `"reference"` before it lands would 400 the whole registration).
 - Reference handlers are stateless: read only the integration's `auth` config (via the existing `get_authentication_config(integration)` at `app/actions/handlers.py:1119-1129`), take query params from `config_overrides` via their Pydantic query model, return `ReferenceDataResponse(...).dict()`.
 - Handler errors: unknown event_type/field → raise `ValueError` (matches CMORE; the runner scrubs configs from reference-action error payloads per the ported carve-out).
