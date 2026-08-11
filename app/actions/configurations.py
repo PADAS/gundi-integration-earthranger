@@ -335,8 +335,8 @@ class PullEventsConfig(PullActionConfiguration):
         the ER integration that can answer). Deliberately no ui:widget:
         portals without reference support keep plain text inputs. The
         annotation sits on the array's ``items`` node so rjsf applies it to
-        every element. Spec: gundi-integration-cmore
-        docs/superpowers/specs/2026-07-31-reference-data-config-ui-design.md.
+        every element. Spec:
+        https://github.com/PADAS/gundi-integration-cmore/blob/main/docs/superpowers/specs/2026-07-31-reference-data-config-ui-design.md
         """
         base = super().ui_schema(*args, **kwargs)
         base["event_types"] = {"items": {"gundi:reference": _reference("list_event_types")}}
