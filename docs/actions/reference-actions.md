@@ -9,6 +9,7 @@ populating an "Event Type" dropdown, or the values for a choice field on that ev
 | Action | Query model | Purpose |
 |--------|-------------|---------|
 | `list_event_types` | `ListEventTypesQuery` (no fields) | Every **v2** ER event-type slug visible to this integration's credentials, grouped by event category. Classic v1 event types are not offered — see [Scope](#scope-v2-event-types-only). |
+| `list_event_categories` | `ListEventCategoriesQuery` (no fields) | Every ER event-category slug visible to this integration's credentials. |
 | `list_event_type_fields` | `ListEventTypeFieldsQuery` (`event_type`) | The field keys defined on one event type's schema. |
 | `list_event_field_values` | `ListEventFieldValuesQuery` (`event_type`, `field_key`) | The allowed values for one choice field on that event type. |
 
@@ -23,6 +24,15 @@ resolve them from *this* runner — that's `target: "provider"` in the
 [reference-data design](https://github.com/PADAS/gundi-integration-cmore/blob/main/docs/rfc-reference-data-portal-support.md).
 These three actions are what the portal calls to make that dropdown chain (event type → its fields → a
 field's values) work.
+
+## Used by this runner's own form too
+
+`pull_events`' **Event Types** and **Event Categories** config fields carry
+`gundi:reference` annotations with `target: "self"` — in a supporting portal,
+each list item renders as a live dropdown backed by `list_event_types` /
+`list_event_categories` on this very integration, so operators pick slugs
+instead of copying them from `show_permissions` output. Older portals ignore
+the annotation and keep plain text inputs.
 
 ## Scope: v2 event types only
 

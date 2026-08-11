@@ -22,7 +22,7 @@ from .core import ReferenceDataResponse, ReferenceOption
 from .er_schema import fetch_prerendered_event_schema, parse_er_event_schema
 from .configurations import AuthenticateConfig, EventFilterDateField, PullObservationsConfig, PullEventsConfig, \
     ERAuthenticationType, ShowPermissionsConfig, ListEventTypesQuery, ListEventTypeFieldsQuery, \
-    ListEventFieldValuesQuery
+    ListEventFieldValuesQuery, ListEventCategoriesQuery
 from .source_profiles import SourceProfileResolver
 from ..services.activity_logger import activity_logger, log_action_activity
 from ..services.gundi import send_events_to_gundi, send_observations_to_gundi, update_event_in_gundi, send_event_attachments_to_gundi
@@ -1529,6 +1529,25 @@ async def _fetch_event_type_fields(er_client, base_url: str, event_type: str):
         raise
     return parse_er_event_schema(raw_schema)
 
+
+async def action_list_event_categories(integration: Integration, action_config: ListEventCategoriesQuery):
+    """Reference action: ER event categories visible to this integration's credentials.
+
+    Unlike `_fetch_category_display_map` (best-effort enrichment for
+    list_event_types' grouping), this fetch is load-bearing — errors
+    propagate so the portal shows its "couldn't load options" degrade
+    instead of silently offering an empty list.
+    """
+    async with _build_er_client(integration) as earth_ranger:
+        categories = await earth_ranger.get_event_categories()
+
+    options = [
+        ReferenceOption(value=cat["value"], label=cat.get("display") or cat["value"])
+        for cat in _as_list(categories)
+        if isinstance(cat, dict) and cat.get("value")
+    ]
+    options.sort(key=lambda o: o.label or o.value)
+    return ReferenceDataResponse(options=options, truncated=False).dict()
 
 async def action_list_event_type_fields(integration: Integration, action_config: ListEventTypeFieldsQuery):
     """Reference action: field keys defined on one ER event type's schema."""

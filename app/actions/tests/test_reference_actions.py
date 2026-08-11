@@ -342,3 +342,63 @@ async def test_reference_action_with_schemeless_base_url_raises_clean_error(
     mocker.patch.object(er_integration_v2_provider, "base_url", "gundi-er.pamdas.org")
     with pytest.raises(ValueError, match="Site URL is empty or invalid: 'gundi-er.pamdas.org'"):
         await action_list_event_types(er_integration_v2_provider, ListEventTypesQuery())
+
+
+# --- action_list_event_categories ---------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_list_event_categories_returns_sorted_options(mock_er_client, er_integration_v2_provider):
+    from app.actions.handlers import action_list_event_categories
+    from app.actions.configurations import ListEventCategoriesQuery
+
+    mock_er_client.get_event_categories = AsyncMock(return_value=[
+        {"value": "security", "display": "Security"},
+        {"value": "monitoring", "display": "Monitoring"},
+        {"value": "no_display"},
+        "not-a-dict",
+    ])
+    result = await action_list_event_categories(er_integration_v2_provider, ListEventCategoriesQuery())
+    # Case-sensitive label sort, matching list_event_types' convention.
+    assert [(o["value"], o["label"]) for o in result["options"]] == [
+        ("monitoring", "Monitoring"),
+        ("security", "Security"),
+        ("no_display", "no_display"),
+    ]
+    assert result["truncated"] is False
+
+
+@pytest.mark.asyncio
+async def test_list_event_categories_upstream_error_propagates(mock_er_client, er_integration_v2_provider):
+    from app.actions.handlers import action_list_event_categories
+    from app.actions.configurations import ListEventCategoriesQuery
+
+    mock_er_client.get_event_categories = AsyncMock(side_effect=httpx.HTTPStatusError(
+        "boom", request=MagicMock(), response=MagicMock(status_code=500)
+    ))
+    with pytest.raises(httpx.HTTPStatusError):
+        await action_list_event_categories(er_integration_v2_provider, ListEventCategoriesQuery())
+
+
+# --- PullEventsConfig ui_schema annotations ------------------------------------
+
+
+def test_pull_events_ui_schema_annotates_slug_lists_with_references():
+    """The slug-list fields render as reference dropdowns (per array item),
+    without ever setting ui:widget (forward-compat with older portals)."""
+    from app.actions.configurations import PullEventsConfig
+
+    ui = PullEventsConfig.ui_schema()
+    for field, action in (("event_types", "list_event_types"),
+                          ("event_categories", "list_event_categories")):
+        node = ui[field]["items"]
+        ref = node["gundi:reference"]
+        assert ref == {
+            "action": action,
+            "target": "self",
+            "params": {},
+            "allow_free_text": True,
+        }
+        assert "ui:widget" not in node
+    # The generated order list is untouched.
+    assert "event_types" in ui["ui:order"] and "event_categories" in ui["ui:order"]
