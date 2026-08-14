@@ -363,6 +363,11 @@ class ListEventCategoriesQuery(ReferenceActionConfiguration):
     """List the ER event categories visible to this integration's credentials."""
 
 
+class ListSubjectTypesQuery(ReferenceActionConfiguration):
+    """List the subject subtypes observed on this ER site (plus their parent
+    subject types as fallback options)."""
+
+
 class ListEventTypeFieldsQuery(ReferenceActionConfiguration):
     event_type: str
 
