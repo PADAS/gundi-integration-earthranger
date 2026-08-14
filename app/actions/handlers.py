@@ -22,7 +22,7 @@ from .core import ReferenceDataResponse, ReferenceOption
 from .er_schema import fetch_prerendered_event_schema, parse_er_event_schema
 from .configurations import AuthenticateConfig, EventFilterDateField, PullObservationsConfig, PullEventsConfig, \
     ERAuthenticationType, ShowPermissionsConfig, ListEventTypesQuery, ListEventTypeFieldsQuery, \
-    ListEventFieldValuesQuery, ListEventCategoriesQuery
+    ListEventFieldValuesQuery, ListEventCategoriesQuery, ListSubjectTypesQuery
 from .source_profiles import SourceProfileResolver
 from ..services.activity_logger import activity_logger, log_action_activity
 from ..services.gundi import send_events_to_gundi, send_observations_to_gundi, update_event_in_gundi, send_event_attachments_to_gundi
@@ -1548,6 +1548,57 @@ async def action_list_event_categories(integration: Integration, action_config: 
     ]
     options.sort(key=lambda o: o.label or o.value)
     return ReferenceDataResponse(options=options, truncated=False).dict()
+
+
+async def action_list_subject_types(integration: Integration, action_config: ListSubjectTypesQuery):
+    """Reference action: subject subtypes observed on this ER site.
+
+    Lists the distinct ``subject_subtype`` values of the site's subjects
+    (including inactive ones — their subtypes remain valid mapping
+    vocabulary), grouped by ``subject_type``. Each observed subject_type is
+    itself offered as the first option of its group, marked as a fallback:
+    destination-side subject mappings match subject_subtype first, then
+    subject_type. On a value collision (a subtype slug equal to a type slug)
+    the subtype wins. The subjectgroups fetch is load-bearing — errors
+    propagate so the portal shows its "couldn't load options" degrade
+    instead of silently offering an empty list.
+    """
+    async with _build_er_client(integration) as earth_ranger:
+        groups = await earth_ranger.get_subjectgroups(include_inactive=True, flat=True)
+
+    type_by_subtype: Dict[str, str] = {}
+    observed_types = set()
+    for group in _as_list(groups):
+        if not isinstance(group, dict):
+            continue
+        for subject in group.get("subjects", []) or []:
+            if not isinstance(subject, dict):
+                continue
+            subject_type = subject.get("subject_type")
+            if subject_type:
+                observed_types.add(subject_type)
+            subtype = subject.get("subject_subtype")
+            if subtype:
+                type_by_subtype.setdefault(subtype, subject_type)
+
+    options = [
+        ReferenceOption(value=subtype, group=subject_type)
+        for subtype, subject_type in type_by_subtype.items()
+    ]
+    options.extend(
+        ReferenceOption(
+            value=subject_type,
+            group=subject_type,
+            description=f"Any '{subject_type}' subtype (fallback match)",
+        )
+        for subject_type in observed_types
+        if subject_type not in type_by_subtype  # subtype wins the value
+    )
+    # Fallback-type options (the only ones carrying a description) sort
+    # first within their group; subtypes follow alphabetically.
+    options.sort(key=lambda o: (o.group or "", o.description is None, o.value))
+    return ReferenceDataResponse(options=options, truncated=False).dict()
+
 
 async def action_list_event_type_fields(integration: Integration, action_config: ListEventTypeFieldsQuery):
     """Reference action: field keys defined on one ER event type's schema."""

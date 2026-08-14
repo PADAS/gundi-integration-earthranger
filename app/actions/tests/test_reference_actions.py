@@ -422,3 +422,102 @@ def test_pull_events_ui_schema_annotates_slug_lists_with_references():
         assert "ui:widget" not in node
     # The generated order list is untouched.
     assert "event_types" in ui["ui:order"] and "event_categories" in ui["ui:order"]
+
+
+# --- action_list_subject_types -------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_list_subject_types_offers_observed_subtypes_grouped_by_type(
+    er_integration_v2_provider, mock_er_client
+):
+    """Distinct observed subject_subtypes, grouped by subject_type and sorted
+    by group; each subject_type is itself offered first in its group as a
+    fallback option (the CMORE mapping matches subtype first, then type).
+    Subjects appearing in several groups dedupe; subjects without a
+    subject_subtype contribute only their type."""
+    from app.actions.configurations import ListSubjectTypesQuery
+    from app.actions.handlers import action_list_subject_types
+
+    ranger = {"id": "s1", "name": "Ranger One",
+              "subject_type": "person", "subject_subtype": "ranger"}
+    mock_er_client.get_subjectgroups = AsyncMock(return_value=[
+        {"id": "g1", "name": "Rangers", "subjects": [
+            ranger,
+            {"id": "s2", "name": "Ranger Two",
+             "subject_type": "person", "subject_subtype": "ranger"},
+            {"id": "s3", "name": "Vet",
+             "subject_type": "person", "subject_subtype": "veterinarian"},
+        ]},
+        {"id": "g2", "name": "Wildlife", "subjects": [
+            {"id": "s4", "name": "Rhino A",
+             "subject_type": "wildlife", "subject_subtype": "black_rhino"},
+            ranger,  # same subject in a second group → dedupes
+            {"id": "s5", "name": "Typed only", "subject_type": "wildlife"},
+        ]},
+    ])
+
+    result = await action_list_subject_types(
+        er_integration_v2_provider, ListSubjectTypesQuery()
+    )
+
+    options = [(o["value"], o["group"], o["description"]) for o in result["options"]]
+    assert options == [
+        ("person", "person", "Any 'person' subtype (fallback match)"),
+        ("ranger", "person", None),
+        ("veterinarian", "person", None),
+        ("wildlife", "wildlife", "Any 'wildlife' subtype (fallback match)"),
+        ("black_rhino", "wildlife", None),
+    ]
+    mock_er_client.get_subjectgroups.assert_awaited_once_with(
+        include_inactive=True, flat=True
+    )
+
+
+@pytest.mark.asyncio
+async def test_list_subject_types_subtype_wins_value_collision_and_handles_missing_type(
+    er_integration_v2_provider, mock_er_client
+):
+    """A subtype slug equal to a type slug yields ONE option (the subtype);
+    a subject with no subject_type still contributes its subtype, ungrouped."""
+    from app.actions.configurations import ListSubjectTypesQuery
+    from app.actions.handlers import action_list_subject_types
+
+    mock_er_client.get_subjectgroups = AsyncMock(return_value=[
+        {"id": "g1", "subjects": [
+            # Subtype literally named like its type.
+            {"id": "s1", "subject_type": "vehicle", "subject_subtype": "vehicle"},
+            # No subject_type at all.
+            {"id": "s2", "subject_subtype": "mystery"},
+        ]},
+    ])
+
+    result = await action_list_subject_types(
+        er_integration_v2_provider, ListSubjectTypesQuery()
+    )
+
+    options = [(o["value"], o["group"], o["description"]) for o in result["options"]]
+    assert options == [
+        ("mystery", None, None),
+        ("vehicle", "vehicle", None),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_list_subject_types_propagates_upstream_errors(
+    er_integration_v2_provider, mock_er_client
+):
+    """The subjectgroups fetch is load-bearing — errors must propagate so the
+    portal shows its "couldn't load options" degrade, never an empty list."""
+    from app.actions.configurations import ListSubjectTypesQuery
+    from app.actions.handlers import action_list_subject_types
+
+    mock_er_client.get_subjectgroups = AsyncMock(
+        side_effect=httpx.HTTPStatusError(
+            "boom", request=MagicMock(), response=MagicMock(status_code=502)
+        )
+    )
+    with pytest.raises(httpx.HTTPStatusError):
+        await action_list_subject_types(
+            er_integration_v2_provider, ListSubjectTypesQuery()
+        )

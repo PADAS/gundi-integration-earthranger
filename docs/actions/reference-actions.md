@@ -12,9 +12,10 @@ populating an "Event Type" dropdown, or the values for a choice field on that ev
 | `list_event_categories` | `ListEventCategoriesQuery` (no fields) | Every ER event-category slug visible to this integration's credentials. |
 | `list_event_type_fields` | `ListEventTypeFieldsQuery` (`event_type`) | The field keys defined on one event type's schema. |
 | `list_event_field_values` | `ListEventFieldValuesQuery` (`event_type`, `field_key`) | The allowed values for one choice field on that event type. |
+| `list_subject_types` | `ListSubjectTypesQuery` (no fields) | The distinct subject **subtypes** observed on the site (from the subjectgroups tree, inactive subjects included), grouped by subject type — with each subject type itself offered first in its group as a fallback option, since destination-side subject mappings match `subject_subtype` first, then `subject_type`. |
 
 `action_list_event_types` / `action_list_event_categories` / `action_list_event_type_fields` /
-`action_list_event_field_values` — `app/actions/handlers.py`.
+`action_list_event_field_values` / `action_list_subject_types` — `app/actions/handlers.py`.
 
 ## Why these exist
 
@@ -24,6 +25,9 @@ resolve them from *this* runner — that's `target: "provider"` in the
 [reference-data design](https://github.com/PADAS/gundi-integration-cmore/blob/main/docs/rfc-reference-data-portal-support.md).
 `list_event_types`, `list_event_type_fields` and `list_event_field_values` are what the portal calls
 to make that dropdown chain (event type → its fields → a field's values) work.
+`list_subject_types` serves the same form's subject-mapping lists (subject type → affiliation /
+classification): it offers the subtypes actually flowing through Gundi observations, so operators
+pick real values instead of guessing slugs.
 
 ## Used by this runner's own form too
 
