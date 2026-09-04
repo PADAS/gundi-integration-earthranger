@@ -68,7 +68,10 @@ async def action_auth(integration: Integration, action_config: AuthenticateConfi
     auth_config = action_config
     url_parse = urlparse(integration.base_url)
     if not url_parse.hostname:
-        return {"valid_credentials": False, "error": f"Site URL is empty or invalid: '{integration.base_url}'"}
+        # action_auth reports failures inside a normal result, which nothing in
+        # the runner redacts, so the URL (a submitted value that may carry a
+        # token in its path or query) stays out of the message.
+        return {"valid_credentials": False, "error": "Site URL is empty or invalid."}
     async with AsyncERClient(
             service_root=f"{url_parse.scheme}://{url_parse.hostname}/api/v1.0",
             username=auth_config.username,
@@ -91,13 +94,14 @@ async def action_auth(integration: Integration, action_config: AuthenticateConfi
                 valid_credentials = await er_client.login()
             else:
                 return {"valid_credentials": False, "error": "Please select an valid authentication method."}
-        except ERClientBadCredentials:
-            return {"valid_credentials": False, "error": "Invalid credentials"}
         except ERClientException as e:
-            # ToDo. Differentiate ER errors from invalid credentials in the ER client
-            return {"valid_credentials": False, "error": str(e)}
-        except httpx.HTTPError as e:
-            return {"valid_credentials": False, "error": f"HTTP error: {e}"}
+            # Same fixed messages the reference actions use: str(e) carries
+            # ER's response body, which must not come back in the result.
+            return {"valid_credentials": False, "error": _as_integration_error(e).message}
+        except httpx.HTTPError:
+            # The exception text carries the request; the source status, if
+            # any, is not what the operator needs here.
+            return {"valid_credentials": False, "error": "Could not reach EarthRanger."}
         return {"valid_credentials": valid_credentials}
 
 

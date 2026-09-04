@@ -1,7 +1,9 @@
 import json
 
 import pytest
-from erclient import ERClientPermissionDenied
+import httpx
+from erclient import ERClientException, ERClientPermissionDenied
+from erclient.er_errors import ERClientBadCredentials
 from gundi_core.events import LogLevel
 
 from app.conftest import async_return
@@ -91,6 +93,59 @@ async def test_execute_auth_action_with_invalid_credentials(
     assert mock_erclient_class_with_error.return_value.get_me.called
     assert response.get("valid_credentials") == False
     assert "error" in response
+
+
+def _auth_client_raising(mocker, exc):
+    """Patch AsyncERClient in handlers with a client whose get_me raises exc."""
+    from unittest.mock import AsyncMock, MagicMock
+    from app.actions import handlers as handlers_module
+
+    instance = MagicMock()
+    instance.get_me = AsyncMock(side_effect=exc)
+    client_cls = MagicMock()
+    client_cls.return_value.__aenter__ = AsyncMock(return_value=instance)
+    client_cls.return_value.__aexit__ = AsyncMock(return_value=False)
+    mocker.patch.object(handlers_module, "AsyncERClient", client_cls)
+
+
+@pytest.mark.asyncio
+async def test_auth_action_error_text_does_not_echo_the_site_url(er_integration_v2_provider):
+    """action_auth reports failures inside a normal result, so nothing in the
+    runner redacts them; on the ephemeral path the draft URL (which may carry
+    a token in its path or query) came straight back to the caller."""
+    from app.actions.handlers import action_auth
+    from app.actions.configurations import AuthenticateConfig
+
+    integration = er_integration_v2_provider.copy(update={"base_url": "gundi-er.pamdas.org/?token=SECRET"})
+    response = await action_auth(integration, AuthenticateConfig(token="abc123"))
+
+    assert response["valid_credentials"] is False
+    assert response["error"] == "Site URL is empty or invalid."
+    assert "SECRET" not in response["error"]
+
+
+@pytest.mark.parametrize(
+    "exc,expected",
+    [
+        (ERClientBadCredentials("nope", status_code=401, response_body="secret-body"), "EarthRanger rejected the credentials"),
+        (ERClientException("Failed to GET ... 500 from ER. Message: secret-body"), "EarthRanger returned an unexpected response"),
+        (httpx.ConnectError("[Errno -3] Temporary failure in name resolution"), "Could not reach EarthRanger"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_auth_action_reports_er_failures_with_fixed_text(mocker, er_integration_v2_provider, exc, expected):
+    """str(ERClientException) carries ER's response body and httpx errors carry
+    the request; both used to be returned verbatim. The same fixed messages the
+    reference actions use keep the result actionable without echoing either."""
+    from app.actions.handlers import action_auth
+    from app.actions.configurations import AuthenticateConfig
+
+    _auth_client_raising(mocker, exc)
+    response = await action_auth(er_integration_v2_provider, AuthenticateConfig(token="abc123"))
+
+    assert response["valid_credentials"] is False
+    assert response["error"].startswith(expected)
+    assert "secret-body" not in response["error"] and "name resolution" not in response["error"]
 
 
 @pytest.mark.asyncio
