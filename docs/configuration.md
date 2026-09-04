@@ -52,11 +52,13 @@ The ER **base URL** comes from the integration record, not this config.
 
 See [State & scheduling](state-and-scheduling.md) for watermark, backfill, and scheduling semantics.
 
-## `ListEventTypesQuery` / `ListEventTypeFieldsQuery` / `ListEventFieldValuesQuery` — reference actions
+## `List*Query` models — reference actions
 
 | Model | Field | Type | Notes |
 |-------|-------|------|-------|
 | `ListEventTypesQuery` | — | — | No fields; lists every event type visible to this integration's credentials. |
+| `ListEventCategoriesQuery` | — | — | No fields; lists every event category visible to this integration's credentials. |
+| `ListSubjectTypesQuery` | — | — | No fields; lists the subject subtypes observed on the site, grouped by subject type. |
 | `ListEventTypeFieldsQuery` | `event_type` | string | ER event-type slug (e.g. `rhino_carcass`). Unknown slug → error. |
 | `ListEventFieldValuesQuery` | `event_type` | string | Same as above. |
 | `ListEventFieldValuesQuery` | `field_key` | string | Field key from that event type's schema. Unknown key → error. |
@@ -68,7 +70,7 @@ for what they return and how the portal uses them.
 
 ### Reference-action registration
 
-`list_event_types`, `list_event_type_fields`, `list_event_field_values`, and `list_subject_types` always
-register with `"type": "reference"` when this runner self-registers with Gundi. The former
+`list_event_types`, `list_event_categories`, `list_event_type_fields`, `list_event_field_values`, and
+`list_subject_types` always register with `"type": "reference"` when this runner self-registers with Gundi. The former
 `REGISTER_REFERENCE_ACTIONS` gate was removed once the Gundi API accepted that type
 ([PADAS/cdip#461](https://github.com/PADAS/cdip/pull/461)); setting the variable now has no effect.
