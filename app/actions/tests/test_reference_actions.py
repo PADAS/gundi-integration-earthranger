@@ -28,6 +28,13 @@ _FIXTURE_PATH = os.path.join(
 )
 
 
+def _er(class_name, status_code):
+    """Build an erclient exception the way the client does, response body included."""
+    from erclient import er_errors
+
+    return getattr(er_errors, class_name)("ER said no", status_code=status_code, response_body="secret-body")
+
+
 def _load_fixture():
     with open(_FIXTURE_PATH) as fh:
         return json.load(fh)
@@ -525,3 +532,57 @@ async def test_list_subject_types_propagates_upstream_errors(
         await action_list_subject_types(
             er_integration_v2_provider, ListSubjectTypesQuery()
         )
+
+
+# --- ER client errors on the reference path ------------------------------------
+
+
+@pytest.mark.parametrize(
+    "er_error,expected_type,expected_status",
+    [
+        (_er("ERClientBadCredentials", 401), "IntegrationAuthError", 401),
+        (_er("ERClientPermissionDenied", 403), "IntegrationAuthError", 403),
+        (_er("ERClientRateLimitExceeded", 429), "IntegrationRateLimitError", 429),
+        (_er("ERClientInternalError", 500), "IntegrationBadResponseError", 500),
+        (_er("ERClientNotFound", 404), "IntegrationBadResponseError", 404),
+        (_er("ERClientServiceUnreachable", None), "IntegrationConnectionError", None),
+    ],
+)
+@pytest.mark.asyncio
+async def test_reference_actions_translate_er_client_errors(
+        mock_er_client, er_integration_v2_provider, er_error, expected_type, expected_status,
+):
+    """erclient's exceptions are not IntegrationError subclasses and carry no
+    .response, so the runner cannot classify them: on the ephemeral path the
+    portal wizard got `500 {"error": "ERClientBadCredentials"}` and could not
+    tell bad credentials from a broken site. Translated, it gets the runner's
+    curated text and the source status (401/403/429/5xx)."""
+    from app.services import errors
+    from app.actions.handlers import action_list_event_categories
+    from app.actions.configurations import ListEventCategoriesQuery
+
+    mock_er_client.get_event_categories = AsyncMock(side_effect=er_error)
+    with pytest.raises(getattr(errors, expected_type)) as info:
+        await action_list_event_categories(er_integration_v2_provider, ListEventCategoriesQuery())
+
+    assert info.value.status_code == expected_status
+    assert info.value.__cause__ is er_error
+    # The ER response body rides on str(ERClientException); it must not
+    # reach the activity log or the portal through the translated message.
+    assert "response_body" not in str(info.value) and "secret-body" not in str(info.value)
+
+
+@pytest.mark.asyncio
+async def test_list_event_types_surfaces_bad_credentials_instead_of_an_empty_list(
+        mock_er_client, er_integration_v2_provider,
+):
+    """_fetch_event_type_maps is best-effort for pull_events (a 403 on one
+    endpoint must not break the others), but on the reference path swallowing
+    an auth failure returns 200 with no options: the wizard shows an empty
+    dropdown instead of "Authentication failed"."""
+    from app.services.errors import IntegrationAuthError
+
+    mock_er_client.get_event_types = AsyncMock(side_effect=_er("ERClientBadCredentials", 401))
+    with pytest.raises(IntegrationAuthError) as info:
+        await action_list_event_types(er_integration_v2_provider, ListEventTypesQuery())
+    assert info.value.status_code == 401

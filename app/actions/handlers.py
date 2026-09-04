@@ -3,6 +3,7 @@ import datetime
 import logging
 import time
 from collections import defaultdict
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from typing import Dict
 from urllib.parse import urlparse
@@ -11,7 +12,12 @@ import httpx
 import stamina
 from dateutil import parser as dateutil_parser
 from erclient import AsyncERClient, ERClientException, VERSION_1_0, VERSION_2_0
-from erclient.er_errors import ERClientBadCredentials
+from erclient.er_errors import (
+    ERClientBadCredentials,
+    ERClientPermissionDenied,
+    ERClientRateLimitExceeded,
+    ERClientServiceUnreachable,
+)
 from gundi_client_v2.client import GundiClient
 from gundi_core.events import LogLevel
 from gundi_core.schemas.v2 import Integration
@@ -25,6 +31,13 @@ from .configurations import AuthenticateConfig, EventFilterDateField, PullObserv
     ListEventFieldValuesQuery, ListEventCategoriesQuery, ListSubjectTypesQuery
 from .source_profiles import SourceProfileResolver
 from ..services.activity_logger import activity_logger, log_action_activity
+from ..services.errors import (
+    IntegrationAuthError,
+    IntegrationBadResponseError,
+    IntegrationConnectionError,
+    IntegrationError,
+    IntegrationRateLimitError,
+)
 from ..services.gundi import send_events_to_gundi, send_observations_to_gundi, update_event_in_gundi, send_event_attachments_to_gundi
 from ..services.action_scheduler import trigger_action
 
@@ -1164,7 +1177,12 @@ class EventTypeMaps:
     v2_slugs: set = field(default_factory=set)
 
 
-async def _fetch_event_type_maps(er_client) -> EventTypeMaps:
+# erclient failures that mean "these credentials don't work here", as opposed
+# to one endpoint being unavailable.
+_ER_AUTH_ERRORS = (ERClientBadCredentials, ERClientPermissionDenied)
+
+
+async def _fetch_event_type_maps(er_client, *, propagate_auth_errors: bool = False) -> EventTypeMaps:
     """Build slug→display, slug→type_id, and category_slug→category_id maps.
 
     ER's EventType has a ``version`` field — each type is exclusively v1 OR
@@ -1182,13 +1200,18 @@ async def _fetch_event_type_maps(er_client) -> EventTypeMaps:
 
     All three fetches are best-effort and logged independently — a 403 on
     one doesn't break the others. If everything fails, all maps are empty;
-    downstream callers treat that as the "skip the pull" signal.
+    downstream callers treat that as the "skip the pull" signal. The
+    reference path passes propagate_auth_errors=True: there, an empty result
+    on bad credentials would render as an empty dropdown rather than as
+    "Authentication failed", so auth failures escape instead.
     """
     maps = EventTypeMaps()
 
     try:
         v1_types = await er_client.get_event_types(version=VERSION_1_0)
     except Exception as e:
+        if propagate_auth_errors and isinstance(e, _ER_AUTH_ERRORS):
+            raise
         logger.warning(
             "Could not fetch ER v1 event types: %s: %s. "
             "Slug→UUID resolution will fall back to v2-only results.",
@@ -1202,6 +1225,8 @@ async def _fetch_event_type_maps(er_client) -> EventTypeMaps:
     try:
         v2_types = await er_client.get_event_types(version=VERSION_2_0)
     except Exception as e:
+        if propagate_auth_errors and isinstance(e, _ER_AUTH_ERRORS):
+            raise
         logger.warning(
             "Could not fetch ER v2 event types: %s: %s. "
             "Slug→UUID resolution will fall back to v1-only results.",
@@ -1220,6 +1245,8 @@ async def _fetch_event_type_maps(er_client) -> EventTypeMaps:
         try:
             categories = await er_client.get_event_categories()
         except Exception as e:
+            if propagate_auth_errors and isinstance(e, _ER_AUTH_ERRORS):
+                raise
             logger.warning(
                 "Could not fetch ER event categories: %s: %s. "
                 "event_category filter slugs will not resolve.",
@@ -1451,6 +1478,39 @@ def _build_er_client(integration: Integration) -> AsyncERClient:
     )
 
 
+def _as_integration_error(exc: ERClientException) -> IntegrationError:
+    """Translate an erclient failure into the runner's classified errors.
+
+    erclient's exceptions are not IntegrationError subclasses and carry no
+    `.response`, so the runner cannot classify them: on the ephemeral path
+    the portal wizard saw `500 {"error": "ERClientBadCredentials"}` and could
+    not tell bad credentials from a broken site. The message is fixed text on
+    purpose: str(exc) carries ER's response body, which must reach neither
+    the activity log nor the portal.
+    """
+    status = exc.status_code if isinstance(exc.status_code, int) else None
+    if isinstance(exc, ERClientBadCredentials):
+        return IntegrationAuthError("EarthRanger rejected the credentials", status_code=status or 401)
+    if isinstance(exc, ERClientPermissionDenied):
+        return IntegrationAuthError("EarthRanger denied access with these credentials", status_code=status or 403)
+    if isinstance(exc, ERClientRateLimitExceeded):
+        return IntegrationRateLimitError("EarthRanger rate-limited the request", status_code=status or 429)
+    if isinstance(exc, ERClientServiceUnreachable):
+        return IntegrationConnectionError("EarthRanger could not be reached", status_code=status)
+    return IntegrationBadResponseError("EarthRanger returned an unexpected response", status_code=status)
+
+
+@asynccontextmanager
+async def _reference_er_client(integration: Integration):
+    """`_build_er_client` for the reference actions: erclient failures raised
+    in the body come out as IntegrationError subclasses (_as_integration_error)."""
+    try:
+        async with _build_er_client(integration) as er_client:
+            yield er_client
+    except ERClientException as e:
+        raise _as_integration_error(e) from e
+
+
 async def _fetch_category_display_map(er_client) -> Dict[str, str]:
     """Best-effort category slug → display name, unconditionally fetched.
 
@@ -1489,8 +1549,8 @@ async def action_list_event_types(integration: Integration, action_config: ListE
     grouped by ER event category (falling back to no group when the
     category has no known display name), sorted by group then label.
     """
-    async with _build_er_client(integration) as earth_ranger:
-        maps = await _fetch_event_type_maps(earth_ranger)
+    async with _reference_er_client(integration) as earth_ranger:
+        maps = await _fetch_event_type_maps(earth_ranger, propagate_auth_errors=True)
         category_display = await _fetch_category_display_map(earth_ranger)
 
     # The unconditional fetch above is authoritative (covers every category,
@@ -1538,7 +1598,7 @@ async def action_list_event_categories(integration: Integration, action_config: 
     propagate so the portal shows its "couldn't load options" degrade
     instead of silently offering an empty list.
     """
-    async with _build_er_client(integration) as earth_ranger:
+    async with _reference_er_client(integration) as earth_ranger:
         categories = await earth_ranger.get_event_categories()
 
     options = [
@@ -1563,7 +1623,7 @@ async def action_list_subject_types(integration: Integration, action_config: Lis
     propagate so the portal shows its "couldn't load options" degrade
     instead of silently offering an empty list.
     """
-    async with _build_er_client(integration) as earth_ranger:
+    async with _reference_er_client(integration) as earth_ranger:
         groups = await earth_ranger.get_subjectgroups(include_inactive=True, flat=True)
 
     type_by_subtype: Dict[str, str] = {}
@@ -1602,7 +1662,7 @@ async def action_list_subject_types(integration: Integration, action_config: Lis
 
 async def action_list_event_type_fields(integration: Integration, action_config: ListEventTypeFieldsQuery):
     """Reference action: field keys defined on one ER event type's schema."""
-    async with _build_er_client(integration) as earth_ranger:
+    async with _reference_er_client(integration) as earth_ranger:
         fields = await _fetch_event_type_fields(
             earth_ranger, integration.base_url, action_config.event_type
         )
@@ -1624,7 +1684,7 @@ async def action_list_event_field_values(integration: Integration, action_config
     Non-enum fields legitimately return an empty options list — they are
     free-text in ER, so there is nothing to suggest.
     """
-    async with _build_er_client(integration) as earth_ranger:
+    async with _reference_er_client(integration) as earth_ranger:
         fields = await _fetch_event_type_fields(
             earth_ranger, integration.base_url, action_config.event_type
         )
