@@ -246,13 +246,18 @@ async def test_list_event_type_fields_unknown_event_type_raises(
         "Not Found", request=MagicMock(), response=MagicMock(status_code=404)
     )
 
-    with pytest.raises(
-        ValueError,
-        match="rhino_carcass.*has no v2 schema in EarthRanger.*classic v1 event types are not supported",
-    ):
+    # A connector guard the portal wizard must be able to act on: the runner
+    # forwards IntegrationConfigurationError on the ephemeral path (422),
+    # where every other connector message is redacted to the type name. By
+    # contract the message names the shape of the problem and never echoes
+    # the submitted value.
+    from app.services.errors import IntegrationConfigurationError
+
+    with pytest.raises(IntegrationConfigurationError, match="v1 event type") as info:
         await action_list_event_type_fields(
             er_integration_v2_provider, ListEventTypeFieldsQuery(event_type="rhino_carcass")
         )
+    assert "rhino_carcass" not in str(info.value)
 
 
 @pytest.mark.asyncio
@@ -315,11 +320,14 @@ async def test_list_event_field_values_unknown_field_raises(
 ):
     mock_fetch_schema.return_value = _load_fixture()
 
-    with pytest.raises(ValueError, match="no_such_field"):
+    from app.services.errors import IntegrationConfigurationError
+
+    with pytest.raises(IntegrationConfigurationError, match="Field not found") as info:
         await action_list_event_field_values(
             er_integration_v2_provider,
             ListEventFieldValuesQuery(event_type="rhino_carcass", field_key="no_such_field"),
         )
+    assert "no_such_field" not in str(info.value)
 
 
 @pytest.mark.asyncio
@@ -330,11 +338,14 @@ async def test_list_event_field_values_unknown_event_type_raises(
         "Not Found", request=MagicMock(), response=MagicMock(status_code=404)
     )
 
-    with pytest.raises(ValueError, match="has no v2 schema in EarthRanger"):
+    from app.services.errors import IntegrationConfigurationError
+
+    with pytest.raises(IntegrationConfigurationError, match="v1 event type") as info:
         await action_list_event_field_values(
             er_integration_v2_provider,
             ListEventFieldValuesQuery(event_type="no_such_type", field_key="animal_sex"),
         )
+    assert "no_such_type" not in str(info.value)
 
 
 # --- base_url validation in _build_er_client ----------------------------------
@@ -345,14 +356,36 @@ async def test_reference_action_with_schemeless_base_url_raises_clean_error(
     mocker, er_integration_v2_provider
 ):
     """A schemeless/empty integration.base_url must fail with the same clean
-    'Site URL is empty or invalid' message action_auth uses, not a confusing
-    downstream error against https://None/..."""
+    'Site URL is empty or invalid' wording action_auth uses, not a confusing
+    downstream error against https://None/... As a configuration error it
+    reaches the portal wizard on the ephemeral path; the draft URL itself is
+    a submitted value and stays out of the message."""
     from app.actions.handlers import action_list_event_types
     from app.actions.configurations import ListEventTypesQuery
+    from app.services.errors import IntegrationConfigurationError
 
     mocker.patch.object(er_integration_v2_provider, "base_url", "gundi-er.pamdas.org")
-    with pytest.raises(ValueError, match="Site URL is empty or invalid: 'gundi-er.pamdas.org'"):
+    with pytest.raises(IntegrationConfigurationError, match="Site URL is empty or invalid") as info:
         await action_list_event_types(er_integration_v2_provider, ListEventTypesQuery())
+    assert "gundi-er.pamdas.org" not in str(info.value)
+
+
+@pytest.mark.asyncio
+async def test_reference_action_without_auth_settings_raises_a_configuration_error(er_integration_v2_provider):
+    """The wizard can open a dropdown before the auth step is saved. Missing
+    auth settings are a configuration problem, not an EarthRanger verdict, and
+    the message must not carry the integration id (an identifier the draft
+    path synthesizes per run)."""
+    from app.actions.handlers import action_list_event_types
+    from app.actions.configurations import ListEventTypesQuery
+    from app.services.errors import IntegrationConfigurationError
+
+    integration = er_integration_v2_provider.copy(update={
+        "configurations": [c for c in er_integration_v2_provider.configurations if c.action.value != "auth"],
+    })
+    with pytest.raises(IntegrationConfigurationError, match="Authentication settings are missing") as info:
+        await action_list_event_types(integration, ListEventTypesQuery())
+    assert str(integration.id) not in str(info.value)
 
 
 # --- action_list_event_categories ---------------------------------------------

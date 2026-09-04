@@ -34,6 +34,7 @@ from ..services.activity_logger import activity_logger, log_action_activity
 from ..services.errors import (
     IntegrationAuthError,
     IntegrationBadResponseError,
+    IntegrationConfigurationError,
     IntegrationConnectionError,
     IntegrationError,
     IntegrationRateLimitError,
@@ -1139,8 +1140,11 @@ def get_authentication_config(integration):
         action_id='auth'
     )
     if not auth_action_config:
-        raise ValueError(
-            f"Authentication settings for integration {str(integration.id)} are missing. Please fix the integration setup in the portal."
+        # A configuration error, not an EarthRanger verdict: the runner forwards
+        # it on the ephemeral path (422) so the portal wizard can act on it.
+        # No integration id in the message; the runner logs that itself.
+        raise IntegrationConfigurationError(
+            "Authentication settings are missing. Please fix the integration setup in the portal."
         )
     return AuthenticateConfig.parse_obj(auth_action_config.data)
 
@@ -1464,9 +1468,10 @@ def _build_er_client(integration: Integration) -> AsyncERClient:
     url_parse = urlparse(integration.base_url)
     if not url_parse.hostname:
         # Schemeless/empty base_urls occur in Gundi; without this guard the
-        # client would be built against "https://None/...". Same message as
-        # action_auth's validation for consistency.
-        raise ValueError(f"Site URL is empty or invalid: '{integration.base_url}'")
+        # client would be built against "https://None/...". Same wording as
+        # action_auth's validation; the URL itself is a submitted value and
+        # stays out of the message (IntegrationConfigurationError contract).
+        raise IntegrationConfigurationError("Site URL is empty or invalid.")
     return AsyncERClient(
         service_root=f"{url_parse.scheme}://{url_parse.hostname}/api/v1.0",
         username=auth_config.username or None,
@@ -1574,17 +1579,19 @@ async def _fetch_event_type_fields(er_client, base_url: str, event_type: str):
     """Fetch + parse an ER event type's pre-rendered schema into ERFields.
 
     A 404 from ER (unknown event type, or a classic v1 event type — the v2
-    schema endpoint 404s for those too) is translated to a ValueError so it
-    reads naturally as a config-form error; any other upstream failure
-    (e.g. a 5xx) propagates unchanged.
+    schema endpoint 404s for those too) is translated to an
+    IntegrationConfigurationError so it reads as a config-form error and the
+    portal wizard sees it on the ephemeral path; any other upstream failure
+    (e.g. a 5xx) propagates unchanged and is classified by its status.
     """
     try:
         raw_schema = await fetch_prerendered_event_schema(er_client, base_url, event_type)
     except httpx.HTTPStatusError as e:
         if e.response.status_code == 404:
-            raise ValueError(
-                f"Event type '{event_type}' has no v2 schema in EarthRanger "
-                "(classic v1 event types are not supported by reference actions)."
+            logger.info(f"EarthRanger has no v2 schema for event type '{event_type}'.")
+            raise IntegrationConfigurationError(
+                "Event type not found in EarthRanger, or it is a classic v1 event type "
+                "(reference actions support v2 event types only)."
             ) from e
         raise
     return parse_er_event_schema(raw_schema)
@@ -1691,10 +1698,11 @@ async def action_list_event_field_values(integration: Integration, action_config
 
     field_match = next((f for f in fields if f.key == action_config.field_key), None)
     if field_match is None:
-        raise ValueError(
+        logger.info(
             f"Field '{action_config.field_key}' not found on event type "
             f"'{action_config.event_type}' in EarthRanger."
         )
+        raise IntegrationConfigurationError("Field not found on that event type in EarthRanger.")
     if not field_match.is_enum:
         return ReferenceDataResponse(options=[]).dict()
     options = [

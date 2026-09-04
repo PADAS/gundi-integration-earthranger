@@ -143,14 +143,19 @@ async def test_fetch_prerendered_event_schema_raises_on_404():
 async def test_fetch_prerendered_event_schema_rejects_schemeless_base_url():
     # Schemeless base_urls occur in Gundi; urlparse leaves hostname None for
     # them, which would otherwise build a "https://None/..." URL.
+    from app.services.errors import IntegrationConfigurationError
+
     er_client = AsyncMock()
-    with pytest.raises(ValueError, match="Site URL is empty or invalid: 'gundi-er.pamdas.org'"):
+    with pytest.raises(IntegrationConfigurationError, match="Site URL is empty or invalid") as info:
         await fetch_prerendered_event_schema(er_client, "gundi-er.pamdas.org", "rhino_carcass")
+    assert "gundi-er.pamdas.org" not in str(info.value)  # a submitted value stays out of the message
     er_client.auth_headers.assert_not_awaited()
 
 
 @pytest.mark.asyncio
 async def test_fetch_prerendered_event_schema_rejects_empty_base_url():
+    from app.services.errors import IntegrationConfigurationError
+
     er_client = AsyncMock()
-    with pytest.raises(ValueError, match="Site URL is empty or invalid"):
+    with pytest.raises(IntegrationConfigurationError, match="Site URL is empty or invalid"):
         await fetch_prerendered_event_schema(er_client, "", "rhino_carcass")

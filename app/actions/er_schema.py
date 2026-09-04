@@ -35,6 +35,8 @@ from urllib.parse import quote, urlparse
 
 import httpx
 
+from app.services.errors import IntegrationConfigurationError
+
 
 @dataclass
 class ERChoice:
@@ -158,8 +160,10 @@ async def fetch_prerendered_event_schema(er_client, base_url: str, event_type: s
     if not url_parse.hostname:
         # Schemeless base_urls do occur in Gundi (see the _ensure_scheme guard in
         # gundi-integration-cmore's CLI); urlparse leaves hostname None for them,
-        # which would otherwise build a "https://None/..." URL.
-        raise ValueError(f"Site URL is empty or invalid: '{base_url}'")
+        # which would otherwise build a "https://None/..." URL. A configuration
+        # error, worded like handlers._build_er_client's; the URL is a submitted
+        # value and stays out of the message.
+        raise IntegrationConfigurationError("Site URL is empty or invalid.")
     # scheme://hostname (dropping any port) is the deliberate convention — it
     # matches every AsyncERClient construction site in handlers.py.
     url = f"{url_parse.scheme}://{url_parse.hostname}/api/v2.0/activity/eventtypes/{quote(event_type, safe='')}/schema"
