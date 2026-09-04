@@ -134,6 +134,7 @@ async def update_event_in_gundi(gundi_object_id: str, changes: dict, **kwargs) -
     :param kwargs: integration_id: The UUID of the related integration.
     :return: The API response dict.
     """
+    _block_if_ephemeral("update_event_in_gundi")
     integration_id = kwargs.get("integration_id")
     assert integration_id, "integration_id is required"
     sensors_api_client = await _get_sensors_api_client(integration_id=str(integration_id))

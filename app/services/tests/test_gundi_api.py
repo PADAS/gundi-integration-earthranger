@@ -8,6 +8,7 @@ from app.services.gundi import (
     send_observations_to_gundi,
     send_event_attachments_to_gundi,
     send_messages_to_gundi,
+    update_event_in_gundi,
     _get_gundi_api_key,
     EphemeralWriteBlocked,
 )
@@ -140,6 +141,7 @@ async def test_send_observations_to_gundi(
     (send_observations_to_gundi, {"observations": [], "integration_id": "id"}),
     (send_event_attachments_to_gundi, {"event_id": "e", "attachments": [], "integration_id": "id"}),
     (send_messages_to_gundi, {"messages": [], "integration_id": "id"}),
+    (update_event_in_gundi, {"gundi_object_id": "g", "changes": {}, "integration_id": "id"}),
     (_get_gundi_api_key, {"integration_id": "id"}),
 ])
 @pytest.mark.asyncio
