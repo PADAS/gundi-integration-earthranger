@@ -66,14 +66,9 @@ for what they return and how the portal uses them.
 
 ## Environment variables
 
-### `REGISTER_REFERENCE_ACTIONS`
+### Reference-action registration
 
-Default: `False`.
-
-Gates whether `list_event_types`, `list_event_type_fields`, and `list_event_field_values` are included
-when this runner self-registers with Gundi. They would register with `"type": "reference"`, a type the
-Gundi API doesn't accept yet — flipping this on before the platform side
-([PADAS/cdip#461](https://github.com/PADAS/cdip/pull/461)) is merged **and** deployed would 400 the
-whole registration call, not just these three actions. Leave it off in every environment until that lands;
-flip it on afterward to expose the actions (mirrors CMORE's identically-named, identically-gated flag from
-its own Phase 0 reference-actions work).
+`list_event_types`, `list_event_type_fields`, `list_event_field_values`, and `list_subject_types` always
+register with `"type": "reference"` when this runner self-registers with Gundi. The former
+`REGISTER_REFERENCE_ACTIONS` gate was removed once the Gundi API accepted that type
+([PADAS/cdip#461](https://github.com/PADAS/cdip/pull/461)); setting the variable now has no effect.
