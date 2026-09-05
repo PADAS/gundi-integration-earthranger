@@ -595,7 +595,7 @@ async def test_list_subject_types_propagates_upstream_errors(
         # configuration problem, reported as such; forwarding the 404 would
         # collide with the runner's own 404 for "action or config not found".
         (_er("ERClientNotFound", 404), "IntegrationConfigurationError", None),
-        (_er("ERClientServiceUnreachable", None), "IntegrationConnectionError", None),
+        (_er("ERClientServiceUnreachable", 503), "IntegrationConnectionError", 503),
         # A wrong username/password never reaches ER's API: erclient's _call turns
         # the token endpoint's 400 invalid_grant into ERClientBadRequest naming
         # /oauth2/token. That is an auth failure, not a bad request.
@@ -891,3 +891,97 @@ async def test_a_stale_refresh_token_falls_back_to_a_fresh_login(er_integration_
 
     assert grants == ["refresh_token", "password"]
     assert headers["Authorization"] == "Bearer new"
+
+
+def test_a_403_from_the_token_endpoint_is_denied_access_on_both_paths():
+    """django-oauth-toolkit never answers 403 for a credential rejection (it
+    uses 400 invalid_grant / 401 invalid_client); a 403 on /oauth2/token is a
+    proxy or WAF verdict. Through erclient it already read as "denied access";
+    the raw-httpx branch called it a rejected login."""
+    from app.actions.handlers import _as_integration_error
+
+    raw = httpx.HTTPStatusError(
+        "Forbidden", request=httpx.Request("POST", "https://gundi-er.pamdas.org/oauth2/token"),
+        response=httpx.Response(403, text=""),
+    )
+    via_call = ERClientPermissionDenied("ER Forbidden ON GET https://gundi-er.pamdas.org/oauth2/token.", status_code=403, response_body="")
+
+    assert str(_as_integration_error(raw)) == str(_as_integration_error(via_call)) == "EarthRanger denied access with these credentials"
+    assert _as_integration_error(raw).status_code == 403
+
+
+def test_a_404_is_a_not_found_verdict_on_the_pull_path_and_a_configuration_error_on_the_reference_path():
+    """On the reference path a 404 means the site lacks the API (no v2
+    event-type API); on the pull path it means a stale resource, e.g. a
+    deleted subject group, and the operator needs the status and not a hint
+    about the site URL."""
+    from erclient.er_errors import ERClientNotFound
+    from app.actions.handlers import _as_integration_error
+    from app.services.errors import IntegrationBadResponseError, IntegrationConfigurationError
+
+    not_found = ERClientNotFound("ER Not Found ON GET https://gundi-er.pamdas.org/api/v1.0/subjectgroups/x.", status_code=404, response_body="")
+    assert isinstance(_as_integration_error(not_found), IntegrationConfigurationError)
+    pull = _as_integration_error(not_found, not_found_is_configuration=False)
+    assert isinstance(pull, IntegrationBadResponseError) and pull.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_pull_path_translation_recognises_erclient_by_host_not_by_string_prefix(mocker, er_integration_v2_provider):
+    """`startswith(site_root)` matched any host that merely begins with the ER
+    hostname, and an IDN site URL never matched its punycode request URL, so a
+    token-POST transport error there would have escaped untranslated with the
+    login body attached. Compare origins."""
+    from unittest.mock import AsyncMock, MagicMock
+    from app.actions import handlers as handlers_module
+    from app.actions.handlers import _translating_er_client
+    from app.services.errors import IntegrationConnectionError
+
+    instance = MagicMock()
+    client_cls = MagicMock()
+    client_cls.return_value.__aenter__ = AsyncMock(return_value=instance)
+    client_cls.return_value.__aexit__ = AsyncMock(return_value=False)
+    mocker.patch.object(handlers_module, "AsyncERClient", client_cls)
+
+    idn = er_integration_v2_provider.copy(update={"base_url": "https://ér-site.example"})
+    token_post = httpx.Request("POST", "https://ér-site.example/oauth2/token", content=b"password=SECRET")  # punycode, as httpx sends it
+    with pytest.raises(IntegrationConnectionError):
+        async with _translating_er_client(idn, only_er_requests=True):
+            raise httpx.ConnectError("boom", request=token_post)
+
+    lookalike = httpx.Request("POST", "https://gundi-er.pamdas.org.evil.example/v2/events/")
+    with pytest.raises(httpx.HTTPStatusError):  # not ours: untouched
+        async with _translating_er_client(er_integration_v2_provider, only_er_requests=True):
+            raise httpx.HTTPStatusError("401", request=lookalike, response=httpx.Response(401, text=""))
+
+
+@pytest.mark.asyncio
+async def test_pull_path_translation_covers_erclient_raised_value_errors_but_not_connector_ones(mocker, er_integration_v2_provider):
+    """erclient raises ValueError/KeyError itself on realistic failures (a
+    CDN's 520 through HTTPStatus(...).phrase, a 200 HTML body through
+    response.json()); those are EarthRanger failures and classify like on the
+    reference path. A ValueError from connector code is a bug and must keep
+    its traceback."""
+    from unittest.mock import AsyncMock, MagicMock
+    from app.actions import handlers as handlers_module
+    from app.actions.handlers import _translating_er_client
+    from app.services.errors import IntegrationBadResponseError
+    from erclient import client as erclient_module
+
+    instance = MagicMock()
+    client_cls = MagicMock()
+    client_cls.return_value.__aenter__ = AsyncMock(return_value=instance)
+    client_cls.return_value.__aexit__ = AsyncMock(return_value=False)
+    mocker.patch.object(handlers_module, "AsyncERClient", client_cls)
+
+    def raised_inside_erclient():
+        # Execute a raise from a code object whose filename is erclient's.
+        code = compile("raise ValueError('520 is not a valid HTTPStatus')", erclient_module.__file__, "exec")
+        exec(code, {})
+
+    with pytest.raises(IntegrationBadResponseError):
+        async with _translating_er_client(er_integration_v2_provider, only_er_requests=True):
+            raised_inside_erclient()
+
+    with pytest.raises(ValueError):  # a connector bug: untouched
+        async with _translating_er_client(er_integration_v2_provider, only_er_requests=True):
+            raise ValueError("connector bug")

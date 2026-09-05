@@ -12,7 +12,7 @@ import httpx
 import stamina
 from dateutil import parser as dateutil_parser
 from erclient import AsyncERClient, ERClientException, VERSION_1_0, VERSION_2_0
-from erclient.er_errors import ERClientBadRequest, ERClientServiceUnreachable
+from erclient.er_errors import ERClientBadRequest
 from gundi_client_v2.client import GundiClient
 from gundi_core.events import LogLevel
 from gundi_core.schemas.v2 import Integration
@@ -1479,7 +1479,9 @@ def _is_rejected_login(exc) -> bool:
     token URL; from a bare login()/auth_headers() it is the raw httpx error for
     that URL. A 5xx or 429 from the token endpoint is not a rejection."""
     if isinstance(exc, httpx.HTTPStatusError):
-        return _is_token_endpoint_url(exc.request.url) and exc.response.status_code in (400, 401, 403)
+        # Not 403: the token endpoint never answers 403 for a credential
+        # rejection, so a 403 there is a proxy or WAF verdict ("denied access").
+        return _is_token_endpoint_url(exc.request.url) and exc.response.status_code in (400, 401)
     return (
         isinstance(exc, ERClientBadRequest)
         and bool(exc.args) and _is_token_endpoint_url(exc.args[0])
@@ -1494,7 +1496,7 @@ def _is_rejected_login(exc) -> bool:
 _ER_CALL_FAILURES = (ERClientException, httpx.HTTPError, ValueError, KeyError)
 
 
-def _as_integration_error(exc: Exception) -> IntegrationError:
+def _as_integration_error(exc: Exception, *, not_found_is_configuration: bool = True) -> IntegrationError:
     """Translate an EarthRanger call failure into the runner's classified errors.
 
     erclient's exceptions are not IntegrationError subclasses and carry no
@@ -1506,6 +1508,11 @@ def _as_integration_error(exc: Exception) -> IntegrationError:
     path it took. The messages are fixed text on purpose: str(exc) carries
     ER's response body, or our request (for the login, the password), which
     must reach neither the activity log nor the portal.
+
+    A 404 reads as a configuration error by default (the reference actions'
+    case: a site without the v2 event-type API); the pull actions pass
+    not_found_is_configuration=False, where a 404 means a stale resource such
+    as a deleted subject group and the operator needs the status.
     """
     # A rejected login is reported as 401 whatever the token endpoint said (it
     # says 400 invalid_grant): the portal treats 401/403 as a credential
@@ -1513,8 +1520,6 @@ def _as_integration_error(exc: Exception) -> IntegrationError:
     if _is_rejected_login(exc):
         return IntegrationAuthError("EarthRanger rejected the credentials", status_code=401)
     status = _status_of(exc)
-    if isinstance(exc, ERClientServiceUnreachable):
-        return IntegrationConnectionError("EarthRanger could not be reached", status_code=status)
     if isinstance(exc, httpx.TransportError) or (type(exc) is ERClientException and status is None):
         # httpx never escapes _call, so post-login network failures arrive as
         # erclient's status-less plain ERClientException (its network branch is
@@ -1526,7 +1531,7 @@ def _as_integration_error(exc: Exception) -> IntegrationError:
         return IntegrationAuthError("EarthRanger rejected the credentials", status_code=status)
     if status == 403:
         return IntegrationAuthError("EarthRanger denied access with these credentials", status_code=status)
-    if status == 404:
+    if status == 404 and not_found_is_configuration:
         # An ER without the API this action needs (no v2 event-type API, or a
         # proxy routing only v1). A configuration problem, reported as such:
         # forwarding the 404 would collide with the runner's own 404 for
@@ -1569,25 +1574,48 @@ async def _translating_er_client(
     intact, and the runner publishes `request.content`, which is the
     form-encoded username and password."""
     client = _build_er_client(integration, auth_config=auth_config)
-    site_root = er_site_root(integration.base_url)
+    site = httpx.URL(er_site_root(integration.base_url))  # normalises the host the way request URLs are
     try:
         async with client as er_client:
             yield er_client
-    except (ERClientException, httpx.HTTPError) if only_er_requests else _ER_CALL_FAILURES as e:
-        if only_er_requests and isinstance(e, httpx.HTTPError):
-            try:
-                request_url = str(e.request.url)
-            except RuntimeError:  # httpx: no request attached
-                request_url = ""
-            if not request_url.startswith(site_root):
-                raise  # Gundi (or anything else): not ours to relabel
-        translated = _as_integration_error(e)
-        # Local log only, and by type and status: str(e) carries ER's response
-        # body or our request. No chained cause either: on a saved integration
-        # the runner publishes the formatted traceback, whose chained-cause
-        # section would render str(e) into the activity feed.
-        logger.info(f"EarthRanger call failed: {_failure_summary(e)} -> {type(translated).__name__}")
+    except _ER_CALL_FAILURES as e:
+        if only_er_requests and not _is_earthranger_failure(e, site):
+            raise  # Gundi, or a connector bug: not ours to relabel, and it keeps its traceback
+        translated = _as_integration_error(e, not_found_is_configuration=not only_er_requests)
+        # No chained cause: on a saved integration the runner publishes the
+        # formatted traceback, whose chained-cause section would render str(e)
+        # (ER's response body, or our login request) into the activity feed.
+        # The local log keeps the full original instead, since for a
+        # status-less failure nothing else records which call failed or why.
+        logger.warning(
+            f"EarthRanger call failed: {_failure_summary(e)} -> {type(translated).__name__}", exc_info=e,
+        )
         raise translated from None
+
+
+def _is_earthranger_failure(exc: Exception, site: httpx.URL) -> bool:
+    """Whether an exception raised inside a pull action's body came from the
+    EarthRanger call rather than from Gundi or from connector code: erclient's
+    own exceptions always did; an httpx error did if its request went to the
+    ER site (compared by origin, host normalised as httpx does, so an IDN site
+    URL matches its punycode request URL and a look-alike host does not); a
+    ValueError/KeyError did if erclient raised it (HTTPStatus(...).phrase on a
+    CDN's 520, response.json() on an HTML page, a token body without
+    expires_in)."""
+    if isinstance(exc, ERClientException):
+        return True
+    if isinstance(exc, httpx.HTTPError):
+        try:
+            url = exc.request.url
+        except RuntimeError:  # httpx: no request attached
+            return False
+        return (url.scheme, url.host) == (site.scheme, site.host)
+    tb = exc.__traceback__
+    while tb is not None:
+        if "/erclient/" in tb.tb_frame.f_code.co_filename.replace("\\", "/"):
+            return True
+        tb = tb.tb_next
+    return False
 
 
 async def _fetch_category_display_map(er_client) -> Dict[str, str]:

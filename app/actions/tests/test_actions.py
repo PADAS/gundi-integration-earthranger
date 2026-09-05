@@ -2878,3 +2878,29 @@ async def test_show_permissions_still_returns_the_card_on_an_unexpected_client_e
     response = await action_show_permissions(er_integration_v2_provider, ShowPermissionsConfig())
 
     assert response["data"]["User Details"]["error"] == "EarthRanger returned an unexpected response"
+
+
+@pytest.mark.asyncio
+async def test_translated_er_failures_keep_their_traceback_in_the_local_log(mocker, er_integration_v2_provider, caplog):
+    """The published traceback drops the cause on purpose, so the local log
+    must hold it, or a status-less failure (a CDN 520 read as ValueError, a
+    JSONDecodeError on a maintenance page) leaves nothing to diagnose."""
+    import logging
+    from unittest.mock import AsyncMock, MagicMock
+    from app.actions import handlers as handlers_module
+    from app.actions.handlers import _translating_er_client
+    from app.services.errors import IntegrationBadResponseError
+
+    instance = MagicMock()
+    client_cls = MagicMock()
+    client_cls.return_value.__aenter__ = AsyncMock(return_value=instance)
+    client_cls.return_value.__aexit__ = AsyncMock(return_value=False)
+    mocker.patch.object(handlers_module, "AsyncERClient", client_cls)
+
+    with caplog.at_level(logging.WARNING, logger="app.actions.handlers"):
+        with pytest.raises(IntegrationBadResponseError):
+            async with _translating_er_client(er_integration_v2_provider):
+                raise ValueError("520 is not a valid HTTPStatus")
+
+    records = [r for r in caplog.records if r.name == "app.actions.handlers" and "EarthRanger call failed" in r.getMessage()]
+    assert records and records[-1].exc_info and records[-1].exc_info[0] is ValueError
