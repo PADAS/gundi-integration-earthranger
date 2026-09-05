@@ -1,7 +1,9 @@
 import json
 
 import pytest
-from erclient import ERClientPermissionDenied
+import httpx
+from erclient import ERClientException, ERClientPermissionDenied
+from erclient.er_errors import ERClientBadCredentials
 from gundi_core.events import LogLevel
 
 from app.conftest import async_return
@@ -91,6 +93,63 @@ async def test_execute_auth_action_with_invalid_credentials(
     assert mock_erclient_class_with_error.return_value.get_me.called
     assert response.get("valid_credentials") == False
     assert "error" in response
+
+
+def _auth_client_raising(mocker, exc):
+    """Patch AsyncERClient in handlers with a client whose get_me raises exc."""
+    from unittest.mock import AsyncMock, MagicMock
+    from app.actions import handlers as handlers_module
+
+    instance = MagicMock()
+    instance.get_me = AsyncMock(side_effect=exc)
+    client_cls = MagicMock()
+    client_cls.return_value.__aenter__ = AsyncMock(return_value=instance)
+    client_cls.return_value.__aexit__ = AsyncMock(return_value=False)
+    mocker.patch.object(handlers_module, "AsyncERClient", client_cls)
+
+
+@pytest.mark.asyncio
+async def test_auth_action_error_text_does_not_echo_the_site_url(er_integration_v2_provider):
+    """action_auth reports failures inside a normal result, so nothing in the
+    runner redacts them; on the ephemeral path the draft URL (which may carry
+    a token in its path or query) came straight back to the caller."""
+    from app.actions.handlers import action_auth
+    from app.actions.configurations import AuthenticateConfig
+
+    integration = er_integration_v2_provider.copy(update={"base_url": "gundi-er.pamdas.org/?token=SECRET"})
+    response = await action_auth(integration, AuthenticateConfig(token="abc123"))
+
+    assert response["valid_credentials"] is False
+    assert response["error"] == "Site URL is empty or invalid."
+    assert "SECRET" not in response["error"]
+
+
+@pytest.mark.parametrize(
+    "exc,expected",
+    [
+        (ERClientBadCredentials("nope", status_code=401, response_body="secret-body"), "EarthRanger rejected the credentials"),
+        # A status-less plain ERClientException is erclient's network branch
+        # (the only status-less raise a handler can reach), whatever the text.
+        (ERClientException("Failed to GET ... 500 from ER. Message: secret-body"), "EarthRanger could not be reached"),
+        (httpx.ConnectError("[Errno -3] Temporary failure in name resolution"), "EarthRanger could not be reached"),
+        # erclient raises plain ERClientException for network failures inside _call.
+        (ERClientException("Request to ER failed: [Errno 61] Connection refused"), "EarthRanger could not be reached"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_auth_action_reports_er_failures_with_fixed_text(mocker, er_integration_v2_provider, exc, expected):
+    """str(ERClientException) carries ER's response body and httpx errors carry
+    the request; both used to be returned verbatim. The same fixed messages the
+    reference actions use keep the result actionable without echoing either."""
+    from app.actions.handlers import action_auth
+    from app.actions.configurations import AuthenticateConfig
+
+    _auth_client_raising(mocker, exc)
+    response = await action_auth(er_integration_v2_provider, AuthenticateConfig(token="abc123"))
+
+    assert response["valid_credentials"] is False
+    assert response["error"].startswith(expected)
+    assert "secret-body" not in response["error"] and "name resolution" not in response["error"]
 
 
 @pytest.mark.asyncio
@@ -371,7 +430,7 @@ async def test_execute_show_permissions_action_with_bad_token(
     assert mock_erclient.get_me.called
     response_data = response.get("data")
     user_details = response_data.get("User Details", {})
-    assert user_details.get("error") == "Invalid credentials. Please provide a valid credentials in the authentication config."
+    assert user_details.get("error") == "EarthRanger rejected the credentials"
 
 
 @pytest.mark.asyncio
@@ -396,7 +455,9 @@ async def test_execute_show_permissions_action_with_bad_password(
     assert mock_erclient.get_me.called
     response_data = response.get("data")
     user_details = response_data.get("User Details", {})
-    assert user_details.get("error") == "ER status 400: Invalid credentials given."
+    # The token endpoint's 400 invalid_grant is a rejected login; the raw
+    # error_description no longer reaches the card.
+    assert user_details.get("error") == "EarthRanger rejected the credentials"
 
 
 @pytest.mark.asyncio
@@ -422,7 +483,7 @@ async def test_execute_show_permissions_action_with_403_on_subjectgroups(
     response_data = response.get("data")
     user_details = response_data.get("Subject Groups", {})
     exc = mock_er_403_on_subjectgroups_exception
-    assert user_details.get("error") == f"Error retrieving subject groups: {type(exc).__name__}:{exc}"
+    assert user_details.get("error") == "EarthRanger denied access with these credentials"
 
 
 # ---------------------------------------------------------------------------
@@ -2568,3 +2629,278 @@ def test_authenticate_config_schema_has_auth_type_display_labels():
     assert set(options) == {member.value for member in ERAuthenticationType}
     assert options["token"] == "Token"
     assert options["username_password"] == "Username & Password"
+
+
+@pytest.mark.asyncio
+async def test_auth_action_with_username_password_reports_a_rejected_password_as_rejected_credentials(
+        mocker, er_integration_v2_provider, er_400_invalid_credentials_exception,
+):
+    """AsyncERClient.login() does not go through _call: a wrong password surfaces
+    as a raw httpx.HTTPStatusError (400 invalid_grant from /oauth2/token), not
+    as ERClientBadCredentials. Catching it as a generic HTTP error made the
+    result say EarthRanger could not be reached, while the token method said
+    the credentials were rejected for the same mistake."""
+    from unittest.mock import AsyncMock, MagicMock
+    from app.actions import handlers as handlers_module
+    from app.actions.handlers import action_auth
+    from app.actions.configurations import AuthenticateConfig, ERAuthenticationType
+
+    instance = MagicMock()
+    instance.login = AsyncMock(side_effect=er_400_invalid_credentials_exception)
+    client_cls = MagicMock()
+    client_cls.return_value.__aenter__ = AsyncMock(return_value=instance)
+    client_cls.return_value.__aexit__ = AsyncMock(return_value=False)
+    mocker.patch.object(handlers_module, "AsyncERClient", client_cls)
+
+    response = await action_auth(
+        er_integration_v2_provider,
+        AuthenticateConfig(authentication_type=ERAuthenticationType.USERNAME_PASSWORD, username="u", password="wrong"),
+    )
+
+    assert response["valid_credentials"] is False
+    assert response["error"] == "EarthRanger rejected the credentials"
+
+
+@pytest.mark.asyncio
+async def test_show_permissions_error_text_does_not_echo_the_site_url(er_integration_v2_provider):
+    """The same guard as action_auth and _build_er_client, from one helper:
+    a submitted URL may carry a token in its path or query and must not come
+    back in the result or the activity log."""
+    from app.actions.handlers import action_show_permissions
+    from app.actions.configurations import ShowPermissionsConfig
+
+    integration = er_integration_v2_provider.copy(update={"base_url": "gundi-er.pamdas.org/?token=SECRET"})
+    response = await action_show_permissions(integration, ShowPermissionsConfig())
+
+    assert response["data"]["User Details"]["error"] == "Site URL is empty or invalid."
+    assert "SECRET" not in str(response)
+
+
+@pytest.mark.asyncio
+async def test_auth_action_reports_a_token_endpoint_outage_as_unreachable(mocker, er_integration_v2_provider):
+    """A 503 from /oauth2/token during an outage is not a credential problem."""
+    from unittest.mock import AsyncMock, MagicMock
+    from app.actions import handlers as handlers_module
+    from app.actions.handlers import action_auth
+    from app.actions.configurations import AuthenticateConfig, ERAuthenticationType
+
+    outage = httpx.HTTPStatusError(
+        "Server error '503'", request=httpx.Request("POST", "https://gundi-er.pamdas.org/oauth2/token"),
+        response=httpx.Response(503, text="upstream unavailable"),
+    )
+    instance = MagicMock()
+    instance.login = AsyncMock(side_effect=outage)
+    client_cls = MagicMock()
+    client_cls.return_value.__aenter__ = AsyncMock(return_value=instance)
+    client_cls.return_value.__aexit__ = AsyncMock(return_value=False)
+    mocker.patch.object(handlers_module, "AsyncERClient", client_cls)
+
+    response = await action_auth(
+        er_integration_v2_provider,
+        AuthenticateConfig(authentication_type=ERAuthenticationType.USERNAME_PASSWORD, username="u", password="p"),
+    )
+
+    assert response["error"] == "EarthRanger could not be reached"
+
+
+@pytest.mark.parametrize(
+    "auth_type,method,exc,expected",
+    [
+        ("USERNAME_PASSWORD", "login", "token-400", "EarthRanger rejected the credentials"),
+        ("USERNAME_PASSWORD", "login", "token-503-html", "EarthRanger could not be reached"),
+        ("TOKEN", "get_me", "internal-500", "EarthRanger returned an unexpected response"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_show_permissions_reports_er_failures_with_the_same_fixed_text(
+        mocker, er_integration_v2_provider, er_400_invalid_credentials_exception, auth_type, method, exc, expected,
+):
+    """show_permissions had its own error handling: a token-endpoint error
+    without error_description evaluated `response.text` on the result dict
+    (AttributeError, so the action 500ed), and the catch-all wrote str(e),
+    with ER's response body, into the card. Same translation as action_auth."""
+    from unittest.mock import AsyncMock, MagicMock
+    from erclient.er_errors import ERClientInternalError
+    from app.actions import handlers as handlers_module
+    from app.actions.handlers import action_show_permissions
+    from app.actions.configurations import ShowPermissionsConfig, ERAuthenticationType
+
+    errors = {
+        "token-400": er_400_invalid_credentials_exception,
+        "token-503-html": httpx.HTTPStatusError(
+            "Server error '503'", request=httpx.Request("POST", "https://gundi-er.pamdas.org/oauth2/token"),
+            response=httpx.Response(503, text="<html>bad gateway</html>"),
+        ),
+        "internal-500": ERClientInternalError("ER Internal Server Error ON GET .../user/me.", status_code=500, response_body="secret-body"),
+    }
+    instance = MagicMock()
+    setattr(instance, method, AsyncMock(side_effect=errors[exc]))
+    client_cls = MagicMock()
+    client_cls.return_value.__aenter__ = AsyncMock(return_value=instance)
+    client_cls.return_value.__aexit__ = AsyncMock(return_value=False)
+    mocker.patch.object(handlers_module, "AsyncERClient", client_cls)
+    auth_cfg = next(c for c in er_integration_v2_provider.configurations if c.action.value == "auth")
+    data = {**auth_cfg.data, "authentication_type": getattr(ERAuthenticationType, auth_type).value}
+    if auth_type == "USERNAME_PASSWORD":
+        data.update(username="u", password="p")
+    integration = er_integration_v2_provider.copy(update={
+        "configurations": [c.copy(update={"data": data}) if c.action.value == "auth" else c for c in er_integration_v2_provider.configurations],
+    })
+
+    response = await action_show_permissions(integration, ShowPermissionsConfig())
+
+    assert response["data"]["User Details"]["error"] == expected
+    assert "secret-body" not in str(response) and "bad gateway" not in str(response)
+
+
+@pytest.mark.asyncio
+async def test_pull_events_never_publishes_the_login_request_when_the_token_call_fails(
+        mocker, mock_gundi_client_v2, mock_state_manager, mock_erclient_class, mock_get_gundi_api_key,
+        mock_gundi_sensors_client_class, er_integration_v2_provider, mock_publish_event,
+        mock_gundi_client_v2_class, mock_config_manager_er_provider,
+):
+    """erclient's _call only maps HTTP status errors around auth_headers(); a
+    transport failure on the token POST (host unreachable, TCP timeout) escapes
+    raw with .request intact, and on a saved integration the runner publishes
+    request.content, which is the form-encoded username and password. The
+    pull actions now run inside the same translating client as the reference
+    actions, so what reaches the runner is a classified error with no request."""
+    import json
+    from gundi_core.events import IntegrationActionFailed
+
+    token_post = httpx.Request(
+        "POST", "https://gundi-er.pamdas.org/oauth2/token",
+        content=b"grant_type=password&username=u&password=SECRETPASS&client_id=das_web_client",
+    )
+    mock_erclient_class.return_value.get_events.side_effect = httpx.ConnectError("boom", request=token_post)
+    mocker.patch("app.services.activity_logger.publish_event", mock_publish_event)
+    mocker.patch("app.services.action_runner.publish_event", mock_publish_event)
+    mocker.patch("app.services.action_runner.config_manager", mock_config_manager_er_provider)
+    mocker.patch("app.services.action_runner._portal", mock_gundi_client_v2)
+    mocker.patch("app.actions.handlers.state_manager", mock_state_manager)
+    mocker.patch("app.actions.handlers.AsyncERClient", mock_erclient_class)
+    mocker.patch("app.services.gundi.GundiClient", mock_gundi_client_v2_class)
+    mocker.patch("app.services.gundi.GundiDataSenderClient", mock_gundi_sensors_client_class)
+    mocker.patch("app.services.gundi._get_gundi_api_key", mock_get_gundi_api_key)
+
+    response = await execute_action(integration_id=str(er_integration_v2_provider.id), action_id="pull_events")
+
+    body = response.body.decode()
+    assert "SECRETPASS" not in body
+    assert json.loads(body)["detail"]["error_type"] == "connectivity"
+    published = [c.kwargs.get("event") or c.args[0] for c in mock_publish_event.call_args_list]
+    failed = [e for e in published if isinstance(e, IntegrationActionFailed)]
+    assert failed and all("SECRETPASS" not in e.json() for e in failed)
+
+
+@pytest.mark.parametrize("method,card", [("get_event_types", "Event Categories"), ("get_subjectgroups", "Subject Groups")])
+@pytest.mark.asyncio
+async def test_show_permissions_secondary_fetch_errors_do_not_carry_the_er_response_body(
+        mocker, er_integration_v2_provider, get_me_response, method, card,
+):
+    from unittest.mock import AsyncMock, MagicMock
+    from erclient.er_errors import ERClientPermissionDenied
+    from app.actions import handlers as handlers_module
+    from app.actions.handlers import action_show_permissions
+    from app.actions.configurations import ShowPermissionsConfig
+
+    instance = MagicMock()
+    instance.get_me = AsyncMock(return_value=get_me_response)
+    instance.get_event_types = AsyncMock(return_value=[])
+    instance.get_subjectgroups = AsyncMock(return_value=[])
+    setattr(instance, method, AsyncMock(side_effect=ERClientPermissionDenied(
+        "ER Forbidden ON GET https://gundi-er.pamdas.org/api/v1.0/x.", status_code=403, response_body="secret-body",
+    )))
+    client_cls = MagicMock()
+    client_cls.return_value.__aenter__ = AsyncMock(return_value=instance)
+    client_cls.return_value.__aexit__ = AsyncMock(return_value=False)
+    mocker.patch.object(handlers_module, "AsyncERClient", client_cls)
+
+    response = await action_show_permissions(er_integration_v2_provider, ShowPermissionsConfig())
+
+    assert response["data"][card]["error"].startswith("EarthRanger denied access")
+    assert "secret-body" not in str(response)
+
+
+@pytest.mark.asyncio
+async def test_pull_events_does_not_relabel_a_gundi_failure_as_an_earthranger_verdict(
+        mocker, mock_gundi_client_v2, mock_state_manager, mock_erclient_class, mock_get_gundi_api_key,
+        mock_gundi_sensors_client_class, er_integration_v2_provider, mock_publish_event,
+        mock_gundi_client_v2_class, mock_config_manager_er_provider,
+):
+    """The pull body also talks to Gundi's Sensors API and runs connector code.
+    Translating everything raised inside it turned a revoked Gundi API key
+    into "EarthRanger rejected the credentials" and dropped the request URL
+    that showed which side failed. Only EarthRanger's own failures are
+    translated; everything else reaches the runner untouched."""
+    import json
+
+    gundi_401 = httpx.HTTPStatusError(
+        "Unauthorized", request=httpx.Request("POST", "https://sensors.api.gundiservice.org/v2/events/"),
+        response=httpx.Response(401, text='{"detail": "Invalid API key"}'),
+    )
+    mocker.patch("app.services.gundi.send_events_to_gundi", side_effect=gundi_401)
+    mocker.patch("app.actions.handlers.send_events_to_gundi", side_effect=gundi_401)
+    mocker.patch("app.services.activity_logger.publish_event", mock_publish_event)
+    mocker.patch("app.services.action_runner.publish_event", mock_publish_event)
+    mocker.patch("app.services.action_runner.config_manager", mock_config_manager_er_provider)
+    mocker.patch("app.services.action_runner._portal", mock_gundi_client_v2)
+    mocker.patch("app.actions.handlers.state_manager", mock_state_manager)
+    mocker.patch("app.actions.handlers.AsyncERClient", mock_erclient_class)
+    mocker.patch("app.services.gundi.GundiClient", mock_gundi_client_v2_class)
+    mocker.patch("app.services.gundi.GundiDataSenderClient", mock_gundi_sensors_client_class)
+    mocker.patch("app.services.gundi._get_gundi_api_key", mock_get_gundi_api_key)
+
+    response = await execute_action(integration_id=str(er_integration_v2_provider.id), action_id="pull_events")
+
+    detail = json.loads(response.body.decode())["detail"]
+    assert "EarthRanger" not in detail["error"]
+    assert "sensors.api.gundiservice.org" in detail.get("request_url", ""), "the runner keeps saying which side failed"
+
+
+@pytest.mark.asyncio
+async def test_show_permissions_still_returns_the_card_on_an_unexpected_client_error(mocker, er_integration_v2_provider):
+    """A proxy answering the token endpoint with 200 and a bogus body makes
+    erclient raise TypeError from int(auth['expires_in']); the card must still
+    come back with a fixed text rather than the action failing with a 500."""
+    from unittest.mock import AsyncMock, MagicMock
+    from app.actions import handlers as handlers_module
+    from app.actions.handlers import action_show_permissions
+    from app.actions.configurations import ShowPermissionsConfig
+
+    instance = MagicMock()
+    instance.get_me = AsyncMock(side_effect=TypeError("int() argument must be a string, ... not 'NoneType'"))
+    client_cls = MagicMock()
+    client_cls.return_value.__aenter__ = AsyncMock(return_value=instance)
+    client_cls.return_value.__aexit__ = AsyncMock(return_value=False)
+    mocker.patch.object(handlers_module, "AsyncERClient", client_cls)
+
+    response = await action_show_permissions(er_integration_v2_provider, ShowPermissionsConfig())
+
+    assert response["data"]["User Details"]["error"] == "EarthRanger returned an unexpected response"
+
+
+@pytest.mark.asyncio
+async def test_translated_er_failures_keep_their_traceback_in_the_local_log(mocker, er_integration_v2_provider, caplog):
+    """The published traceback drops the cause on purpose, so the local log
+    must hold it, or a status-less failure (a CDN 520 read as ValueError, a
+    JSONDecodeError on a maintenance page) leaves nothing to diagnose."""
+    import logging
+    from unittest.mock import AsyncMock, MagicMock
+    from app.actions import handlers as handlers_module
+    from app.actions.handlers import _translating_er_client
+    from app.services.errors import IntegrationBadResponseError
+
+    instance = MagicMock()
+    client_cls = MagicMock()
+    client_cls.return_value.__aenter__ = AsyncMock(return_value=instance)
+    client_cls.return_value.__aexit__ = AsyncMock(return_value=False)
+    mocker.patch.object(handlers_module, "AsyncERClient", client_cls)
+
+    with caplog.at_level(logging.WARNING, logger="app.actions.handlers"):
+        with pytest.raises(IntegrationBadResponseError):
+            async with _translating_er_client(er_integration_v2_provider):
+                raise ValueError("520 is not a valid HTTPStatus")
+
+    records = [r for r in caplog.records if r.name == "app.actions.handlers" and "EarthRanger call failed" in r.getMessage()]
+    assert records and records[-1].exc_info and records[-1].exc_info[0] is ValueError

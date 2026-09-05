@@ -18,7 +18,7 @@ It returns a small result the portal interprets as valid / invalid:
 ```
 
 ```json
-{ "valid_credentials": false, "error": "Invalid credentials" }
+{ "valid_credentials": false, "error": "EarthRanger rejected the credentials" }
 ```
 
 ## Error cases
@@ -27,13 +27,18 @@ The action returns `valid_credentials: false` with a descriptive `error` for eac
 
 | Condition | `error` |
 |-----------|---------|
-| Missing/invalid ER site URL | `Site URL is empty or invalid: '<url>'` |
+| Missing/invalid ER site URL | `Site URL is empty or invalid.` (the URL itself is never echoed: it may carry a token) |
 | Token method, no token | `Please provide a token.` |
 | Username/password method, missing either | `Please provide both a username and a password.` |
 | Unknown `authentication_type` | `Please select an valid authentication method.` |
-| ER rejects the credentials | `Invalid credentials` |
-| Other ER client error | the ER client's message |
-| Transport/HTTP error | `HTTP error: <detail>` |
+| ER rejects the credentials (401, 403, or the token endpoint's 400 `invalid_grant`) | `EarthRanger rejected the credentials` or `EarthRanger denied access with these credentials` |
+| ER rate-limits the request | `EarthRanger rate-limited the request` |
+| ER unreachable (DNS, connection, timeout, 502/503/504) | `EarthRanger could not be reached` |
+| Any other ER failure | `EarthRanger returned an unexpected response` |
+
+These are fixed texts: the ER client's own messages carry ER's response body, or the login request (which
+includes the password), and neither may reach the result or the activity log. The same translation serves the
+[reference actions](reference-actions.md).
 
 ## Configuration — `AuthenticateConfig`
 

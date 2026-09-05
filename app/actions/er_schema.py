@@ -35,6 +35,8 @@ from urllib.parse import quote, urlparse
 
 import httpx
 
+from app.services.errors import IntegrationConfigurationError
+
 
 @dataclass
 class ERChoice:
@@ -149,20 +151,36 @@ def parse_er_event_schema(raw: dict) -> List[ERField]:
     return fields
 
 
+def er_site_root(base_url: str) -> str:
+    """`scheme://hostname` of an EarthRanger site URL (dropping any port), the
+    convention every AsyncERClient construction site uses.
+
+    Schemeless or empty base_urls do occur in Gundi (see the _ensure_scheme
+    guard in gundi-integration-cmore's CLI); urlparse leaves hostname None for
+    them, which would otherwise build a "https://None/..." URL. That is a
+    configuration error, and the URL itself stays out of the message: it is a
+    submitted value that may carry a token in its path or query.
+    """
+    url_parse = urlparse(base_url or "")
+    if not (url_parse.scheme and url_parse.hostname):
+        # A scheme-relative "//host" has a hostname but would yield "://host",
+        # which fails later as a connectivity error instead of this one.
+        raise IntegrationConfigurationError("Site URL is empty or invalid.")
+    return f"{url_parse.scheme}://{url_parse.hostname}"
+
+
 async def fetch_prerendered_event_schema(er_client, base_url: str, event_type: str) -> dict:
     """GET the v2 pre-rendered event-type schema (pre_render + s_format=enum inline
     each choice field's values, so no separate choices fetch is needed). erclient
     doesn't model this /schema sub-resource, so we call it directly with the
     client's own auth headers (works for both token and username/password auth)."""
-    url_parse = urlparse(base_url)
-    if not url_parse.hostname:
-        # Schemeless base_urls do occur in Gundi (see the _ensure_scheme guard in
-        # gundi-integration-cmore's CLI); urlparse leaves hostname None for them,
-        # which would otherwise build a "https://None/..." URL.
-        raise ValueError(f"Site URL is empty or invalid: '{base_url}'")
-    # scheme://hostname (dropping any port) is the deliberate convention — it
-    # matches every AsyncERClient construction site in handlers.py.
-    url = f"{url_parse.scheme}://{url_parse.hostname}/api/v2.0/activity/eventtypes/{quote(event_type, safe='')}/schema"
+    url = f"{er_site_root(base_url)}/api/v2.0/activity/eventtypes/{quote(event_type, safe='')}/schema"
+    # auth_headers() runs outside erclient's _call wrapper here, so a login
+    # failure (the token endpoint's 400 invalid_grant, or a 401) comes out as
+    # the raw httpx error for the token URL, carrying the login request body
+    # (for a username/password integration, the password). It is not mapped
+    # here: every caller runs inside the reference path's translation, which
+    # recognises token-URL failures and keeps the request out of its message.
     headers = await er_client.auth_headers()
     async with httpx.AsyncClient(headers=headers, timeout=30.0) as http:
         resp = await http.get(url, params={"pre_render": "true", "s_format": "enum"})

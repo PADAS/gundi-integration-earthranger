@@ -87,11 +87,16 @@ come from whichever site(s) define that type.
 
 ## Error semantics
 
-- Unknown `event_type` or `field_key` → the handler raises `ValueError`, which the runner turns into an
-  error response (never a leaked config, per the reference-action error carve-out). A classic v1 `event_type`
-  passed to `list_event_type_fields` / `list_event_field_values` surfaces the same way (ER's 404), with
-  wording that calls out the v1/v2 distinction rather than implying the slug is simply unknown.
-- Any other upstream ER failure (e.g. a 5xx) propagates unchanged.
+- Unknown `event_type` or `field_key`, an empty Site URL, or missing auth settings → the handler raises
+  `IntegrationConfigurationError`. The runner reports it as `Invalid configuration — <message>`; on the
+  ephemeral (draft-integration) path it is forwarded to the portal wizard with a 422, where every other
+  connector message is redacted. The messages describe the problem without echoing the submitted value. A
+  classic v1 `event_type` passed to `list_event_type_fields` / `list_event_field_values` surfaces the same way
+  (ER's 404), with wording that calls out the v1/v2 distinction rather than implying the slug is simply unknown.
+- EarthRanger client failures (bad credentials, permission denied, rate limit, 5xx, unreachable) are translated
+  into the runner's classified errors with the source status, so the wizard sees e.g.
+  `Authentication failed (HTTP 401)` and a 401 rather than a bare 500.
+- Any other upstream ER failure propagates unchanged and is classified by its status.
 
 ## Registration
 

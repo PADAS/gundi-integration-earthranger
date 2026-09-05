@@ -28,6 +28,19 @@ _FIXTURE_PATH = os.path.join(
 )
 
 
+def _er(class_name, status_code):
+    """Build an erclient exception the way the client does, response body included."""
+    from erclient import er_errors
+
+    return getattr(er_errors, class_name)("ER said no", status_code=status_code, response_body="secret-body")
+
+
+from erclient import ERClientException
+from app.services.errors import IntegrationBadResponseError
+from app.actions.handlers import _status_of
+from erclient.er_errors import ERClientBadRequest, ERClientPermissionDenied, ERClientServiceUnreachable
+
+
 def _load_fixture():
     with open(_FIXTURE_PATH) as fh:
         return json.load(fh)
@@ -239,13 +252,18 @@ async def test_list_event_type_fields_unknown_event_type_raises(
         "Not Found", request=MagicMock(), response=MagicMock(status_code=404)
     )
 
-    with pytest.raises(
-        ValueError,
-        match="rhino_carcass.*has no v2 schema in EarthRanger.*classic v1 event types are not supported",
-    ):
+    # A connector guard the portal wizard must be able to act on: the runner
+    # forwards IntegrationConfigurationError on the ephemeral path (422),
+    # where every other connector message is redacted to the type name. By
+    # contract the message names the shape of the problem and never echoes
+    # the submitted value.
+    from app.services.errors import IntegrationConfigurationError
+
+    with pytest.raises(IntegrationConfigurationError, match="v1 event type") as info:
         await action_list_event_type_fields(
             er_integration_v2_provider, ListEventTypeFieldsQuery(event_type="rhino_carcass")
         )
+    assert "rhino_carcass" not in str(info.value)
 
 
 @pytest.mark.asyncio
@@ -258,7 +276,9 @@ async def test_list_event_type_fields_upstream_500_propagates(
         "Server Error", request=MagicMock(), response=MagicMock(status_code=500)
     )
 
-    with pytest.raises(httpx.HTTPStatusError):
+    # Raw httpx errors from the ER client are translated on the reference path
+    # (a 5xx reads as an unexpected response, with its status), never re-raised as is.
+    with pytest.raises(IntegrationBadResponseError):
         await action_list_event_type_fields(
             er_integration_v2_provider, ListEventTypeFieldsQuery(event_type="rhino_carcass")
         )
@@ -308,11 +328,14 @@ async def test_list_event_field_values_unknown_field_raises(
 ):
     mock_fetch_schema.return_value = _load_fixture()
 
-    with pytest.raises(ValueError, match="no_such_field"):
+    from app.services.errors import IntegrationConfigurationError
+
+    with pytest.raises(IntegrationConfigurationError, match="Field not found") as info:
         await action_list_event_field_values(
             er_integration_v2_provider,
             ListEventFieldValuesQuery(event_type="rhino_carcass", field_key="no_such_field"),
         )
+    assert "no_such_field" not in str(info.value)
 
 
 @pytest.mark.asyncio
@@ -323,11 +346,14 @@ async def test_list_event_field_values_unknown_event_type_raises(
         "Not Found", request=MagicMock(), response=MagicMock(status_code=404)
     )
 
-    with pytest.raises(ValueError, match="has no v2 schema in EarthRanger"):
+    from app.services.errors import IntegrationConfigurationError
+
+    with pytest.raises(IntegrationConfigurationError, match="v1 event type") as info:
         await action_list_event_field_values(
             er_integration_v2_provider,
             ListEventFieldValuesQuery(event_type="no_such_type", field_key="animal_sex"),
         )
+    assert "no_such_type" not in str(info.value)
 
 
 # --- base_url validation in _build_er_client ----------------------------------
@@ -338,14 +364,36 @@ async def test_reference_action_with_schemeless_base_url_raises_clean_error(
     mocker, er_integration_v2_provider
 ):
     """A schemeless/empty integration.base_url must fail with the same clean
-    'Site URL is empty or invalid' message action_auth uses, not a confusing
-    downstream error against https://None/..."""
+    'Site URL is empty or invalid' wording action_auth uses, not a confusing
+    downstream error against https://None/... As a configuration error it
+    reaches the portal wizard on the ephemeral path; the draft URL itself is
+    a submitted value and stays out of the message."""
     from app.actions.handlers import action_list_event_types
     from app.actions.configurations import ListEventTypesQuery
+    from app.services.errors import IntegrationConfigurationError
 
     mocker.patch.object(er_integration_v2_provider, "base_url", "gundi-er.pamdas.org")
-    with pytest.raises(ValueError, match="Site URL is empty or invalid: 'gundi-er.pamdas.org'"):
+    with pytest.raises(IntegrationConfigurationError, match="Site URL is empty or invalid") as info:
         await action_list_event_types(er_integration_v2_provider, ListEventTypesQuery())
+    assert "gundi-er.pamdas.org" not in str(info.value)
+
+
+@pytest.mark.asyncio
+async def test_reference_action_without_auth_settings_raises_a_configuration_error(er_integration_v2_provider):
+    """The wizard can open a dropdown before the auth step is saved. Missing
+    auth settings are a configuration problem, not an EarthRanger verdict, and
+    the message must not carry the integration id (an identifier the draft
+    path synthesizes per run)."""
+    from app.actions.handlers import action_list_event_types
+    from app.actions.configurations import ListEventTypesQuery
+    from app.services.errors import IntegrationConfigurationError
+
+    integration = er_integration_v2_provider.copy(update={
+        "configurations": [c for c in er_integration_v2_provider.configurations if c.action.value != "auth"],
+    })
+    with pytest.raises(IntegrationConfigurationError, match="Authentication settings are missing") as info:
+        await action_list_event_types(integration, ListEventTypesQuery())
+    assert str(integration.id) not in str(info.value)
 
 
 # --- action_list_event_categories ---------------------------------------------
@@ -400,7 +448,9 @@ async def test_list_event_categories_upstream_error_propagates(mock_er_client, e
     mock_er_client.get_event_categories = AsyncMock(side_effect=httpx.HTTPStatusError(
         "boom", request=MagicMock(), response=MagicMock(status_code=500)
     ))
-    with pytest.raises(httpx.HTTPStatusError):
+    # Raw httpx errors from the ER client are translated on the reference path
+    # (a 5xx reads as an unexpected response, with its status), never re-raised as is.
+    with pytest.raises(IntegrationBadResponseError):
         await action_list_event_categories(er_integration_v2_provider, ListEventCategoriesQuery())
 
 
@@ -521,7 +571,417 @@ async def test_list_subject_types_propagates_upstream_errors(
     mock_er_client.get_subjectgroups.side_effect = httpx.HTTPStatusError(
         "boom", request=MagicMock(), response=MagicMock(status_code=502)
     )
-    with pytest.raises(httpx.HTTPStatusError):
+    # Raw httpx errors from the ER client are translated on the reference path,
+    # never re-raised as is; a 502 reads as EarthRanger being unreachable.
+    from app.services.errors import IntegrationConnectionError
+    with pytest.raises(IntegrationConnectionError):
         await action_list_subject_types(
             er_integration_v2_provider, ListSubjectTypesQuery()
         )
+
+
+# --- ER client errors on the reference path ------------------------------------
+
+
+@pytest.mark.parametrize(
+    "er_error,expected_type,expected_status",
+    [
+        (_er("ERClientBadCredentials", 401), "IntegrationAuthError", 401),
+        (_er("ERClientPermissionDenied", 403), "IntegrationAuthError", 403),
+        (_er("ERClientRateLimitExceeded", 429), "IntegrationRateLimitError", 429),
+        (_er("ERClientInternalError", 500), "IntegrationBadResponseError", 500),
+        # A 404 from ER means the site does not expose the API this action needs
+        # (an ER without the v2 event-type API, or a proxy routing only v1). A
+        # configuration problem, reported as such; forwarding the 404 would
+        # collide with the runner's own 404 for "action or config not found".
+        (_er("ERClientNotFound", 404), "IntegrationConfigurationError", None),
+        (_er("ERClientServiceUnreachable", 503), "IntegrationConnectionError", 503),
+        # A wrong username/password never reaches ER's API: erclient's _call turns
+        # the token endpoint's 400 invalid_grant into ERClientBadRequest naming
+        # /oauth2/token. That is an auth failure, not a bad request.
+        # Reported as 401: the source said 400, but the portal treats only 401/403
+        # as a credential rejection, and a wizard toast that says so is the point.
+        (ERClientBadRequest("ER Bad Request ON GET https://gundi-er.pamdas.org/oauth2/token.", status_code=400,
+                            response_body='{"error": "invalid_grant", "error_description": "Invalid credentials given."}'),
+         "IntegrationAuthError", 401),
+        # A genuine 400 from the API stays a bad response.
+        (ERClientBadRequest("ER Bad Request ON GET https://gundi-er.pamdas.org/api/v1.0/activity/events/categories.",
+                            status_code=400, response_body="secret-body"), "IntegrationBadResponseError", 400),
+        # Network failures inside _call are a plain ERClientException with no status.
+        (ERClientException("Request to ER failed: [Errno 61] Connection refused"), "IntegrationConnectionError", None),
+        # The bare auth_headers() call in er_schema lets the token endpoint's error out raw.
+        (httpx.HTTPStatusError("Client error '400 Bad Request' for url 'https://gundi-er.pamdas.org/oauth2/token'",
+                               request=httpx.Request("POST", "https://gundi-er.pamdas.org/oauth2/token"),
+                               response=httpx.Response(400, text='{"error": "invalid_grant"}')),
+         "IntegrationAuthError", 401),
+        # The token endpoint being down is not a credential problem.
+        (httpx.HTTPStatusError("Server error '503' for url 'https://gundi-er.pamdas.org/oauth2/token'",
+                               request=httpx.Request("POST", "https://gundi-er.pamdas.org/oauth2/token"),
+                               response=httpx.Response(503, text="upstream unavailable")),
+         "IntegrationConnectionError", 503),
+        (httpx.HTTPStatusError("Server error '500' for url 'https://gundi-er.pamdas.org/api/v1.0/x'",
+                               request=httpx.Request("GET", "https://gundi-er.pamdas.org/api/v1.0/x"),
+                               response=httpx.Response(500, text="secret-body")),
+         "IntegrationBadResponseError", 500),
+        (httpx.ConnectError("[Errno -3] Temporary failure in name resolution"), "IntegrationConnectionError", None),
+        # erclient itself raises these on realistic failures: ValueError from
+        # HTTPStatus(520).phrase behind a CDN, JSONDecodeError/KeyError on a 200
+        # non-JSON body or a token body without expires_in. Neither erclient nor
+        # httpx types, so they escaped as a bare 500 "ValueError".
+        (ValueError("520 is not a valid HTTPStatus"), "IntegrationBadResponseError", None),
+        (KeyError("expires_in"), "IntegrationBadResponseError", None),
+        # Any status-less plain ERClientException from the client is its network
+        # branch (structural, not a match on the log wording).
+        (ERClientException("ER request failed: connection refused"), "IntegrationConnectionError", None),
+        # A body that merely mentions the token URL is not a rejected login.
+        (ERClientBadRequest("ER Bad Request ON GET https://gundi-er.pamdas.org/api/v1.0/activity/events.",
+                            status_code=400, response_body='{"detail": "see /oauth2/token"}'), "IntegrationBadResponseError", 400),
+        # An http:// site URL gets a redirect to https; that is a configuration
+        # problem, not a provider verdict (and the wizard cannot classify a 3xx).
+        (ERClientException("ER Permanent Redirect ON GET http://gundi-er.pamdas.org/api/v1.0/x.", status_code=308,
+                           response_body=""), "IntegrationConfigurationError", None),
+    ],
+)
+@pytest.mark.asyncio
+async def test_reference_actions_translate_er_client_errors(
+        mock_er_client, er_integration_v2_provider, er_error, expected_type, expected_status,
+):
+    """erclient's exceptions are not IntegrationError subclasses and carry no
+    .response, so the runner cannot classify them: on the ephemeral path the
+    portal wizard got `500 {"error": "ERClientBadCredentials"}` and could not
+    tell bad credentials from a broken site. Translated, it gets the runner's
+    curated text and the source status (401/403/429/5xx)."""
+    from app.services import errors
+    from app.actions.handlers import action_list_event_categories
+    from app.actions.configurations import ListEventCategoriesQuery
+
+    mock_er_client.get_event_categories = AsyncMock(side_effect=er_error)
+    with pytest.raises(getattr(errors, expected_type)) as info:
+        await action_list_event_categories(er_integration_v2_provider, ListEventCategoriesQuery())
+
+    assert info.value.status_code == expected_status
+    # No chained cause: on a saved integration the runner publishes the
+    # formatted traceback, whose chained-cause section would render str(cause)
+    # with ER's response body. The local log gets the original separately.
+    assert info.value.__cause__ is None and info.value.__suppress_context__
+    if _status_of(er_error) == 308:
+        assert "https" in str(info.value)
+    # The ER response body rides on str(ERClientException); it must not
+    # reach the activity log or the portal through the translated message.
+    assert "response_body" not in str(info.value) and "secret-body" not in str(info.value)
+    assert "invalid_grant" not in str(info.value) and "name resolution" not in str(info.value)
+
+
+@pytest.mark.asyncio
+async def test_list_event_types_surfaces_bad_credentials_instead_of_an_empty_list(
+        mock_er_client, er_integration_v2_provider,
+):
+    """_fetch_event_type_maps is best-effort for pull_events (a 403 on one
+    endpoint must not break the others), but on the reference path swallowing
+    an auth failure returns 200 with no options: the wizard shows an empty
+    dropdown instead of "Authentication failed"."""
+    from app.services.errors import IntegrationAuthError
+
+    mock_er_client.get_event_types = AsyncMock(side_effect=_er("ERClientBadCredentials", 401))
+    with pytest.raises(IntegrationAuthError) as info:
+        await action_list_event_types(er_integration_v2_provider, ListEventTypesQuery())
+    assert info.value.status_code == 401
+
+
+@pytest.mark.asyncio
+async def test_list_event_types_tolerates_a_403_on_the_v1_endpoint(mock_er_client, er_integration_v2_provider):
+    """Only the v2 event types are offered, so the v2 fetch is load-bearing;
+    the v1 fetch and the categories fetch only enrich grouping. An ER role
+    denied on the legacy v1 endpoint but allowed on v2 must still get its
+    dropdown, as it did before the reference path started surfacing auth
+    failures. (A wrong password fails the v2 fetch too, so it still surfaces.)"""
+    from erclient import VERSION_1_0, VERSION_2_0
+
+    async def get_event_types(version=None, **kwargs):
+        if version == VERSION_1_0:
+            raise ERClientPermissionDenied("ER Forbidden ON GET .../eventtypes.", status_code=403, response_body="")
+        return [{"value": "rhino_carcass", "display": "Rhino Carcass", "category": "security", "version": VERSION_2_0}]
+
+    mock_er_client.get_event_types = AsyncMock(side_effect=get_event_types)
+    mock_er_client.get_event_categories = AsyncMock(return_value=[{"value": "security", "display": "Security", "id": "c1"}])
+
+    result = await action_list_event_types(er_integration_v2_provider, ListEventTypesQuery())
+
+    assert [o["value"] for o in result["options"]] == ["rhino_carcass"]
+
+
+@pytest.mark.asyncio
+async def test_list_event_types_surfaces_a_failing_v2_fetch_whatever_the_failure(mock_er_client, er_integration_v2_provider):
+    """A 503, a rate limit or a network failure on the load-bearing fetch used
+    to be swallowed into an empty dropdown with a 200, after up to four
+    round trips to a failing server; the other reference actions let the
+    same failures propagate. Everything from the v2 fetch propagates now."""
+    from erclient import VERSION_2_0
+    from app.services.errors import IntegrationConnectionError
+
+    async def get_event_types(version=None, **kwargs):
+        if version == VERSION_2_0:
+            raise ERClientServiceUnreachable("ER Service Unavailable ON GET .../eventtypes.", status_code=503, response_body="")
+        return []
+
+    mock_er_client.get_event_types = AsyncMock(side_effect=get_event_types)
+
+    with pytest.raises(IntegrationConnectionError) as info:
+        await action_list_event_types(er_integration_v2_provider, ListEventTypesQuery())
+    assert info.value.status_code == 503
+
+
+@pytest.mark.asyncio
+async def test_list_event_types_fetches_v2_first_so_a_failure_costs_one_round_trip(mock_er_client, er_integration_v2_provider):
+    """The v2 fetch is the load-bearing one; running it after the best-effort
+    v1 fetch meant a wrong password (or a down site) paid the identical
+    failure twice, once as a warning and once as the error."""
+    from erclient import VERSION_2_0
+    from app.services.errors import IntegrationAuthError
+
+    calls = []
+
+    async def get_event_types(version=None, **kwargs):
+        calls.append(version)
+        raise ERClientBadRequest("ER Bad Request ON GET https://gundi-er.pamdas.org/oauth2/token.",
+                                 status_code=400, response_body='{"error": "invalid_grant"}')
+
+    mock_er_client.get_event_types = AsyncMock(side_effect=get_event_types)
+
+    with pytest.raises(IntegrationAuthError):
+        await action_list_event_types(er_integration_v2_provider, ListEventTypesQuery())
+    assert calls == [VERSION_2_0]
+
+
+@pytest.mark.asyncio
+async def test_best_effort_fetch_warnings_do_not_carry_the_er_response_body(mock_er_client, er_integration_v2_provider, caplog):
+    from erclient import VERSION_1_0, VERSION_2_0
+
+    async def get_event_types(version=None, **kwargs):
+        if version == VERSION_1_0:
+            raise ERClientPermissionDenied("ER Forbidden ON GET .../eventtypes.", status_code=403, response_body="secret-body")
+        return [{"value": "rhino_carcass", "display": "Rhino Carcass", "category": "security", "version": VERSION_2_0}]
+
+    mock_er_client.get_event_types = AsyncMock(side_effect=get_event_types)
+    mock_er_client.get_event_categories = AsyncMock(return_value=[])
+
+    result = await action_list_event_types(er_integration_v2_provider, ListEventTypesQuery())
+
+    assert [o["value"] for o in result["options"]] == ["rhino_carcass"]
+    warnings = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
+    assert warnings and all("secret-body" not in w for w in warnings)
+
+
+@pytest.mark.asyncio
+async def test_list_event_type_fields_reports_a_login_failure_from_the_schema_fetch_as_rejected_credentials(
+        er_integration_v2_provider, mock_er_client, mock_fetch_schema, er_400_invalid_credentials_exception,
+):
+    """The schema fetch calls auth_headers() outside erclient's _call, so a
+    login failure surfaces as the raw httpx error for the token URL; the
+    reference-path translation must recognise it (and must not mistake a 404
+    from the token URL for an unknown event type)."""
+    from app.services.errors import IntegrationAuthError, IntegrationConfigurationError
+
+    mock_fetch_schema.side_effect = er_400_invalid_credentials_exception
+    with pytest.raises(IntegrationAuthError) as info:
+        await action_list_event_type_fields(er_integration_v2_provider, ListEventTypeFieldsQuery(event_type="rhino_carcass"))
+    assert info.value.status_code == 401
+
+    # A 404 from the token URL is not "unknown event type": it is a site that
+    # does not expose the API at all, which reads as a configuration error.
+    mock_fetch_schema.side_effect = httpx.HTTPStatusError(
+        "Not Found", request=httpx.Request("POST", "https://not-an-er-site.example/oauth2/token"),
+        response=httpx.Response(404, text=""),
+    )
+    with pytest.raises(IntegrationConfigurationError) as info:
+        await action_list_event_type_fields(er_integration_v2_provider, ListEventTypeFieldsQuery(event_type="rhino_carcass"))
+    assert "event type" not in str(info.value).lower() or "does not expose" in str(info.value)
+
+
+@pytest.mark.asyncio
+async def test_a_403_reads_the_same_whichever_path_it_took(mock_er_client, er_integration_v2_provider, mock_fetch_schema):
+    """One status table: a 403 through erclient's _call and a raw httpx 403
+    from the schema fetch describe the same ER verdict with the same words."""
+    from app.services.errors import IntegrationAuthError
+    from app.actions.configurations import ListEventCategoriesQuery
+    from app.actions.handlers import action_list_event_categories
+
+    mock_er_client.get_event_categories = AsyncMock(side_effect=ERClientPermissionDenied(
+        "ER Forbidden ON GET .../categories.", status_code=403, response_body="",
+    ))
+    with pytest.raises(IntegrationAuthError) as via_call:
+        await action_list_event_categories(er_integration_v2_provider, ListEventCategoriesQuery())
+
+    mock_fetch_schema.side_effect = httpx.HTTPStatusError(
+        "Forbidden", request=httpx.Request("GET", "https://gundi-er.pamdas.org/api/v2.0/activity/eventtypes/x/schema"),
+        response=httpx.Response(403, text=""),
+    )
+    with pytest.raises(IntegrationAuthError) as raw:
+        await action_list_event_type_fields(er_integration_v2_provider, ListEventTypeFieldsQuery(event_type="x"))
+
+    assert str(via_call.value) == str(raw.value) == "EarthRanger denied access with these credentials"
+    assert via_call.value.status_code == raw.value.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_unknown_event_type_error_carries_no_chained_cause(er_integration_v2_provider, mock_er_client, mock_fetch_schema):
+    """The published traceback would otherwise render the chained httpx 404
+    with the ER host and the submitted slug that the message itself omits."""
+    from app.services.errors import IntegrationConfigurationError
+
+    mock_fetch_schema.side_effect = httpx.HTTPStatusError(
+        "Not Found", request=httpx.Request("GET", "https://gundi-er.pamdas.org/api/v2.0/activity/eventtypes/typo/schema"),
+        response=httpx.Response(404, text=""),
+    )
+    with pytest.raises(IntegrationConfigurationError) as info:
+        await action_list_event_type_fields(er_integration_v2_provider, ListEventTypeFieldsQuery(event_type="typo"))
+    assert info.value.__cause__ is None and info.value.__suppress_context__
+
+
+@pytest.mark.asyncio
+async def test_a_broken_auth_config_is_a_validation_error_not_an_earthranger_verdict(mock_er_client, er_integration_v2_provider):
+    """Building the client parses the stored auth config; a pydantic
+    ValidationError there is a ValueError and must not be swallowed into
+    "EarthRanger returned an unexpected response" when no request was made.
+    The runner renders validation errors itself."""
+    import pydantic
+
+    auth_cfg = next(c for c in er_integration_v2_provider.configurations if c.action.value == "auth")
+    integration = er_integration_v2_provider.copy(update={
+        "configurations": [c.copy(update={"data": {**c.data, "authentication_type": "bogus"}}) if c is auth_cfg else c
+                           for c in er_integration_v2_provider.configurations],
+    })
+    with pytest.raises(pydantic.ValidationError):
+        await action_list_event_types(integration, ListEventTypesQuery())
+
+
+@pytest.mark.asyncio
+async def test_a_stale_refresh_token_falls_back_to_a_fresh_login(er_integration_v2_provider):
+    """erclient's auth_headers() tries refresh_token() first and falls back to
+    login() only when the refresh returns False, but _token_request raises on
+    the token endpoint's 400 instead, so a stale refresh token mid-run (a
+    backfill outlasting the access token) surfaced as a rejected login while
+    the stored password was fine. The client we build turns that 400 into a
+    False so the fallback runs; a genuinely wrong password still fails there."""
+    from unittest.mock import AsyncMock
+    import datetime, pytz
+    from app.actions.handlers import _build_er_client
+
+    client = _build_er_client(er_integration_v2_provider)
+    client.auth = {"access_token": "old", "refresh_token": "stale", "token_type": "Bearer"}
+    client.auth_expires = pytz.utc.localize(datetime.datetime.min)  # expired: refresh first
+    stale = httpx.HTTPStatusError(
+        "400", request=httpx.Request("POST", "https://gundi-er.pamdas.org/oauth2/token"),
+        response=httpx.Response(400, text='{"error": "invalid_grant"}'),
+    )
+    grants = []
+
+    async def token_request(payload):
+        grants.append(payload["grant_type"])
+        if payload["grant_type"] == "refresh_token":
+            client.auth = None
+            raise stale
+        client.auth = {"access_token": "new", "refresh_token": "r2", "token_type": "Bearer"}
+        client.auth_expires = datetime.datetime.now(tz=datetime.timezone.utc) + datetime.timedelta(hours=1)
+        return True
+
+    client._token_request = AsyncMock(side_effect=token_request)
+
+    headers = await client.auth_headers()
+
+    assert grants == ["refresh_token", "password"]
+    assert headers["Authorization"] == "Bearer new"
+
+
+def test_a_403_from_the_token_endpoint_is_denied_access_on_both_paths():
+    """django-oauth-toolkit never answers 403 for a credential rejection (it
+    uses 400 invalid_grant / 401 invalid_client); a 403 on /oauth2/token is a
+    proxy or WAF verdict. Through erclient it already read as "denied access";
+    the raw-httpx branch called it a rejected login."""
+    from app.actions.handlers import _as_integration_error
+
+    raw = httpx.HTTPStatusError(
+        "Forbidden", request=httpx.Request("POST", "https://gundi-er.pamdas.org/oauth2/token"),
+        response=httpx.Response(403, text=""),
+    )
+    via_call = ERClientPermissionDenied("ER Forbidden ON GET https://gundi-er.pamdas.org/oauth2/token.", status_code=403, response_body="")
+
+    assert str(_as_integration_error(raw)) == str(_as_integration_error(via_call)) == "EarthRanger denied access with these credentials"
+    assert _as_integration_error(raw).status_code == 403
+
+
+def test_a_404_is_a_not_found_verdict_on_the_pull_path_and_a_configuration_error_on_the_reference_path():
+    """On the reference path a 404 means the site lacks the API (no v2
+    event-type API); on the pull path it means a stale resource, e.g. a
+    deleted subject group, and the operator needs the status and not a hint
+    about the site URL."""
+    from erclient.er_errors import ERClientNotFound
+    from app.actions.handlers import _as_integration_error
+    from app.services.errors import IntegrationBadResponseError, IntegrationConfigurationError
+
+    not_found = ERClientNotFound("ER Not Found ON GET https://gundi-er.pamdas.org/api/v1.0/subjectgroups/x.", status_code=404, response_body="")
+    assert isinstance(_as_integration_error(not_found), IntegrationConfigurationError)
+    pull = _as_integration_error(not_found, not_found_is_configuration=False)
+    assert isinstance(pull, IntegrationBadResponseError) and pull.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_pull_path_translation_recognises_erclient_by_host_not_by_string_prefix(mocker, er_integration_v2_provider):
+    """`startswith(site_root)` matched any host that merely begins with the ER
+    hostname, and an IDN site URL never matched its punycode request URL, so a
+    token-POST transport error there would have escaped untranslated with the
+    login body attached. Compare origins."""
+    from unittest.mock import AsyncMock, MagicMock
+    from app.actions import handlers as handlers_module
+    from app.actions.handlers import _translating_er_client
+    from app.services.errors import IntegrationConnectionError
+
+    instance = MagicMock()
+    client_cls = MagicMock()
+    client_cls.return_value.__aenter__ = AsyncMock(return_value=instance)
+    client_cls.return_value.__aexit__ = AsyncMock(return_value=False)
+    mocker.patch.object(handlers_module, "AsyncERClient", client_cls)
+
+    idn = er_integration_v2_provider.copy(update={"base_url": "https://ér-site.example"})
+    token_post = httpx.Request("POST", "https://ér-site.example/oauth2/token", content=b"password=SECRET")  # punycode, as httpx sends it
+    with pytest.raises(IntegrationConnectionError):
+        async with _translating_er_client(idn, only_er_requests=True):
+            raise httpx.ConnectError("boom", request=token_post)
+
+    lookalike = httpx.Request("POST", "https://gundi-er.pamdas.org.evil.example/v2/events/")
+    with pytest.raises(httpx.HTTPStatusError):  # not ours: untouched
+        async with _translating_er_client(er_integration_v2_provider, only_er_requests=True):
+            raise httpx.HTTPStatusError("401", request=lookalike, response=httpx.Response(401, text=""))
+
+
+@pytest.mark.asyncio
+async def test_pull_path_translation_covers_erclient_raised_value_errors_but_not_connector_ones(mocker, er_integration_v2_provider):
+    """erclient raises ValueError/KeyError itself on realistic failures (a
+    CDN's 520 through HTTPStatus(...).phrase, a 200 HTML body through
+    response.json()); those are EarthRanger failures and classify like on the
+    reference path. A ValueError from connector code is a bug and must keep
+    its traceback."""
+    from unittest.mock import AsyncMock, MagicMock
+    from app.actions import handlers as handlers_module
+    from app.actions.handlers import _translating_er_client
+    from app.services.errors import IntegrationBadResponseError
+    from erclient import client as erclient_module
+
+    instance = MagicMock()
+    client_cls = MagicMock()
+    client_cls.return_value.__aenter__ = AsyncMock(return_value=instance)
+    client_cls.return_value.__aexit__ = AsyncMock(return_value=False)
+    mocker.patch.object(handlers_module, "AsyncERClient", client_cls)
+
+    def raised_inside_erclient():
+        # Execute a raise from a code object whose filename is erclient's.
+        code = compile("raise ValueError('520 is not a valid HTTPStatus')", erclient_module.__file__, "exec")
+        exec(code, {})
+
+    with pytest.raises(IntegrationBadResponseError):
+        async with _translating_er_client(er_integration_v2_provider, only_er_requests=True):
+            raised_inside_erclient()
+
+    with pytest.raises(ValueError):  # a connector bug: untouched
+        async with _translating_er_client(er_integration_v2_provider, only_er_requests=True):
+            raise ValueError("connector bug")

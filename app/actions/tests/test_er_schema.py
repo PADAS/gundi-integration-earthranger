@@ -143,14 +143,51 @@ async def test_fetch_prerendered_event_schema_raises_on_404():
 async def test_fetch_prerendered_event_schema_rejects_schemeless_base_url():
     # Schemeless base_urls occur in Gundi; urlparse leaves hostname None for
     # them, which would otherwise build a "https://None/..." URL.
+    from app.services.errors import IntegrationConfigurationError
+
     er_client = AsyncMock()
-    with pytest.raises(ValueError, match="Site URL is empty or invalid: 'gundi-er.pamdas.org'"):
+    with pytest.raises(IntegrationConfigurationError, match="Site URL is empty or invalid") as info:
         await fetch_prerendered_event_schema(er_client, "gundi-er.pamdas.org", "rhino_carcass")
+    assert "gundi-er.pamdas.org" not in str(info.value)  # a submitted value stays out of the message
     er_client.auth_headers.assert_not_awaited()
 
 
 @pytest.mark.asyncio
 async def test_fetch_prerendered_event_schema_rejects_empty_base_url():
+    from app.services.errors import IntegrationConfigurationError
+
     er_client = AsyncMock()
-    with pytest.raises(ValueError, match="Site URL is empty or invalid"):
+    with pytest.raises(IntegrationConfigurationError, match="Site URL is empty or invalid"):
         await fetch_prerendered_event_schema(er_client, "", "rhino_carcass")
+
+
+@pytest.mark.asyncio
+async def test_fetch_prerendered_event_schema_lets_a_login_failure_out_untouched(er_400_invalid_credentials_exception):
+    """fetch_prerendered_event_schema calls er_client.auth_headers() outside
+    erclient's _call, so a login failure is the raw httpx error for the token
+    URL. It is not mapped here: every caller runs inside the reference path's
+    translation, which recognises token-URL failures, and erclient's own mapper
+    is a private method that raises ValueError on non-standard status codes
+    (a 520 from a CDN) that nothing downstream would then translate."""
+    from unittest.mock import AsyncMock
+
+    er_client = AsyncMock()
+    er_client.auth_headers = AsyncMock(side_effect=er_400_invalid_credentials_exception)
+
+    with pytest.raises(httpx.HTTPStatusError) as info:
+        await fetch_prerendered_event_schema(er_client, "https://gundi-er.pamdas.org", "rhino_carcass")
+    assert info.value is er_400_invalid_credentials_exception
+    assert not any(m[0] == "_handle_http_status_error" for m in er_client.method_calls)
+
+
+def test_er_site_root_requires_a_scheme():
+    """A scheme-relative URL ("//host") has a hostname but no scheme and would
+    yield "://host", which fails later as a connectivity error instead of the
+    configuration error this guard exists to raise."""
+    from app.services.errors import IntegrationConfigurationError
+    from app.actions.er_schema import er_site_root
+
+    assert er_site_root("https://gundi-er.pamdas.org:443/anything?x=1") == "https://gundi-er.pamdas.org"
+    for bad in ("//gundi-er.pamdas.org", "gundi-er.pamdas.org", "", None):
+        with pytest.raises(IntegrationConfigurationError):
+            er_site_root(bad)
