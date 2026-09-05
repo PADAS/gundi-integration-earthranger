@@ -173,16 +173,13 @@ async def fetch_prerendered_event_schema(er_client, base_url: str, event_type: s
     doesn't model this /schema sub-resource, so we call it directly with the
     client's own auth headers (works for both token and username/password auth)."""
     url = f"{er_site_root(base_url)}/api/v2.0/activity/eventtypes/{quote(event_type, safe='')}/schema"
-    try:
-        headers = await er_client.auth_headers()
-    except httpx.HTTPStatusError as e:
-        # auth_headers() runs outside erclient's _call wrapper here, so a login
-        # failure (the token endpoint's 400 invalid_grant, or a 401) would
-        # escape as a raw httpx error carrying the login request body, which
-        # for a username/password integration is the password. Apply the same
-        # mapping _call does, so it comes out as an ERClientException like
-        # every other failure and is translated downstream.
-        er_client._handle_http_status_error("oauth2/token", "POST", e, request_url=str(e.request.url))
+    # auth_headers() runs outside erclient's _call wrapper here, so a login
+    # failure (the token endpoint's 400 invalid_grant, or a 401) comes out as
+    # the raw httpx error for the token URL, carrying the login request body
+    # (for a username/password integration, the password). It is not mapped
+    # here: every caller runs inside the reference path's translation, which
+    # recognises token-URL failures and keeps the request out of its message.
+    headers = await er_client.auth_headers()
     async with httpx.AsyncClient(headers=headers, timeout=30.0) as http:
         resp = await http.get(url, params={"pre_render": "true", "s_format": "enum"})
         resp.raise_for_status()

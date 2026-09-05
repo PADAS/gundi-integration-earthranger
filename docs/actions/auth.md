@@ -18,7 +18,7 @@ It returns a small result the portal interprets as valid / invalid:
 ```
 
 ```json
-{ "valid_credentials": false, "error": "Invalid credentials" }
+{ "valid_credentials": false, "error": "EarthRanger rejected the credentials" }
 ```
 
 ## Error cases

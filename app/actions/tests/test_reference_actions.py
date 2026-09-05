@@ -570,9 +570,10 @@ async def test_list_subject_types_propagates_upstream_errors(
     mock_er_client.get_subjectgroups.side_effect = httpx.HTTPStatusError(
         "boom", request=MagicMock(), response=MagicMock(status_code=502)
     )
-    # Raw httpx errors from the ER client are translated on the reference path
-    # (a 5xx reads as an unexpected response, with its status), never re-raised as is.
-    with pytest.raises(IntegrationBadResponseError):
+    # Raw httpx errors from the ER client are translated on the reference path,
+    # never re-raised as is; a 502 reads as EarthRanger being unreachable.
+    from app.services.errors import IntegrationConnectionError
+    with pytest.raises(IntegrationConnectionError):
         await action_list_subject_types(
             er_integration_v2_provider, ListSubjectTypesQuery()
         )
@@ -593,9 +594,11 @@ async def test_list_subject_types_propagates_upstream_errors(
         # A wrong username/password never reaches ER's API: erclient's _call turns
         # the token endpoint's 400 invalid_grant into ERClientBadRequest naming
         # /oauth2/token. That is an auth failure, not a bad request.
+        # Reported as 401: the source said 400, but the portal treats only 401/403
+        # as a credential rejection, and a wizard toast that says so is the point.
         (ERClientBadRequest("ER Bad Request ON GET https://gundi-er.pamdas.org/oauth2/token.", status_code=400,
                             response_body='{"error": "invalid_grant", "error_description": "Invalid credentials given."}'),
-         "IntegrationAuthError", 400),
+         "IntegrationAuthError", 401),
         # A genuine 400 from the API stays a bad response.
         (ERClientBadRequest("ER Bad Request ON GET https://gundi-er.pamdas.org/api/v1.0/activity/events/categories.",
                             status_code=400, response_body="secret-body"), "IntegrationBadResponseError", 400),
@@ -605,7 +608,16 @@ async def test_list_subject_types_propagates_upstream_errors(
         (httpx.HTTPStatusError("Client error '400 Bad Request' for url 'https://gundi-er.pamdas.org/oauth2/token'",
                                request=httpx.Request("POST", "https://gundi-er.pamdas.org/oauth2/token"),
                                response=httpx.Response(400, text='{"error": "invalid_grant"}')),
-         "IntegrationAuthError", 400),
+         "IntegrationAuthError", 401),
+        # The token endpoint being down is not a credential problem.
+        (httpx.HTTPStatusError("Server error '503' for url 'https://gundi-er.pamdas.org/oauth2/token'",
+                               request=httpx.Request("POST", "https://gundi-er.pamdas.org/oauth2/token"),
+                               response=httpx.Response(503, text="upstream unavailable")),
+         "IntegrationConnectionError", 503),
+        (httpx.HTTPStatusError("Server error '500' for url 'https://gundi-er.pamdas.org/api/v1.0/x'",
+                               request=httpx.Request("GET", "https://gundi-er.pamdas.org/api/v1.0/x"),
+                               response=httpx.Response(500, text="secret-body")),
+         "IntegrationBadResponseError", 500),
         (httpx.ConnectError("[Errno -3] Temporary failure in name resolution"), "IntegrationConnectionError", None),
     ],
 )
@@ -627,7 +639,10 @@ async def test_reference_actions_translate_er_client_errors(
         await action_list_event_categories(er_integration_v2_provider, ListEventCategoriesQuery())
 
     assert info.value.status_code == expected_status
-    assert info.value.__cause__ is er_error
+    # No chained cause: on a saved integration the runner publishes the
+    # formatted traceback, whose chained-cause section would render str(cause)
+    # with ER's response body. The local log gets the original separately.
+    assert info.value.__cause__ is None and info.value.__suppress_context__
     # The ER response body rides on str(ERClientException); it must not
     # reach the activity log or the portal through the translated message.
     assert "response_body" not in str(info.value) and "secret-body" not in str(info.value)
@@ -691,3 +706,68 @@ async def test_list_event_types_surfaces_a_failing_v2_fetch_whatever_the_failure
     with pytest.raises(IntegrationConnectionError) as info:
         await action_list_event_types(er_integration_v2_provider, ListEventTypesQuery())
     assert info.value.status_code == 503
+
+
+@pytest.mark.asyncio
+async def test_list_event_types_fetches_v2_first_so_a_failure_costs_one_round_trip(mock_er_client, er_integration_v2_provider):
+    """The v2 fetch is the load-bearing one; running it after the best-effort
+    v1 fetch meant a wrong password (or a down site) paid the identical
+    failure twice, once as a warning and once as the error."""
+    from erclient import VERSION_2_0
+    from app.services.errors import IntegrationAuthError
+
+    calls = []
+
+    async def get_event_types(version=None, **kwargs):
+        calls.append(version)
+        raise ERClientBadRequest("ER Bad Request ON GET https://gundi-er.pamdas.org/oauth2/token.",
+                                 status_code=400, response_body='{"error": "invalid_grant"}')
+
+    mock_er_client.get_event_types = AsyncMock(side_effect=get_event_types)
+
+    with pytest.raises(IntegrationAuthError):
+        await action_list_event_types(er_integration_v2_provider, ListEventTypesQuery())
+    assert calls == [VERSION_2_0]
+
+
+@pytest.mark.asyncio
+async def test_best_effort_fetch_warnings_do_not_carry_the_er_response_body(mock_er_client, er_integration_v2_provider, caplog):
+    from erclient import VERSION_1_0, VERSION_2_0
+
+    async def get_event_types(version=None, **kwargs):
+        if version == VERSION_1_0:
+            raise ERClientPermissionDenied("ER Forbidden ON GET .../eventtypes.", status_code=403, response_body="secret-body")
+        return [{"value": "rhino_carcass", "display": "Rhino Carcass", "category": "security", "version": VERSION_2_0}]
+
+    mock_er_client.get_event_types = AsyncMock(side_effect=get_event_types)
+    mock_er_client.get_event_categories = AsyncMock(return_value=[])
+
+    result = await action_list_event_types(er_integration_v2_provider, ListEventTypesQuery())
+
+    assert [o["value"] for o in result["options"]] == ["rhino_carcass"]
+    warnings = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
+    assert warnings and all("secret-body" not in w for w in warnings)
+
+
+@pytest.mark.asyncio
+async def test_list_event_type_fields_reports_a_login_failure_from_the_schema_fetch_as_rejected_credentials(
+        er_integration_v2_provider, mock_er_client, mock_fetch_schema, er_400_invalid_credentials_exception,
+):
+    """The schema fetch calls auth_headers() outside erclient's _call, so a
+    login failure surfaces as the raw httpx error for the token URL; the
+    reference-path translation must recognise it (and must not mistake a 404
+    from the token URL for an unknown event type)."""
+    from app.services.errors import IntegrationAuthError, IntegrationBadResponseError
+
+    mock_fetch_schema.side_effect = er_400_invalid_credentials_exception
+    with pytest.raises(IntegrationAuthError) as info:
+        await action_list_event_type_fields(er_integration_v2_provider, ListEventTypeFieldsQuery(event_type="rhino_carcass"))
+    assert info.value.status_code == 401
+
+    mock_fetch_schema.side_effect = httpx.HTTPStatusError(
+        "Not Found", request=httpx.Request("POST", "https://not-an-er-site.example/oauth2/token"),
+        response=httpx.Response(404, text=""),
+    )
+    with pytest.raises(IntegrationBadResponseError) as info:
+        await action_list_event_type_fields(er_integration_v2_provider, ListEventTypeFieldsQuery(event_type="rhino_carcass"))
+    assert info.value.status_code == 404

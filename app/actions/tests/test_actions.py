@@ -428,7 +428,7 @@ async def test_execute_show_permissions_action_with_bad_token(
     assert mock_erclient.get_me.called
     response_data = response.get("data")
     user_details = response_data.get("User Details", {})
-    assert user_details.get("error") == "Invalid credentials. Please provide a valid credentials in the authentication config."
+    assert user_details.get("error") == "EarthRanger rejected the credentials"
 
 
 @pytest.mark.asyncio
@@ -453,7 +453,9 @@ async def test_execute_show_permissions_action_with_bad_password(
     assert mock_erclient.get_me.called
     response_data = response.get("data")
     user_details = response_data.get("User Details", {})
-    assert user_details.get("error") == "ER status 400: Invalid credentials given."
+    # The token endpoint's 400 invalid_grant is a rejected login; the raw
+    # error_description no longer reaches the card.
+    assert user_details.get("error") == "EarthRanger rejected the credentials"
 
 
 @pytest.mark.asyncio
@@ -2670,3 +2672,80 @@ async def test_show_permissions_error_text_does_not_echo_the_site_url(er_integra
 
     assert response["data"]["User Details"]["error"] == "Site URL is empty or invalid."
     assert "SECRET" not in str(response)
+
+
+@pytest.mark.asyncio
+async def test_auth_action_reports_a_token_endpoint_outage_as_unreachable(mocker, er_integration_v2_provider):
+    """A 503 from /oauth2/token during an outage is not a credential problem."""
+    from unittest.mock import AsyncMock, MagicMock
+    from app.actions import handlers as handlers_module
+    from app.actions.handlers import action_auth
+    from app.actions.configurations import AuthenticateConfig, ERAuthenticationType
+
+    outage = httpx.HTTPStatusError(
+        "Server error '503'", request=httpx.Request("POST", "https://gundi-er.pamdas.org/oauth2/token"),
+        response=httpx.Response(503, text="upstream unavailable"),
+    )
+    instance = MagicMock()
+    instance.login = AsyncMock(side_effect=outage)
+    client_cls = MagicMock()
+    client_cls.return_value.__aenter__ = AsyncMock(return_value=instance)
+    client_cls.return_value.__aexit__ = AsyncMock(return_value=False)
+    mocker.patch.object(handlers_module, "AsyncERClient", client_cls)
+
+    response = await action_auth(
+        er_integration_v2_provider,
+        AuthenticateConfig(authentication_type=ERAuthenticationType.USERNAME_PASSWORD, username="u", password="p"),
+    )
+
+    assert response["error"] == "EarthRanger could not be reached"
+
+
+@pytest.mark.parametrize(
+    "auth_type,method,exc,expected",
+    [
+        ("USERNAME_PASSWORD", "login", "token-400", "EarthRanger rejected the credentials"),
+        ("USERNAME_PASSWORD", "login", "token-503-html", "EarthRanger could not be reached"),
+        ("TOKEN", "get_me", "internal-500", "EarthRanger returned an unexpected response"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_show_permissions_reports_er_failures_with_the_same_fixed_text(
+        mocker, er_integration_v2_provider, er_400_invalid_credentials_exception, auth_type, method, exc, expected,
+):
+    """show_permissions had its own error handling: a token-endpoint error
+    without error_description evaluated `response.text` on the result dict
+    (AttributeError, so the action 500ed), and the catch-all wrote str(e),
+    with ER's response body, into the card. Same translation as action_auth."""
+    from unittest.mock import AsyncMock, MagicMock
+    from erclient.er_errors import ERClientInternalError
+    from app.actions import handlers as handlers_module
+    from app.actions.handlers import action_show_permissions
+    from app.actions.configurations import ShowPermissionsConfig, ERAuthenticationType
+
+    errors = {
+        "token-400": er_400_invalid_credentials_exception,
+        "token-503-html": httpx.HTTPStatusError(
+            "Server error '503'", request=httpx.Request("POST", "https://gundi-er.pamdas.org/oauth2/token"),
+            response=httpx.Response(503, text="<html>bad gateway</html>"),
+        ),
+        "internal-500": ERClientInternalError("ER Internal Server Error ON GET .../user/me.", status_code=500, response_body="secret-body"),
+    }
+    instance = MagicMock()
+    setattr(instance, method, AsyncMock(side_effect=errors[exc]))
+    client_cls = MagicMock()
+    client_cls.return_value.__aenter__ = AsyncMock(return_value=instance)
+    client_cls.return_value.__aexit__ = AsyncMock(return_value=False)
+    mocker.patch.object(handlers_module, "AsyncERClient", client_cls)
+    auth_cfg = next(c for c in er_integration_v2_provider.configurations if c.action.value == "auth")
+    data = {**auth_cfg.data, "authentication_type": getattr(ERAuthenticationType, auth_type).value}
+    if auth_type == "USERNAME_PASSWORD":
+        data.update(username="u", password="p")
+    integration = er_integration_v2_provider.copy(update={
+        "configurations": [c.copy(update={"data": data}) if c.action.value == "auth" else c for c in er_integration_v2_provider.configurations],
+    })
+
+    response = await action_show_permissions(integration, ShowPermissionsConfig())
+
+    assert response["data"]["User Details"]["error"] == expected
+    assert "secret-body" not in str(response) and "bad gateway" not in str(response)
