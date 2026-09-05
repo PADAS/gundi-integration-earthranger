@@ -178,3 +178,16 @@ async def test_fetch_prerendered_event_schema_lets_a_login_failure_out_untouched
         await fetch_prerendered_event_schema(er_client, "https://gundi-er.pamdas.org", "rhino_carcass")
     assert info.value is er_400_invalid_credentials_exception
     assert not any(m[0] == "_handle_http_status_error" for m in er_client.method_calls)
+
+
+def test_er_site_root_requires_a_scheme():
+    """A scheme-relative URL ("//host") has a hostname but no scheme and would
+    yield "://host", which fails later as a connectivity error instead of the
+    configuration error this guard exists to raise."""
+    from app.services.errors import IntegrationConfigurationError
+    from app.actions.er_schema import er_site_root
+
+    assert er_site_root("https://gundi-er.pamdas.org:443/anything?x=1") == "https://gundi-er.pamdas.org"
+    for bad in ("//gundi-er.pamdas.org", "gundi-er.pamdas.org", "", None):
+        with pytest.raises(IntegrationConfigurationError):
+            er_site_root(bad)

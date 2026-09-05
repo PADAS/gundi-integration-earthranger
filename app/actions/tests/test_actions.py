@@ -2820,3 +2820,61 @@ async def test_show_permissions_secondary_fetch_errors_do_not_carry_the_er_respo
 
     assert response["data"][card]["error"].startswith("EarthRanger denied access")
     assert "secret-body" not in str(response)
+
+
+@pytest.mark.asyncio
+async def test_pull_events_does_not_relabel_a_gundi_failure_as_an_earthranger_verdict(
+        mocker, mock_gundi_client_v2, mock_state_manager, mock_erclient_class, mock_get_gundi_api_key,
+        mock_gundi_sensors_client_class, er_integration_v2_provider, mock_publish_event,
+        mock_gundi_client_v2_class, mock_config_manager_er_provider,
+):
+    """The pull body also talks to Gundi's Sensors API and runs connector code.
+    Translating everything raised inside it turned a revoked Gundi API key
+    into "EarthRanger rejected the credentials" and dropped the request URL
+    that showed which side failed. Only EarthRanger's own failures are
+    translated; everything else reaches the runner untouched."""
+    import json
+
+    gundi_401 = httpx.HTTPStatusError(
+        "Unauthorized", request=httpx.Request("POST", "https://sensors.api.gundiservice.org/v2/events/"),
+        response=httpx.Response(401, text='{"detail": "Invalid API key"}'),
+    )
+    mocker.patch("app.services.gundi.send_events_to_gundi", side_effect=gundi_401)
+    mocker.patch("app.actions.handlers.send_events_to_gundi", side_effect=gundi_401)
+    mocker.patch("app.services.activity_logger.publish_event", mock_publish_event)
+    mocker.patch("app.services.action_runner.publish_event", mock_publish_event)
+    mocker.patch("app.services.action_runner.config_manager", mock_config_manager_er_provider)
+    mocker.patch("app.services.action_runner._portal", mock_gundi_client_v2)
+    mocker.patch("app.actions.handlers.state_manager", mock_state_manager)
+    mocker.patch("app.actions.handlers.AsyncERClient", mock_erclient_class)
+    mocker.patch("app.services.gundi.GundiClient", mock_gundi_client_v2_class)
+    mocker.patch("app.services.gundi.GundiDataSenderClient", mock_gundi_sensors_client_class)
+    mocker.patch("app.services.gundi._get_gundi_api_key", mock_get_gundi_api_key)
+
+    response = await execute_action(integration_id=str(er_integration_v2_provider.id), action_id="pull_events")
+
+    detail = json.loads(response.body.decode())["detail"]
+    assert "EarthRanger" not in detail["error"]
+    assert "sensors.api.gundiservice.org" in detail.get("request_url", ""), "the runner keeps saying which side failed"
+
+
+@pytest.mark.asyncio
+async def test_show_permissions_still_returns_the_card_on_an_unexpected_client_error(mocker, er_integration_v2_provider):
+    """A proxy answering the token endpoint with 200 and a bogus body makes
+    erclient raise TypeError from int(auth['expires_in']); the card must still
+    come back with a fixed text rather than the action failing with a 500."""
+    from unittest.mock import AsyncMock, MagicMock
+    from app.actions import handlers as handlers_module
+    from app.actions.handlers import action_show_permissions
+    from app.actions.configurations import ShowPermissionsConfig
+
+    instance = MagicMock()
+    instance.get_me = AsyncMock(side_effect=TypeError("int() argument must be a string, ... not 'NoneType'"))
+    client_cls = MagicMock()
+    client_cls.return_value.__aenter__ = AsyncMock(return_value=instance)
+    client_cls.return_value.__aexit__ = AsyncMock(return_value=False)
+    mocker.patch.object(handlers_module, "AsyncERClient", client_cls)
+
+    response = await action_show_permissions(er_integration_v2_provider, ShowPermissionsConfig())
+
+    assert response["data"]["User Details"]["error"] == "EarthRanger returned an unexpected response"

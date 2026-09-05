@@ -12,13 +12,7 @@ import httpx
 import stamina
 from dateutil import parser as dateutil_parser
 from erclient import AsyncERClient, ERClientException, VERSION_1_0, VERSION_2_0
-from erclient.er_errors import (
-    ERClientBadCredentials,
-    ERClientBadRequest,
-    ERClientPermissionDenied,
-    ERClientRateLimitExceeded,
-    ERClientServiceUnreachable,
-)
+from erclient.er_errors import ERClientBadRequest, ERClientServiceUnreachable
 from gundi_client_v2.client import GundiClient
 from gundi_core.events import LogLevel
 from gundi_core.schemas.v2 import Integration
@@ -332,9 +326,11 @@ async def action_show_permissions(integration: Integration, action_config: ShowP
             else:
                 response["data"]["User Details"]["error"] = "Please select an valid authentication method."
                 return response
-        except _ER_CALL_FAILURES as e:
+        except Exception as e:
             # Same fixed texts as action_auth: str(e) carries ER's response
             # body or our login request, neither of which belongs in the card.
+            # A catch-all on purpose: this action's contract is to return the
+            # card with the error in it, whatever the client raised.
             response["data"]["User Details"]["error"] = _as_integration_error(e).message
             return response  # Cannot continue without a valid user/token
         response["data"]["User Details"] = _extract_user_details(er_user_details=er_user_details)
@@ -418,7 +414,7 @@ async def action_pull_events(integration: Integration, action_config: PullEvents
     updates_emitted = 0  # individual update_event calls (notes + field changes)
     events_skipped_unchanged = 0
     attachments_forwarded = 0
-    async with _translating_er_client(integration, auth_config=auth_config) as earth_ranger:
+    async with _translating_er_client(integration, auth_config=auth_config, only_er_requests=True) as earth_ranger:
         # One get_event_types() call powers two things:
         #   1) Operator-configured event_type / event_category slugs must be
         #      resolved to UUIDs before being sent in the ER filter blob —
@@ -638,7 +634,7 @@ async def action_pull_observations(integration: Integration, action_config: Pull
     start_monotonic = time.monotonic()
     soft_budget = settings.MAX_ACTION_EXECUTION_TIME * BUDGET_FRACTION
 
-    async with _translating_er_client(integration, auth_config=auth_config) as earth_ranger:
+    async with _translating_er_client(integration, auth_config=auth_config, only_er_requests=True) as earth_ranger:
         # Mutual exclusion: a long backfill may still be running when the next
         # scheduled tick fires. Without the lease, both would process the same
         # cursor units concurrently (duplicate sends + cursor races).
@@ -1432,7 +1428,7 @@ def _build_er_client(integration: Integration, auth_config: Optional[Authenticat
     if auth_config is None:
         auth_config = get_authentication_config(integration=integration)
     site_root = er_site_root(integration.base_url)
-    return AsyncERClient(
+    client = AsyncERClient(
         service_root=f"{site_root}/api/v1.0",
         username=auth_config.username or None,
         password=auth_config.password.get_secret_value() if auth_config.password else None,
@@ -1441,6 +1437,25 @@ def _build_er_client(integration: Integration, auth_config: Optional[Authenticat
         client_id="das_web_client",
         connect_timeout=DEFAULT_CONNECT_TIMEOUT_SECONDS,
     )
+    # erclient's auth_headers() tries refresh_token() first and falls back to
+    # login() only when the refresh returns False, but _token_request raises
+    # on the token endpoint's 400 instead. A stale refresh token mid-run (a
+    # backfill outlasting the access token) would then surface as a rejected
+    # login with a perfectly good stored password. Turn that one case into
+    # the False erclient expects, so the fallback login runs; a genuinely
+    # wrong password still fails there and is reported as rejected.
+    original_refresh = client.refresh_token
+
+    async def refresh_or_fall_back_to_login(*args, **kwargs):
+        try:
+            return await original_refresh(*args, **kwargs)
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code == 400:
+                return False
+            raise
+
+    client.refresh_token = refresh_or_fall_back_to_login
+    return client
 
 
 def _is_token_endpoint_url(url) -> bool:
@@ -1511,6 +1526,14 @@ def _as_integration_error(exc: Exception) -> IntegrationError:
         return IntegrationAuthError("EarthRanger rejected the credentials", status_code=status)
     if status == 403:
         return IntegrationAuthError("EarthRanger denied access with these credentials", status_code=status)
+    if status == 404:
+        # An ER without the API this action needs (no v2 event-type API, or a
+        # proxy routing only v1). A configuration problem, reported as such:
+        # forwarding the 404 would collide with the runner's own 404 for
+        # "action or configuration not found".
+        return IntegrationConfigurationError(
+            "EarthRanger does not expose the API this action needs; check the site URL and EarthRanger version."
+        )
     if status in (429, 409):  # erclient maps 409 (one observation per second per source) to its rate-limit class too
         return IntegrationRateLimitError("EarthRanger rate-limited the request", status_code=status)
     if status in (502, 503, 504):
@@ -1524,19 +1547,40 @@ def _as_integration_error(exc: Exception) -> IntegrationError:
 
 
 @asynccontextmanager
-async def _translating_er_client(integration: Integration, auth_config: Optional[AuthenticateConfig] = None):
-    """`_build_er_client`, entered, with every EarthRanger call failure raised
-    in the body coming out as an IntegrationError (_as_integration_error).
+async def _translating_er_client(
+        integration: Integration, auth_config: Optional[AuthenticateConfig] = None, *, only_er_requests: bool = False,
+):
+    """`_build_er_client`, entered, with EarthRanger call failures raised in
+    the body coming out as IntegrationErrors (_as_integration_error).
 
-    Used by the reference actions and the pull actions alike. Beyond
-    classification, this is what keeps credentials out of the activity feed on
-    a saved integration: a transport failure on the token POST escapes erclient
-    raw with `.request` intact, and the runner publishes `request.content`,
-    which is the form-encoded username and password."""
+    The client is built outside the translation: parsing the stored auth
+    config can raise a pydantic ValidationError (a ValueError), which the
+    runner renders itself and which is not an EarthRanger verdict.
+
+    The reference actions and show_permissions only talk to EarthRanger in
+    the body, so everything an ER call can raise is translated. The pull
+    actions (only_er_requests=True) also talk to Gundi's Sensors API and run
+    connector code in the body: there, only erclient's own exceptions and
+    httpx errors whose request went to the ER site are translated. Everything
+    else, a Gundi 401 or a connector bug, reaches the runner untouched, with
+    its request details and traceback, so the activity feed keeps saying
+    which side failed. The translated case still matters on that path: a
+    transport failure on the token POST escapes erclient raw with `.request`
+    intact, and the runner publishes `request.content`, which is the
+    form-encoded username and password."""
+    client = _build_er_client(integration, auth_config=auth_config)
+    site_root = er_site_root(integration.base_url)
     try:
-        async with _build_er_client(integration, auth_config=auth_config) as er_client:
+        async with client as er_client:
             yield er_client
-    except _ER_CALL_FAILURES as e:
+    except (ERClientException, httpx.HTTPError) if only_er_requests else _ER_CALL_FAILURES as e:
+        if only_er_requests and isinstance(e, httpx.HTTPError):
+            try:
+                request_url = str(e.request.url)
+            except RuntimeError:  # httpx: no request attached
+                request_url = ""
+            if not request_url.startswith(site_root):
+                raise  # Gundi (or anything else): not ours to relabel
         translated = _as_integration_error(e)
         # Local log only, and by type and status: str(e) carries ER's response
         # body or our request. No chained cause either: on a saved integration

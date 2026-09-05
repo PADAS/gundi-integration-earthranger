@@ -162,7 +162,9 @@ def er_site_root(base_url: str) -> str:
     submitted value that may carry a token in its path or query.
     """
     url_parse = urlparse(base_url or "")
-    if not url_parse.hostname:
+    if not (url_parse.scheme and url_parse.hostname):
+        # A scheme-relative "//host" has a hostname but would yield "://host",
+        # which fails later as a connectivity error instead of this one.
         raise IntegrationConfigurationError("Site URL is empty or invalid.")
     return f"{url_parse.scheme}://{url_parse.hostname}"
 

@@ -37,6 +37,7 @@ def _er(class_name, status_code):
 
 from erclient import ERClientException
 from app.services.errors import IntegrationBadResponseError
+from app.actions.handlers import _status_of
 from erclient.er_errors import ERClientBadRequest, ERClientPermissionDenied, ERClientServiceUnreachable
 
 
@@ -589,7 +590,11 @@ async def test_list_subject_types_propagates_upstream_errors(
         (_er("ERClientPermissionDenied", 403), "IntegrationAuthError", 403),
         (_er("ERClientRateLimitExceeded", 429), "IntegrationRateLimitError", 429),
         (_er("ERClientInternalError", 500), "IntegrationBadResponseError", 500),
-        (_er("ERClientNotFound", 404), "IntegrationBadResponseError", 404),
+        # A 404 from ER means the site does not expose the API this action needs
+        # (an ER without the v2 event-type API, or a proxy routing only v1). A
+        # configuration problem, reported as such; forwarding the 404 would
+        # collide with the runner's own 404 for "action or config not found".
+        (_er("ERClientNotFound", 404), "IntegrationConfigurationError", None),
         (_er("ERClientServiceUnreachable", None), "IntegrationConnectionError", None),
         # A wrong username/password never reaches ER's API: erclient's _call turns
         # the token endpoint's 400 invalid_grant into ERClientBadRequest naming
@@ -659,7 +664,7 @@ async def test_reference_actions_translate_er_client_errors(
     # formatted traceback, whose chained-cause section would render str(cause)
     # with ER's response body. The local log gets the original separately.
     assert info.value.__cause__ is None and info.value.__suppress_context__
-    if expected_type == "IntegrationConfigurationError":
+    if _status_of(er_error) == 308:
         assert "https" in str(info.value)
     # The ER response body rides on str(ERClientException); it must not
     # reach the activity log or the portal through the translated message.
@@ -775,20 +780,22 @@ async def test_list_event_type_fields_reports_a_login_failure_from_the_schema_fe
     login failure surfaces as the raw httpx error for the token URL; the
     reference-path translation must recognise it (and must not mistake a 404
     from the token URL for an unknown event type)."""
-    from app.services.errors import IntegrationAuthError, IntegrationBadResponseError
+    from app.services.errors import IntegrationAuthError, IntegrationConfigurationError
 
     mock_fetch_schema.side_effect = er_400_invalid_credentials_exception
     with pytest.raises(IntegrationAuthError) as info:
         await action_list_event_type_fields(er_integration_v2_provider, ListEventTypeFieldsQuery(event_type="rhino_carcass"))
     assert info.value.status_code == 401
 
+    # A 404 from the token URL is not "unknown event type": it is a site that
+    # does not expose the API at all, which reads as a configuration error.
     mock_fetch_schema.side_effect = httpx.HTTPStatusError(
         "Not Found", request=httpx.Request("POST", "https://not-an-er-site.example/oauth2/token"),
         response=httpx.Response(404, text=""),
     )
-    with pytest.raises(IntegrationBadResponseError) as info:
+    with pytest.raises(IntegrationConfigurationError) as info:
         await action_list_event_type_fields(er_integration_v2_provider, ListEventTypeFieldsQuery(event_type="rhino_carcass"))
-    assert info.value.status_code == 404
+    assert "event type" not in str(info.value).lower() or "does not expose" in str(info.value)
 
 
 @pytest.mark.asyncio
@@ -829,3 +836,58 @@ async def test_unknown_event_type_error_carries_no_chained_cause(er_integration_
     with pytest.raises(IntegrationConfigurationError) as info:
         await action_list_event_type_fields(er_integration_v2_provider, ListEventTypeFieldsQuery(event_type="typo"))
     assert info.value.__cause__ is None and info.value.__suppress_context__
+
+
+@pytest.mark.asyncio
+async def test_a_broken_auth_config_is_a_validation_error_not_an_earthranger_verdict(mock_er_client, er_integration_v2_provider):
+    """Building the client parses the stored auth config; a pydantic
+    ValidationError there is a ValueError and must not be swallowed into
+    "EarthRanger returned an unexpected response" when no request was made.
+    The runner renders validation errors itself."""
+    import pydantic
+
+    auth_cfg = next(c for c in er_integration_v2_provider.configurations if c.action.value == "auth")
+    integration = er_integration_v2_provider.copy(update={
+        "configurations": [c.copy(update={"data": {**c.data, "authentication_type": "bogus"}}) if c is auth_cfg else c
+                           for c in er_integration_v2_provider.configurations],
+    })
+    with pytest.raises(pydantic.ValidationError):
+        await action_list_event_types(integration, ListEventTypesQuery())
+
+
+@pytest.mark.asyncio
+async def test_a_stale_refresh_token_falls_back_to_a_fresh_login(er_integration_v2_provider):
+    """erclient's auth_headers() tries refresh_token() first and falls back to
+    login() only when the refresh returns False, but _token_request raises on
+    the token endpoint's 400 instead, so a stale refresh token mid-run (a
+    backfill outlasting the access token) surfaced as a rejected login while
+    the stored password was fine. The client we build turns that 400 into a
+    False so the fallback runs; a genuinely wrong password still fails there."""
+    from unittest.mock import AsyncMock
+    import datetime, pytz
+    from app.actions.handlers import _build_er_client
+
+    client = _build_er_client(er_integration_v2_provider)
+    client.auth = {"access_token": "old", "refresh_token": "stale", "token_type": "Bearer"}
+    client.auth_expires = pytz.utc.localize(datetime.datetime.min)  # expired: refresh first
+    stale = httpx.HTTPStatusError(
+        "400", request=httpx.Request("POST", "https://gundi-er.pamdas.org/oauth2/token"),
+        response=httpx.Response(400, text='{"error": "invalid_grant"}'),
+    )
+    grants = []
+
+    async def token_request(payload):
+        grants.append(payload["grant_type"])
+        if payload["grant_type"] == "refresh_token":
+            client.auth = None
+            raise stale
+        client.auth = {"access_token": "new", "refresh_token": "r2", "token_type": "Bearer"}
+        client.auth_expires = datetime.datetime.now(tz=datetime.timezone.utc) + datetime.timedelta(hours=1)
+        return True
+
+    client._token_request = AsyncMock(side_effect=token_request)
+
+    headers = await client.auth_headers()
+
+    assert grants == ["refresh_token", "password"]
+    assert headers["Authorization"] == "Bearer new"
