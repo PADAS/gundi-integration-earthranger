@@ -128,7 +128,9 @@ async def test_auth_action_error_text_does_not_echo_the_site_url(er_integration_
     "exc,expected",
     [
         (ERClientBadCredentials("nope", status_code=401, response_body="secret-body"), "EarthRanger rejected the credentials"),
-        (ERClientException("Failed to GET ... 500 from ER. Message: secret-body"), "EarthRanger returned an unexpected response"),
+        # A status-less plain ERClientException is erclient's network branch
+        # (the only status-less raise a handler can reach), whatever the text.
+        (ERClientException("Failed to GET ... 500 from ER. Message: secret-body"), "EarthRanger could not be reached"),
         (httpx.ConnectError("[Errno -3] Temporary failure in name resolution"), "EarthRanger could not be reached"),
         # erclient raises plain ERClientException for network failures inside _call.
         (ERClientException("Request to ER failed: [Errno 61] Connection refused"), "EarthRanger could not be reached"),
@@ -481,7 +483,7 @@ async def test_execute_show_permissions_action_with_403_on_subjectgroups(
     response_data = response.get("data")
     user_details = response_data.get("Subject Groups", {})
     exc = mock_er_403_on_subjectgroups_exception
-    assert user_details.get("error") == f"Error retrieving subject groups: {type(exc).__name__}:{exc}"
+    assert user_details.get("error") == "EarthRanger denied access with these credentials"
 
 
 # ---------------------------------------------------------------------------
@@ -2749,3 +2751,72 @@ async def test_show_permissions_reports_er_failures_with_the_same_fixed_text(
 
     assert response["data"]["User Details"]["error"] == expected
     assert "secret-body" not in str(response) and "bad gateway" not in str(response)
+
+
+@pytest.mark.asyncio
+async def test_pull_events_never_publishes_the_login_request_when_the_token_call_fails(
+        mocker, mock_gundi_client_v2, mock_state_manager, mock_erclient_class, mock_get_gundi_api_key,
+        mock_gundi_sensors_client_class, er_integration_v2_provider, mock_publish_event,
+        mock_gundi_client_v2_class, mock_config_manager_er_provider,
+):
+    """erclient's _call only maps HTTP status errors around auth_headers(); a
+    transport failure on the token POST (host unreachable, TCP timeout) escapes
+    raw with .request intact, and on a saved integration the runner publishes
+    request.content, which is the form-encoded username and password. The
+    pull actions now run inside the same translating client as the reference
+    actions, so what reaches the runner is a classified error with no request."""
+    import json
+    from gundi_core.events import IntegrationActionFailed
+
+    token_post = httpx.Request(
+        "POST", "https://gundi-er.pamdas.org/oauth2/token",
+        content=b"grant_type=password&username=u&password=SECRETPASS&client_id=das_web_client",
+    )
+    mock_erclient_class.return_value.get_events.side_effect = httpx.ConnectError("boom", request=token_post)
+    mocker.patch("app.services.activity_logger.publish_event", mock_publish_event)
+    mocker.patch("app.services.action_runner.publish_event", mock_publish_event)
+    mocker.patch("app.services.action_runner.config_manager", mock_config_manager_er_provider)
+    mocker.patch("app.services.action_runner._portal", mock_gundi_client_v2)
+    mocker.patch("app.actions.handlers.state_manager", mock_state_manager)
+    mocker.patch("app.actions.handlers.AsyncERClient", mock_erclient_class)
+    mocker.patch("app.services.gundi.GundiClient", mock_gundi_client_v2_class)
+    mocker.patch("app.services.gundi.GundiDataSenderClient", mock_gundi_sensors_client_class)
+    mocker.patch("app.services.gundi._get_gundi_api_key", mock_get_gundi_api_key)
+
+    response = await execute_action(integration_id=str(er_integration_v2_provider.id), action_id="pull_events")
+
+    body = response.body.decode()
+    assert "SECRETPASS" not in body
+    assert json.loads(body)["detail"]["error_type"] == "connectivity"
+    published = [c.kwargs.get("event") or c.args[0] for c in mock_publish_event.call_args_list]
+    failed = [e for e in published if isinstance(e, IntegrationActionFailed)]
+    assert failed and all("SECRETPASS" not in e.json() for e in failed)
+
+
+@pytest.mark.parametrize("method,card", [("get_event_types", "Event Categories"), ("get_subjectgroups", "Subject Groups")])
+@pytest.mark.asyncio
+async def test_show_permissions_secondary_fetch_errors_do_not_carry_the_er_response_body(
+        mocker, er_integration_v2_provider, get_me_response, method, card,
+):
+    from unittest.mock import AsyncMock, MagicMock
+    from erclient.er_errors import ERClientPermissionDenied
+    from app.actions import handlers as handlers_module
+    from app.actions.handlers import action_show_permissions
+    from app.actions.configurations import ShowPermissionsConfig
+
+    instance = MagicMock()
+    instance.get_me = AsyncMock(return_value=get_me_response)
+    instance.get_event_types = AsyncMock(return_value=[])
+    instance.get_subjectgroups = AsyncMock(return_value=[])
+    setattr(instance, method, AsyncMock(side_effect=ERClientPermissionDenied(
+        "ER Forbidden ON GET https://gundi-er.pamdas.org/api/v1.0/x.", status_code=403, response_body="secret-body",
+    )))
+    client_cls = MagicMock()
+    client_cls.return_value.__aenter__ = AsyncMock(return_value=instance)
+    client_cls.return_value.__aexit__ = AsyncMock(return_value=False)
+    mocker.patch.object(handlers_module, "AsyncERClient", client_cls)
+
+    response = await action_show_permissions(er_integration_v2_provider, ShowPermissionsConfig())
+
+    assert response["data"][card]["error"].startswith("EarthRanger denied access")
+    assert "secret-body" not in str(response)

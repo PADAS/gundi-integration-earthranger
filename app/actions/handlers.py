@@ -87,7 +87,7 @@ async def action_auth(integration: Integration, action_config: AuthenticateConfi
                 valid_credentials = await er_client.login()
             else:
                 return {"valid_credentials": False, "error": "Please select an valid authentication method."}
-        except (ERClientException, httpx.HTTPError) as e:
+        except _ER_CALL_FAILURES as e:
             # Same fixed messages the reference actions use. str(e) carries
             # ER's response body or our request (for login(), the password),
             # which must not come back in the result. login() itself raises
@@ -332,7 +332,7 @@ async def action_show_permissions(integration: Integration, action_config: ShowP
             else:
                 response["data"]["User Details"]["error"] = "Please select an valid authentication method."
                 return response
-        except (ERClientException, httpx.HTTPError) as e:
+        except _ER_CALL_FAILURES as e:
             # Same fixed texts as action_auth: str(e) carries ER's response
             # body or our login request, neither of which belongs in the card.
             response["data"]["User Details"]["error"] = _as_integration_error(e).message
@@ -344,7 +344,7 @@ async def action_show_permissions(integration: Integration, action_config: ShowP
         try:  # Get event categories and types from the activity/events/eventtypes endpoint
             event_types_response = _as_list(await er_client.get_event_types())
         except Exception as e:
-            response["data"]["Event Categories"]["error"] = f"Error retrieving event categories: {type(e).__name__}:{e}"
+            response["data"]["Event Categories"]["error"] = _as_integration_error(e).message
         else:
             event_types_response = [et for et in event_types_response if isinstance(et, dict)]
             response["data"]["Event Categories"] = _merge_event_categories_and_type_perms(
@@ -365,7 +365,7 @@ async def action_show_permissions(integration: Integration, action_config: ShowP
                 flat=not include_subjects_from_subgroups_in_parent
             )
         except Exception as e:
-            response["data"]["Subject Groups"]["error"] = f"Error retrieving subject groups: {type(e).__name__}:{e}"
+            response["data"]["Subject Groups"]["error"] = _as_integration_error(e).message
         else:
             response["data"]["Subject Groups"] = _extract_subject_groups(er_subject_groups=subject_groups_response)
             response["data"]["Subject Group UUIDs"] = sorted(
@@ -398,7 +398,6 @@ async def action_pull_events(integration: Integration, action_config: PullEvents
         "pull_events: integration.base_url=%r → er_ui_root=%r",
         integration.base_url, er_ui_root,
     )
-    er_client = _build_er_client(integration, auth_config=auth_config)
     # Prepare filters to extract Data Since last execution
     state = await state_manager.get_state(
         integration_id=integration_id, action_id="pull_events"
@@ -419,7 +418,7 @@ async def action_pull_events(integration: Integration, action_config: PullEvents
     updates_emitted = 0  # individual update_event calls (notes + field changes)
     events_skipped_unchanged = 0
     attachments_forwarded = 0
-    async with er_client as earth_ranger:
+    async with _translating_er_client(integration, auth_config=auth_config) as earth_ranger:
         # One get_event_types() call powers two things:
         #   1) Operator-configured event_type / event_category slugs must be
         #      resolved to UUIDs before being sent in the ER filter blob —
@@ -635,12 +634,11 @@ async def action_pull_observations(integration: Integration, action_config: Pull
     execution_timestamp = datetime.datetime.now(tz=datetime.timezone.utc).isoformat()
     pull_config = action_config
     auth_config = get_authentication_config(integration=integration)
-    er_client = _build_er_client(integration, auth_config=auth_config)
 
     start_monotonic = time.monotonic()
     soft_budget = settings.MAX_ACTION_EXECUTION_TIME * BUDGET_FRACTION
 
-    async with er_client as earth_ranger:
+    async with _translating_er_client(integration, auth_config=auth_config) as earth_ranger:
         # Mutual exclusion: a long backfill may still be running when the next
         # scheduled tick fires. Without the lease, both would process the same
         # cursor units concurrently (duplicate sends + cursor races).
@@ -1147,7 +1145,7 @@ class EventTypeMaps:
 def _failure_summary(exc: Exception) -> str:
     """Type and status only, for log lines about best-effort ER calls: str(exc)
     carries ER's response body (or, for a login failure, our request)."""
-    status = getattr(exc, "status_code", None) or getattr(getattr(exc, "response", None), "status_code", None)
+    status = _status_of(exc)
     return f"{type(exc).__name__} (status {status})" if status else type(exc).__name__
 
 
@@ -1449,79 +1447,102 @@ def _is_token_endpoint_url(url) -> bool:
     return "/oauth2/token" in str(url)
 
 
+def _status_of(exc: Exception):
+    """The HTTP status an exception carries, if any: erclient sets
+    `status_code`; raw httpx status errors carry `response.status_code`."""
+    status = getattr(exc, "status_code", None)
+    if not isinstance(status, int):
+        status = getattr(getattr(exc, "response", None), "status_code", None)
+    return status if isinstance(status, int) and not isinstance(status, bool) else None
+
+
 def _is_rejected_login(exc) -> bool:
     """The login itself was rejected, as opposed to an API call failing: the
     token endpoint answers 400 invalid_grant (or 401/403) to a wrong username
-    or password. Through erclient's _call it arrives as ERClientBadRequest
-    whose message names the token URL; from a bare login()/auth_headers() it
-    is the raw httpx error. A 5xx or 429 from the token endpoint is not a
-    rejection and is classified like any other status."""
+    or password. Through erclient's _call it arrives as ERClientBadRequest whose
+    message (args[0], not str(), which appends ER's response body) names the
+    token URL; from a bare login()/auth_headers() it is the raw httpx error for
+    that URL. A 5xx or 429 from the token endpoint is not a rejection."""
     if isinstance(exc, httpx.HTTPStatusError):
         return _is_token_endpoint_url(exc.request.url) and exc.response.status_code in (400, 401, 403)
-    return isinstance(exc, ERClientBadRequest) and _is_token_endpoint_url(str(exc))
+    return (
+        isinstance(exc, ERClientBadRequest)
+        and bool(exc.args) and _is_token_endpoint_url(exc.args[0])
+    )
+
+
+# Exceptions an EarthRanger call can raise. erclient's own hierarchy; raw
+# httpx errors from login()/auth_headers(), which run outside its _call
+# wrapper; and the ValueError/KeyError erclient itself raises on realistic
+# failures (HTTPStatus(...).phrase on a CDN's 520, response.json() on a 200
+# HTML page, auth["expires_in"] missing from a token body).
+_ER_CALL_FAILURES = (ERClientException, httpx.HTTPError, ValueError, KeyError)
 
 
 def _as_integration_error(exc: Exception) -> IntegrationError:
-    """Translate an erclient (or raw httpx) failure into the runner's classified errors.
+    """Translate an EarthRanger call failure into the runner's classified errors.
 
     erclient's exceptions are not IntegrationError subclasses and carry no
     `.response`, so the runner cannot classify them: on the ephemeral path
     the portal wizard saw `500 {"error": "ERClientBadCredentials"}` and could
-    not tell bad credentials from a broken site. login() and auth_headers()
-    run outside erclient's _call wrapper and raise raw httpx errors, and a
-    network failure inside _call is a plain ERClientException with no status,
-    so those shapes are handled too. The messages are fixed text on purpose:
-    str(exc) carries ER's response body, or our request (for the login, the
-    password), which must reach neither the activity log nor the portal.
+    not tell bad credentials from a broken site. One table keyed by the HTTP
+    status serves every shape (erclient, raw httpx, erclient's own
+    ValueError/KeyError), so the same ER verdict reads the same whichever
+    path it took. The messages are fixed text on purpose: str(exc) carries
+    ER's response body, or our request (for the login, the password), which
+    must reach neither the activity log nor the portal.
     """
-    # A rejected login is reported as 401 whatever the token endpoint said
-    # (it says 400 invalid_grant): the portal treats 401/403 as a credential
+    # A rejected login is reported as 401 whatever the token endpoint said (it
+    # says 400 invalid_grant): the portal treats 401/403 as a credential
     # rejection and shows the operator that, which is the point.
     if _is_rejected_login(exc):
         return IntegrationAuthError("EarthRanger rejected the credentials", status_code=401)
-    if isinstance(exc, httpx.TransportError):
-        return IntegrationConnectionError("EarthRanger could not be reached")
-    if isinstance(exc, httpx.HTTPStatusError):
-        status = exc.response.status_code
-        if status in (401, 403):
-            return IntegrationAuthError("EarthRanger rejected the credentials", status_code=status)
-        if status == 429:
-            return IntegrationRateLimitError("EarthRanger rate-limited the request", status_code=status)
-        if status in (502, 503, 504):
-            return IntegrationConnectionError("EarthRanger could not be reached", status_code=status)
-        return IntegrationBadResponseError("EarthRanger returned an unexpected response", status_code=status)
-    if isinstance(exc, httpx.HTTPError):
-        return IntegrationBadResponseError("EarthRanger returned an unexpected response")
-    status = exc.status_code if isinstance(getattr(exc, "status_code", None), int) else None
-    if isinstance(exc, ERClientBadCredentials):
-        return IntegrationAuthError("EarthRanger rejected the credentials", status_code=status or 401)
-    if isinstance(exc, ERClientPermissionDenied):
-        return IntegrationAuthError("EarthRanger denied access with these credentials", status_code=status or 403)
-    if isinstance(exc, ERClientRateLimitExceeded):
-        return IntegrationRateLimitError("EarthRanger rate-limited the request", status_code=status or 429)
-    if isinstance(exc, ERClientServiceUnreachable) or str(exc).startswith("Request to ER failed"):
+    status = _status_of(exc)
+    if isinstance(exc, ERClientServiceUnreachable):
         return IntegrationConnectionError("EarthRanger could not be reached", status_code=status)
+    if isinstance(exc, httpx.TransportError) or (type(exc) is ERClientException and status is None):
+        # httpx never escapes _call, so post-login network failures arrive as
+        # erclient's status-less plain ERClientException (its network branch is
+        # the only status-less raise a reference action can reach).
+        return IntegrationConnectionError("EarthRanger could not be reached")
+    if status is None:
+        return IntegrationBadResponseError("EarthRanger returned an unexpected response")
+    if status == 401:
+        return IntegrationAuthError("EarthRanger rejected the credentials", status_code=status)
+    if status == 403:
+        return IntegrationAuthError("EarthRanger denied access with these credentials", status_code=status)
+    if status in (429, 409):  # erclient maps 409 (one observation per second per source) to its rate-limit class too
+        return IntegrationRateLimitError("EarthRanger rate-limited the request", status_code=status)
+    if status in (502, 503, 504):
+        return IntegrationConnectionError("EarthRanger could not be reached", status_code=status)
+    if 300 <= status < 400:
+        # erclient's httpx client does not follow redirects, so an http:// site
+        # URL surfaces as the 3xx to https. A configuration problem, not a
+        # provider verdict; the wizard cannot classify a 3xx status either.
+        return IntegrationConfigurationError("Site URL redirects elsewhere; use the site's https URL.")
     return IntegrationBadResponseError("EarthRanger returned an unexpected response", status_code=status)
 
 
 @asynccontextmanager
-async def _reference_er_client(integration: Integration):
-    """`_build_er_client` for the reference actions: erclient failures raised
-    in the body come out as IntegrationError subclasses (_as_integration_error)."""
+async def _translating_er_client(integration: Integration, auth_config: Optional[AuthenticateConfig] = None):
+    """`_build_er_client`, entered, with every EarthRanger call failure raised
+    in the body coming out as an IntegrationError (_as_integration_error).
+
+    Used by the reference actions and the pull actions alike. Beyond
+    classification, this is what keeps credentials out of the activity feed on
+    a saved integration: a transport failure on the token POST escapes erclient
+    raw with `.request` intact, and the runner publishes `request.content`,
+    which is the form-encoded username and password."""
     try:
-        async with _build_er_client(integration) as er_client:
+        async with _build_er_client(integration, auth_config=auth_config) as er_client:
             yield er_client
-    except (ERClientException, httpx.HTTPError) as e:
+    except _ER_CALL_FAILURES as e:
         translated = _as_integration_error(e)
         # Local log only, and by type and status: str(e) carries ER's response
         # body or our request. No chained cause either: on a saved integration
         # the runner publishes the formatted traceback, whose chained-cause
         # section would render str(e) into the activity feed.
-        logger.info(
-            f"EarthRanger call failed on the reference path: {type(e).__name__} "
-            f"(status {getattr(e, 'status_code', None) or getattr(getattr(e, 'response', None), 'status_code', None)}) "
-            f"-> {type(translated).__name__}"
-        )
+        logger.info(f"EarthRanger call failed: {_failure_summary(e)} -> {type(translated).__name__}")
         raise translated from None
 
 
@@ -1562,7 +1583,7 @@ async def action_list_event_types(integration: Integration, action_config: ListE
     grouped by ER event category (falling back to no group when the
     category has no known display name), sorted by group then label.
     """
-    async with _reference_er_client(integration) as earth_ranger:
+    async with _translating_er_client(integration) as earth_ranger:
         maps = await _fetch_event_type_maps(earth_ranger, strict_v2=True)
         category_display = await _fetch_category_display_map(earth_ranger)
 
@@ -1597,10 +1618,12 @@ async def _fetch_event_type_fields(er_client, base_url: str, event_type: str):
     except httpx.HTTPStatusError as e:
         if e.response.status_code == 404 and not _is_token_endpoint_url(e.request.url):
             logger.info(f"EarthRanger has no v2 schema for event type '{event_type}'.")
+            # from None: the published traceback would otherwise render the
+            # chained 404 with the ER host and the slug the message omits.
             raise IntegrationConfigurationError(
                 "Event type not found in EarthRanger, or it is a classic v1 event type "
                 "(reference actions support v2 event types only)."
-            ) from e
+            ) from None
         raise
     return parse_er_event_schema(raw_schema)
 
@@ -1613,7 +1636,7 @@ async def action_list_event_categories(integration: Integration, action_config: 
     propagate so the portal shows its "couldn't load options" degrade
     instead of silently offering an empty list.
     """
-    async with _reference_er_client(integration) as earth_ranger:
+    async with _translating_er_client(integration) as earth_ranger:
         categories = await earth_ranger.get_event_categories()
 
     options = [
@@ -1638,7 +1661,7 @@ async def action_list_subject_types(integration: Integration, action_config: Lis
     propagate so the portal shows its "couldn't load options" degrade
     instead of silently offering an empty list.
     """
-    async with _reference_er_client(integration) as earth_ranger:
+    async with _translating_er_client(integration) as earth_ranger:
         groups = await earth_ranger.get_subjectgroups(include_inactive=True, flat=True)
 
     type_by_subtype: Dict[str, str] = {}
@@ -1677,7 +1700,7 @@ async def action_list_subject_types(integration: Integration, action_config: Lis
 
 async def action_list_event_type_fields(integration: Integration, action_config: ListEventTypeFieldsQuery):
     """Reference action: field keys defined on one ER event type's schema."""
-    async with _reference_er_client(integration) as earth_ranger:
+    async with _translating_er_client(integration) as earth_ranger:
         fields = await _fetch_event_type_fields(
             earth_ranger, integration.base_url, action_config.event_type
         )
@@ -1699,7 +1722,7 @@ async def action_list_event_field_values(integration: Integration, action_config
     Non-enum fields legitimately return an empty options list — they are
     free-text in ER, so there is nothing to suggest.
     """
-    async with _reference_er_client(integration) as earth_ranger:
+    async with _translating_er_client(integration) as earth_ranger:
         fields = await _fetch_event_type_fields(
             earth_ranger, integration.base_url, action_config.event_type
         )

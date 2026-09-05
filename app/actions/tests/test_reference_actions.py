@@ -619,6 +619,22 @@ async def test_list_subject_types_propagates_upstream_errors(
                                response=httpx.Response(500, text="secret-body")),
          "IntegrationBadResponseError", 500),
         (httpx.ConnectError("[Errno -3] Temporary failure in name resolution"), "IntegrationConnectionError", None),
+        # erclient itself raises these on realistic failures: ValueError from
+        # HTTPStatus(520).phrase behind a CDN, JSONDecodeError/KeyError on a 200
+        # non-JSON body or a token body without expires_in. Neither erclient nor
+        # httpx types, so they escaped as a bare 500 "ValueError".
+        (ValueError("520 is not a valid HTTPStatus"), "IntegrationBadResponseError", None),
+        (KeyError("expires_in"), "IntegrationBadResponseError", None),
+        # Any status-less plain ERClientException from the client is its network
+        # branch (structural, not a match on the log wording).
+        (ERClientException("ER request failed: connection refused"), "IntegrationConnectionError", None),
+        # A body that merely mentions the token URL is not a rejected login.
+        (ERClientBadRequest("ER Bad Request ON GET https://gundi-er.pamdas.org/api/v1.0/activity/events.",
+                            status_code=400, response_body='{"detail": "see /oauth2/token"}'), "IntegrationBadResponseError", 400),
+        # An http:// site URL gets a redirect to https; that is a configuration
+        # problem, not a provider verdict (and the wizard cannot classify a 3xx).
+        (ERClientException("ER Permanent Redirect ON GET http://gundi-er.pamdas.org/api/v1.0/x.", status_code=308,
+                           response_body=""), "IntegrationConfigurationError", None),
     ],
 )
 @pytest.mark.asyncio
@@ -643,6 +659,8 @@ async def test_reference_actions_translate_er_client_errors(
     # formatted traceback, whose chained-cause section would render str(cause)
     # with ER's response body. The local log gets the original separately.
     assert info.value.__cause__ is None and info.value.__suppress_context__
+    if expected_type == "IntegrationConfigurationError":
+        assert "https" in str(info.value)
     # The ER response body rides on str(ERClientException); it must not
     # reach the activity log or the portal through the translated message.
     assert "response_body" not in str(info.value) and "secret-body" not in str(info.value)
@@ -771,3 +789,43 @@ async def test_list_event_type_fields_reports_a_login_failure_from_the_schema_fe
     with pytest.raises(IntegrationBadResponseError) as info:
         await action_list_event_type_fields(er_integration_v2_provider, ListEventTypeFieldsQuery(event_type="rhino_carcass"))
     assert info.value.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_a_403_reads_the_same_whichever_path_it_took(mock_er_client, er_integration_v2_provider, mock_fetch_schema):
+    """One status table: a 403 through erclient's _call and a raw httpx 403
+    from the schema fetch describe the same ER verdict with the same words."""
+    from app.services.errors import IntegrationAuthError
+    from app.actions.configurations import ListEventCategoriesQuery
+    from app.actions.handlers import action_list_event_categories
+
+    mock_er_client.get_event_categories = AsyncMock(side_effect=ERClientPermissionDenied(
+        "ER Forbidden ON GET .../categories.", status_code=403, response_body="",
+    ))
+    with pytest.raises(IntegrationAuthError) as via_call:
+        await action_list_event_categories(er_integration_v2_provider, ListEventCategoriesQuery())
+
+    mock_fetch_schema.side_effect = httpx.HTTPStatusError(
+        "Forbidden", request=httpx.Request("GET", "https://gundi-er.pamdas.org/api/v2.0/activity/eventtypes/x/schema"),
+        response=httpx.Response(403, text=""),
+    )
+    with pytest.raises(IntegrationAuthError) as raw:
+        await action_list_event_type_fields(er_integration_v2_provider, ListEventTypeFieldsQuery(event_type="x"))
+
+    assert str(via_call.value) == str(raw.value) == "EarthRanger denied access with these credentials"
+    assert via_call.value.status_code == raw.value.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_unknown_event_type_error_carries_no_chained_cause(er_integration_v2_provider, mock_er_client, mock_fetch_schema):
+    """The published traceback would otherwise render the chained httpx 404
+    with the ER host and the submitted slug that the message itself omits."""
+    from app.services.errors import IntegrationConfigurationError
+
+    mock_fetch_schema.side_effect = httpx.HTTPStatusError(
+        "Not Found", request=httpx.Request("GET", "https://gundi-er.pamdas.org/api/v2.0/activity/eventtypes/typo/schema"),
+        response=httpx.Response(404, text=""),
+    )
+    with pytest.raises(IntegrationConfigurationError) as info:
+        await action_list_event_type_fields(er_integration_v2_provider, ListEventTypeFieldsQuery(event_type="typo"))
+    assert info.value.__cause__ is None and info.value.__suppress_context__
