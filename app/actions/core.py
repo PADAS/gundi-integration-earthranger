@@ -66,8 +66,10 @@ class ReferenceActionConfiguration(ActionConfiguration):
 
     Reference actions are stateless — they read the integration's auth config
     but store no configuration of their own; callers (the Gundi portal)
-    supply query params via config_overrides. They return a
-    ReferenceDataResponse dict. See
+    supply query params via config_overrides. The runner therefore executes
+    them without a stored config row, and they are one of the two action
+    types (with auth) allowed to run ephemerally against a draft integration.
+    Handlers return a ReferenceDataResponse dict. See
     docs/superpowers/specs/2026-07-31-reference-data-config-ui-design.md.
     """
 

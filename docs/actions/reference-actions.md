@@ -88,14 +88,13 @@ come from whichever site(s) define that type.
 ## Error semantics
 
 - Unknown `event_type` or `field_key` → the handler raises `ValueError`, which the runner turns into an
-  error response (never a leaked config, per the reference-action error carve-out — see
-  [Configuration reference](../configuration.md#register_reference_actions)). A classic v1 `event_type`
+  error response (never a leaked config, per the reference-action error carve-out). A classic v1 `event_type`
   passed to `list_event_type_fields` / `list_event_field_values` surfaces the same way (ER's 404), with
   wording that calls out the v1/v2 distinction rather than implying the slug is simply unknown.
 - Any other upstream ER failure (e.g. a 5xx) propagates unchanged.
 
-## Registration is gated
+## Registration
 
-These actions register with `"type": "reference"`, a type the Gundi API doesn't accept yet. They stay out
-of self-registration entirely until `REGISTER_REFERENCE_ACTIONS` is turned on — see
-[Configuration reference](../configuration.md#register_reference_actions).
+These actions register with `"type": "reference"` whenever the runner self-registers. Earlier builds gated
+this behind `REGISTER_REFERENCE_ACTIONS` until the Gundi API accepted the type; that gate is gone — see
+[Configuration reference](../configuration.md#reference-action-registration).
