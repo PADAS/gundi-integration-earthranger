@@ -159,3 +159,28 @@ async def test_fetch_prerendered_event_schema_rejects_empty_base_url():
     er_client = AsyncMock()
     with pytest.raises(IntegrationConfigurationError, match="Site URL is empty or invalid"):
         await fetch_prerendered_event_schema(er_client, "", "rhino_carcass")
+
+
+@pytest.mark.asyncio
+async def test_fetch_prerendered_event_schema_maps_a_login_failure_like_the_client_does(er_400_invalid_credentials_exception):
+    """fetch_prerendered_event_schema calls er_client.auth_headers() outside
+    erclient's _call wrapper, so a username/password login failure escaped as a
+    raw httpx.HTTPStatusError for the token URL. Nothing downstream translated
+    it, and on a saved integration the runner would publish the request body,
+    which for the token POST is the plaintext password. Route it through the
+    client's own status-error mapping so it comes out as an ERClientException
+    like every other failure."""
+    from unittest.mock import AsyncMock
+    from erclient import AsyncERClient
+    from erclient.er_errors import ERClientBadRequest
+
+    er_client = AsyncERClient(
+        service_root="https://gundi-er.pamdas.org/api/v1.0", username="u", password="wrong",
+        token_url="https://gundi-er.pamdas.org/oauth2/token", client_id="das_web_client",
+    )
+    er_client.auth_headers = AsyncMock(side_effect=er_400_invalid_credentials_exception)
+
+    with pytest.raises(ERClientBadRequest) as info:
+        await fetch_prerendered_event_schema(er_client, "https://gundi-er.pamdas.org", "rhino_carcass")
+    assert info.value.status_code == 400
+    assert "oauth2/token" in str(info.value)

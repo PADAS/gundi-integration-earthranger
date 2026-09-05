@@ -151,23 +151,38 @@ def parse_er_event_schema(raw: dict) -> List[ERField]:
     return fields
 
 
+def er_site_root(base_url: str) -> str:
+    """`scheme://hostname` of an EarthRanger site URL (dropping any port), the
+    convention every AsyncERClient construction site uses.
+
+    Schemeless or empty base_urls do occur in Gundi (see the _ensure_scheme
+    guard in gundi-integration-cmore's CLI); urlparse leaves hostname None for
+    them, which would otherwise build a "https://None/..." URL. That is a
+    configuration error, and the URL itself stays out of the message: it is a
+    submitted value that may carry a token in its path or query.
+    """
+    url_parse = urlparse(base_url or "")
+    if not url_parse.hostname:
+        raise IntegrationConfigurationError("Site URL is empty or invalid.")
+    return f"{url_parse.scheme}://{url_parse.hostname}"
+
+
 async def fetch_prerendered_event_schema(er_client, base_url: str, event_type: str) -> dict:
     """GET the v2 pre-rendered event-type schema (pre_render + s_format=enum inline
     each choice field's values, so no separate choices fetch is needed). erclient
     doesn't model this /schema sub-resource, so we call it directly with the
     client's own auth headers (works for both token and username/password auth)."""
-    url_parse = urlparse(base_url)
-    if not url_parse.hostname:
-        # Schemeless base_urls do occur in Gundi (see the _ensure_scheme guard in
-        # gundi-integration-cmore's CLI); urlparse leaves hostname None for them,
-        # which would otherwise build a "https://None/..." URL. A configuration
-        # error, worded like handlers._build_er_client's; the URL is a submitted
-        # value and stays out of the message.
-        raise IntegrationConfigurationError("Site URL is empty or invalid.")
-    # scheme://hostname (dropping any port) is the deliberate convention — it
-    # matches every AsyncERClient construction site in handlers.py.
-    url = f"{url_parse.scheme}://{url_parse.hostname}/api/v2.0/activity/eventtypes/{quote(event_type, safe='')}/schema"
-    headers = await er_client.auth_headers()
+    url = f"{er_site_root(base_url)}/api/v2.0/activity/eventtypes/{quote(event_type, safe='')}/schema"
+    try:
+        headers = await er_client.auth_headers()
+    except httpx.HTTPStatusError as e:
+        # auth_headers() runs outside erclient's _call wrapper here, so a login
+        # failure (the token endpoint's 400 invalid_grant, or a 401) would
+        # escape as a raw httpx error carrying the login request body, which
+        # for a username/password integration is the password. Apply the same
+        # mapping _call does, so it comes out as an ERClientException like
+        # every other failure and is translated downstream.
+        er_client._handle_http_status_error("oauth2/token", "POST", e, request_url=str(e.request.url))
     async with httpx.AsyncClient(headers=headers, timeout=30.0) as http:
         resp = await http.get(url, params={"pre_render": "true", "s_format": "enum"})
         resp.raise_for_status()

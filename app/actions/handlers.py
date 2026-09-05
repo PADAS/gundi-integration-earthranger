@@ -14,6 +14,7 @@ from dateutil import parser as dateutil_parser
 from erclient import AsyncERClient, ERClientException, VERSION_1_0, VERSION_2_0
 from erclient.er_errors import (
     ERClientBadCredentials,
+    ERClientBadRequest,
     ERClientPermissionDenied,
     ERClientRateLimitExceeded,
     ERClientServiceUnreachable,
@@ -25,7 +26,7 @@ from app import settings
 from app.services.utils import find_config_for_action
 from app.services.state import IntegrationStateManager
 from .core import ReferenceDataResponse, ReferenceOption
-from .er_schema import fetch_prerendered_event_schema, parse_er_event_schema
+from .er_schema import er_site_root, fetch_prerendered_event_schema, parse_er_event_schema
 from .configurations import AuthenticateConfig, EventFilterDateField, PullObservationsConfig, PullEventsConfig, \
     ERAuthenticationType, ShowPermissionsConfig, ListEventTypesQuery, ListEventTypeFieldsQuery, \
     ListEventFieldValuesQuery, ListEventCategoriesQuery, ListSubjectTypesQuery
@@ -66,18 +67,18 @@ ER_EVENT_FILTER_KEY_BY_DATE_FIELD = {
 
 async def action_auth(integration: Integration, action_config: AuthenticateConfig):
     auth_config = action_config
-    url_parse = urlparse(integration.base_url)
-    if not url_parse.hostname:
+    try:
+        site_root = er_site_root(integration.base_url)
+    except IntegrationConfigurationError as e:
         # action_auth reports failures inside a normal result, which nothing in
-        # the runner redacts, so the URL (a submitted value that may carry a
-        # token in its path or query) stays out of the message.
-        return {"valid_credentials": False, "error": "Site URL is empty or invalid."}
+        # the runner redacts; the helper's message keeps the URL out.
+        return {"valid_credentials": False, "error": e.message}
     async with AsyncERClient(
-            service_root=f"{url_parse.scheme}://{url_parse.hostname}/api/v1.0",
+            service_root=f"{site_root}/api/v1.0",
             username=auth_config.username,
             password=auth_config.password.get_secret_value() if auth_config.password else None,
             token=auth_config.token.get_secret_value() if auth_config.token else None,
-            token_url=f"{url_parse.scheme}://{url_parse.hostname}/oauth2/token",
+            token_url=f"{site_root}/oauth2/token",
             client_id="das_web_client",
             connect_timeout=DEFAULT_CONNECT_TIMEOUT_SECONDS,
     ) as er_client:
@@ -94,14 +95,13 @@ async def action_auth(integration: Integration, action_config: AuthenticateConfi
                 valid_credentials = await er_client.login()
             else:
                 return {"valid_credentials": False, "error": "Please select an valid authentication method."}
-        except ERClientException as e:
-            # Same fixed messages the reference actions use: str(e) carries
-            # ER's response body, which must not come back in the result.
+        except (ERClientException, httpx.HTTPError) as e:
+            # Same fixed messages the reference actions use. str(e) carries
+            # ER's response body or our request (for login(), the password),
+            # which must not come back in the result. login() itself raises
+            # raw httpx errors (it runs outside erclient's _call), so the
+            # translation handles both shapes.
             return {"valid_credentials": False, "error": _as_integration_error(e).message}
-        except httpx.HTTPError:
-            # The exception text carries the request; the source status, if
-            # any, is not what the operator needs here.
-            return {"valid_credentials": False, "error": "Could not reach EarthRanger."}
         return {"valid_credentials": valid_credentials}
 
 
@@ -321,17 +321,18 @@ async def action_show_permissions(integration: Integration, action_config: ShowP
       }
     }
     auth_config = get_authentication_config(integration=integration)
-    url_parse = urlparse(integration.base_url)
-    if not url_parse.hostname:
-        response["data"]["User Details"]["error"] = f"Site URL is empty or invalid: '{integration.base_url}'"
+    try:
+        site_root = er_site_root(integration.base_url)
+    except IntegrationConfigurationError as e:
+        response["data"]["User Details"]["error"] = e.message
         return response
 
     async with AsyncERClient(
-            service_root=f"{url_parse.scheme}://{url_parse.hostname}/api/v1.0",
+            service_root=f"{site_root}/api/v1.0",
             username=auth_config.username,
             password=auth_config.password.get_secret_value() if auth_config.password else None,
             token=auth_config.token.get_secret_value() if auth_config.token else None,
-            token_url=f"{url_parse.scheme}://{url_parse.hostname}/oauth2/token",
+            token_url=f"{site_root}/oauth2/token",
             client_id="das_web_client",
             connect_timeout=DEFAULT_CONNECT_TIMEOUT_SECONDS,
     ) as er_client:
@@ -422,12 +423,13 @@ async def action_pull_events(integration: Integration, action_config: PullEvents
         "pull_events: integration.base_url=%r → er_ui_root=%r",
         integration.base_url, er_ui_root,
     )
+    site_root = er_site_root(integration.base_url)
     er_client = AsyncERClient(
-        service_root=f"{url_parse.scheme}://{url_parse.hostname}/api/v1.0",
+        service_root=f"{site_root}/api/v1.0",
         username=auth_config.username or None,
         password=auth_config.password.get_secret_value() if auth_config.password else None,
         token=auth_config.token.get_secret_value() if auth_config.token else None,
-        token_url=f"{url_parse.scheme}://{url_parse.hostname}/oauth2/token",
+        token_url=f"{site_root}/oauth2/token",
         client_id="das_web_client",
         connect_timeout=DEFAULT_CONNECT_TIMEOUT_SECONDS,
     )
@@ -667,13 +669,13 @@ async def action_pull_observations(integration: Integration, action_config: Pull
     execution_timestamp = datetime.datetime.now(tz=datetime.timezone.utc).isoformat()
     pull_config = action_config
     auth_config = get_authentication_config(integration=integration)
-    url_parse = urlparse(integration.base_url)
+    site_root = er_site_root(integration.base_url)
     er_client = AsyncERClient(
-        service_root=f"{url_parse.scheme}://{url_parse.hostname}/api/v1.0",
+        service_root=f"{site_root}/api/v1.0",
         username=auth_config.username or None,
         password=auth_config.password.get_secret_value() if auth_config.password else None,
         token=auth_config.token.get_secret_value() if auth_config.token else None,
-        token_url=f"{url_parse.scheme}://{url_parse.hostname}/oauth2/token",
+        token_url=f"{site_root}/oauth2/token",
         client_id="das_web_client",
         connect_timeout=DEFAULT_CONNECT_TIMEOUT_SECONDS,
     )
@@ -1185,12 +1187,7 @@ class EventTypeMaps:
     v2_slugs: set = field(default_factory=set)
 
 
-# erclient failures that mean "these credentials don't work here", as opposed
-# to one endpoint being unavailable.
-_ER_AUTH_ERRORS = (ERClientBadCredentials, ERClientPermissionDenied)
-
-
-async def _fetch_event_type_maps(er_client, *, propagate_auth_errors: bool = False) -> EventTypeMaps:
+async def _fetch_event_type_maps(er_client, *, strict_v2: bool = False) -> EventTypeMaps:
     """Build slug→display, slug→type_id, and category_slug→category_id maps.
 
     ER's EventType has a ``version`` field — each type is exclusively v1 OR
@@ -1209,17 +1206,18 @@ async def _fetch_event_type_maps(er_client, *, propagate_auth_errors: bool = Fal
     All three fetches are best-effort and logged independently — a 403 on
     one doesn't break the others. If everything fails, all maps are empty;
     downstream callers treat that as the "skip the pull" signal. The
-    reference path passes propagate_auth_errors=True: there, an empty result
-    on bad credentials would render as an empty dropdown rather than as
-    "Authentication failed", so auth failures escape instead.
+    reference path (list_event_types) passes strict_v2=True: it offers only
+    v2 slugs, so the v2 fetch is load-bearing there and any failure of it
+    (bad credentials, a 5xx, a rate limit, a network error) propagates, where
+    an empty result would render as an empty dropdown with a 200. The v1 and
+    categories fetches only enrich grouping and stay best-effort, so a role
+    denied on the legacy endpoint still gets its dropdown.
     """
     maps = EventTypeMaps()
 
     try:
         v1_types = await er_client.get_event_types(version=VERSION_1_0)
     except Exception as e:
-        if propagate_auth_errors and isinstance(e, _ER_AUTH_ERRORS):
-            raise
         logger.warning(
             "Could not fetch ER v1 event types: %s: %s. "
             "Slug→UUID resolution will fall back to v2-only results.",
@@ -1233,7 +1231,7 @@ async def _fetch_event_type_maps(er_client, *, propagate_auth_errors: bool = Fal
     try:
         v2_types = await er_client.get_event_types(version=VERSION_2_0)
     except Exception as e:
-        if propagate_auth_errors and isinstance(e, _ER_AUTH_ERRORS):
+        if strict_v2:
             raise
         logger.warning(
             "Could not fetch ER v2 event types: %s: %s. "
@@ -1253,8 +1251,6 @@ async def _fetch_event_type_maps(er_client, *, propagate_auth_errors: bool = Fal
         try:
             categories = await er_client.get_event_categories()
         except Exception as e:
-            if propagate_auth_errors and isinstance(e, _ER_AUTH_ERRORS):
-                raise
             logger.warning(
                 "Could not fetch ER event categories: %s: %s. "
                 "event_category filter slugs will not resolve.",
@@ -1469,42 +1465,60 @@ def _build_er_client(integration: Integration) -> AsyncERClient:
     """Standard AsyncERClient construction shared by the reference actions
     (mirrors action_pull_events / action_pull_observations)."""
     auth_config = get_authentication_config(integration=integration)
-    url_parse = urlparse(integration.base_url)
-    if not url_parse.hostname:
-        # Schemeless/empty base_urls occur in Gundi; without this guard the
-        # client would be built against "https://None/...". Same wording as
-        # action_auth's validation; the URL itself is a submitted value and
-        # stays out of the message (IntegrationConfigurationError contract).
-        raise IntegrationConfigurationError("Site URL is empty or invalid.")
+    site_root = er_site_root(integration.base_url)  # raises IntegrationConfigurationError, URL kept out
     return AsyncERClient(
-        service_root=f"{url_parse.scheme}://{url_parse.hostname}/api/v1.0",
+        service_root=f"{site_root}/api/v1.0",
         username=auth_config.username or None,
         password=auth_config.password.get_secret_value() if auth_config.password else None,
         token=auth_config.token.get_secret_value() if auth_config.token else None,
-        token_url=f"{url_parse.scheme}://{url_parse.hostname}/oauth2/token",
+        token_url=f"{site_root}/oauth2/token",
         client_id="das_web_client",
         connect_timeout=DEFAULT_CONNECT_TIMEOUT_SECONDS,
     )
 
 
-def _as_integration_error(exc: ERClientException) -> IntegrationError:
-    """Translate an erclient failure into the runner's classified errors.
+def _is_token_endpoint_failure(exc) -> bool:
+    """A failure of the login itself, as opposed to an API call: the token
+    endpoint answers 400 invalid_grant to a wrong username/password. Through
+    erclient's _call it arrives as ERClientBadRequest whose message names the
+    token URL; from a bare login()/auth_headers() it is the raw httpx error."""
+    if isinstance(exc, httpx.HTTPStatusError):
+        return "/oauth2/token" in str(exc.request.url)
+    return isinstance(exc, ERClientBadRequest) and "/oauth2/token" in str(exc)
+
+
+def _as_integration_error(exc: Exception) -> IntegrationError:
+    """Translate an erclient (or raw httpx) failure into the runner's classified errors.
 
     erclient's exceptions are not IntegrationError subclasses and carry no
     `.response`, so the runner cannot classify them: on the ephemeral path
     the portal wizard saw `500 {"error": "ERClientBadCredentials"}` and could
-    not tell bad credentials from a broken site. The message is fixed text on
-    purpose: str(exc) carries ER's response body, which must reach neither
-    the activity log nor the portal.
+    not tell bad credentials from a broken site. login() and auth_headers()
+    run outside erclient's _call wrapper and raise raw httpx errors, and a
+    network failure inside _call is a plain ERClientException with no status,
+    so those shapes are handled too. The messages are fixed text on purpose:
+    str(exc) carries ER's response body, or our request (for the login, the
+    password), which must reach neither the activity log nor the portal.
     """
-    status = exc.status_code if isinstance(exc.status_code, int) else None
-    if isinstance(exc, ERClientBadCredentials):
+    if isinstance(exc, httpx.TransportError):
+        return IntegrationConnectionError("EarthRanger could not be reached")
+    if isinstance(exc, httpx.HTTPStatusError):
+        status = exc.response.status_code
+        if _is_token_endpoint_failure(exc) or status in (401, 403):
+            return IntegrationAuthError("EarthRanger rejected the credentials", status_code=status)
+        if status == 429:
+            return IntegrationRateLimitError("EarthRanger rate-limited the request", status_code=status)
+        return IntegrationBadResponseError("EarthRanger returned an unexpected response", status_code=status)
+    if isinstance(exc, httpx.HTTPError):
+        return IntegrationBadResponseError("EarthRanger returned an unexpected response")
+    status = exc.status_code if isinstance(getattr(exc, "status_code", None), int) else None
+    if isinstance(exc, ERClientBadCredentials) or _is_token_endpoint_failure(exc):
         return IntegrationAuthError("EarthRanger rejected the credentials", status_code=status or 401)
     if isinstance(exc, ERClientPermissionDenied):
         return IntegrationAuthError("EarthRanger denied access with these credentials", status_code=status or 403)
     if isinstance(exc, ERClientRateLimitExceeded):
         return IntegrationRateLimitError("EarthRanger rate-limited the request", status_code=status or 429)
-    if isinstance(exc, ERClientServiceUnreachable):
+    if isinstance(exc, ERClientServiceUnreachable) or str(exc).startswith("Request to ER failed"):
         return IntegrationConnectionError("EarthRanger could not be reached", status_code=status)
     return IntegrationBadResponseError("EarthRanger returned an unexpected response", status_code=status)
 
@@ -1516,7 +1530,7 @@ async def _reference_er_client(integration: Integration):
     try:
         async with _build_er_client(integration) as er_client:
             yield er_client
-    except ERClientException as e:
+    except (ERClientException, httpx.HTTPError) as e:
         raise _as_integration_error(e) from e
 
 
@@ -1559,7 +1573,7 @@ async def action_list_event_types(integration: Integration, action_config: ListE
     category has no known display name), sorted by group then label.
     """
     async with _reference_er_client(integration) as earth_ranger:
-        maps = await _fetch_event_type_maps(earth_ranger, propagate_auth_errors=True)
+        maps = await _fetch_event_type_maps(earth_ranger, strict_v2=True)
         category_display = await _fetch_category_display_map(earth_ranger)
 
     # The unconditional fetch above is authoritative (covers every category,

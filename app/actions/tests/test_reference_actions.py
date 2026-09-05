@@ -35,6 +35,11 @@ def _er(class_name, status_code):
     return getattr(er_errors, class_name)("ER said no", status_code=status_code, response_body="secret-body")
 
 
+from erclient import ERClientException
+from app.services.errors import IntegrationBadResponseError
+from erclient.er_errors import ERClientBadRequest, ERClientPermissionDenied, ERClientServiceUnreachable
+
+
 def _load_fixture():
     with open(_FIXTURE_PATH) as fh:
         return json.load(fh)
@@ -270,7 +275,9 @@ async def test_list_event_type_fields_upstream_500_propagates(
         "Server Error", request=MagicMock(), response=MagicMock(status_code=500)
     )
 
-    with pytest.raises(httpx.HTTPStatusError):
+    # Raw httpx errors from the ER client are translated on the reference path
+    # (a 5xx reads as an unexpected response, with its status), never re-raised as is.
+    with pytest.raises(IntegrationBadResponseError):
         await action_list_event_type_fields(
             er_integration_v2_provider, ListEventTypeFieldsQuery(event_type="rhino_carcass")
         )
@@ -440,7 +447,9 @@ async def test_list_event_categories_upstream_error_propagates(mock_er_client, e
     mock_er_client.get_event_categories = AsyncMock(side_effect=httpx.HTTPStatusError(
         "boom", request=MagicMock(), response=MagicMock(status_code=500)
     ))
-    with pytest.raises(httpx.HTTPStatusError):
+    # Raw httpx errors from the ER client are translated on the reference path
+    # (a 5xx reads as an unexpected response, with its status), never re-raised as is.
+    with pytest.raises(IntegrationBadResponseError):
         await action_list_event_categories(er_integration_v2_provider, ListEventCategoriesQuery())
 
 
@@ -561,7 +570,9 @@ async def test_list_subject_types_propagates_upstream_errors(
     mock_er_client.get_subjectgroups.side_effect = httpx.HTTPStatusError(
         "boom", request=MagicMock(), response=MagicMock(status_code=502)
     )
-    with pytest.raises(httpx.HTTPStatusError):
+    # Raw httpx errors from the ER client are translated on the reference path
+    # (a 5xx reads as an unexpected response, with its status), never re-raised as is.
+    with pytest.raises(IntegrationBadResponseError):
         await action_list_subject_types(
             er_integration_v2_provider, ListSubjectTypesQuery()
         )
@@ -579,6 +590,23 @@ async def test_list_subject_types_propagates_upstream_errors(
         (_er("ERClientInternalError", 500), "IntegrationBadResponseError", 500),
         (_er("ERClientNotFound", 404), "IntegrationBadResponseError", 404),
         (_er("ERClientServiceUnreachable", None), "IntegrationConnectionError", None),
+        # A wrong username/password never reaches ER's API: erclient's _call turns
+        # the token endpoint's 400 invalid_grant into ERClientBadRequest naming
+        # /oauth2/token. That is an auth failure, not a bad request.
+        (ERClientBadRequest("ER Bad Request ON GET https://gundi-er.pamdas.org/oauth2/token.", status_code=400,
+                            response_body='{"error": "invalid_grant", "error_description": "Invalid credentials given."}'),
+         "IntegrationAuthError", 400),
+        # A genuine 400 from the API stays a bad response.
+        (ERClientBadRequest("ER Bad Request ON GET https://gundi-er.pamdas.org/api/v1.0/activity/events/categories.",
+                            status_code=400, response_body="secret-body"), "IntegrationBadResponseError", 400),
+        # Network failures inside _call are a plain ERClientException with no status.
+        (ERClientException("Request to ER failed: [Errno 61] Connection refused"), "IntegrationConnectionError", None),
+        # The bare auth_headers() call in er_schema lets the token endpoint's error out raw.
+        (httpx.HTTPStatusError("Client error '400 Bad Request' for url 'https://gundi-er.pamdas.org/oauth2/token'",
+                               request=httpx.Request("POST", "https://gundi-er.pamdas.org/oauth2/token"),
+                               response=httpx.Response(400, text='{"error": "invalid_grant"}')),
+         "IntegrationAuthError", 400),
+        (httpx.ConnectError("[Errno -3] Temporary failure in name resolution"), "IntegrationConnectionError", None),
     ],
 )
 @pytest.mark.asyncio
@@ -603,6 +631,7 @@ async def test_reference_actions_translate_er_client_errors(
     # The ER response body rides on str(ERClientException); it must not
     # reach the activity log or the portal through the translated message.
     assert "response_body" not in str(info.value) and "secret-body" not in str(info.value)
+    assert "invalid_grant" not in str(info.value) and "name resolution" not in str(info.value)
 
 
 @pytest.mark.asyncio
@@ -619,3 +648,46 @@ async def test_list_event_types_surfaces_bad_credentials_instead_of_an_empty_lis
     with pytest.raises(IntegrationAuthError) as info:
         await action_list_event_types(er_integration_v2_provider, ListEventTypesQuery())
     assert info.value.status_code == 401
+
+
+@pytest.mark.asyncio
+async def test_list_event_types_tolerates_a_403_on_the_v1_endpoint(mock_er_client, er_integration_v2_provider):
+    """Only the v2 event types are offered, so the v2 fetch is load-bearing;
+    the v1 fetch and the categories fetch only enrich grouping. An ER role
+    denied on the legacy v1 endpoint but allowed on v2 must still get its
+    dropdown, as it did before the reference path started surfacing auth
+    failures. (A wrong password fails the v2 fetch too, so it still surfaces.)"""
+    from erclient import VERSION_1_0, VERSION_2_0
+
+    async def get_event_types(version=None, **kwargs):
+        if version == VERSION_1_0:
+            raise ERClientPermissionDenied("ER Forbidden ON GET .../eventtypes.", status_code=403, response_body="")
+        return [{"value": "rhino_carcass", "display": "Rhino Carcass", "category": "security", "version": VERSION_2_0}]
+
+    mock_er_client.get_event_types = AsyncMock(side_effect=get_event_types)
+    mock_er_client.get_event_categories = AsyncMock(return_value=[{"value": "security", "display": "Security", "id": "c1"}])
+
+    result = await action_list_event_types(er_integration_v2_provider, ListEventTypesQuery())
+
+    assert [o["value"] for o in result["options"]] == ["rhino_carcass"]
+
+
+@pytest.mark.asyncio
+async def test_list_event_types_surfaces_a_failing_v2_fetch_whatever_the_failure(mock_er_client, er_integration_v2_provider):
+    """A 503, a rate limit or a network failure on the load-bearing fetch used
+    to be swallowed into an empty dropdown with a 200, after up to four
+    round trips to a failing server; the other reference actions let the
+    same failures propagate. Everything from the v2 fetch propagates now."""
+    from erclient import VERSION_2_0
+    from app.services.errors import IntegrationConnectionError
+
+    async def get_event_types(version=None, **kwargs):
+        if version == VERSION_2_0:
+            raise ERClientServiceUnreachable("ER Service Unavailable ON GET .../eventtypes.", status_code=503, response_body="")
+        return []
+
+    mock_er_client.get_event_types = AsyncMock(side_effect=get_event_types)
+
+    with pytest.raises(IntegrationConnectionError) as info:
+        await action_list_event_types(er_integration_v2_provider, ListEventTypesQuery())
+    assert info.value.status_code == 503

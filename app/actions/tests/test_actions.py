@@ -129,7 +129,9 @@ async def test_auth_action_error_text_does_not_echo_the_site_url(er_integration_
     [
         (ERClientBadCredentials("nope", status_code=401, response_body="secret-body"), "EarthRanger rejected the credentials"),
         (ERClientException("Failed to GET ... 500 from ER. Message: secret-body"), "EarthRanger returned an unexpected response"),
-        (httpx.ConnectError("[Errno -3] Temporary failure in name resolution"), "Could not reach EarthRanger"),
+        (httpx.ConnectError("[Errno -3] Temporary failure in name resolution"), "EarthRanger could not be reached"),
+        # erclient raises plain ERClientException for network failures inside _call.
+        (ERClientException("Request to ER failed: [Errno 61] Connection refused"), "EarthRanger could not be reached"),
     ],
 )
 @pytest.mark.asyncio
@@ -2623,3 +2625,48 @@ def test_authenticate_config_schema_has_auth_type_display_labels():
     assert set(options) == {member.value for member in ERAuthenticationType}
     assert options["token"] == "Token"
     assert options["username_password"] == "Username & Password"
+
+
+@pytest.mark.asyncio
+async def test_auth_action_with_username_password_reports_a_rejected_password_as_rejected_credentials(
+        mocker, er_integration_v2_provider, er_400_invalid_credentials_exception,
+):
+    """AsyncERClient.login() does not go through _call: a wrong password surfaces
+    as a raw httpx.HTTPStatusError (400 invalid_grant from /oauth2/token), not
+    as ERClientBadCredentials. Catching it as a generic HTTP error made the
+    result say EarthRanger could not be reached, while the token method said
+    the credentials were rejected for the same mistake."""
+    from unittest.mock import AsyncMock, MagicMock
+    from app.actions import handlers as handlers_module
+    from app.actions.handlers import action_auth
+    from app.actions.configurations import AuthenticateConfig, ERAuthenticationType
+
+    instance = MagicMock()
+    instance.login = AsyncMock(side_effect=er_400_invalid_credentials_exception)
+    client_cls = MagicMock()
+    client_cls.return_value.__aenter__ = AsyncMock(return_value=instance)
+    client_cls.return_value.__aexit__ = AsyncMock(return_value=False)
+    mocker.patch.object(handlers_module, "AsyncERClient", client_cls)
+
+    response = await action_auth(
+        er_integration_v2_provider,
+        AuthenticateConfig(authentication_type=ERAuthenticationType.USERNAME_PASSWORD, username="u", password="wrong"),
+    )
+
+    assert response["valid_credentials"] is False
+    assert response["error"] == "EarthRanger rejected the credentials"
+
+
+@pytest.mark.asyncio
+async def test_show_permissions_error_text_does_not_echo_the_site_url(er_integration_v2_provider):
+    """The same guard as action_auth and _build_er_client, from one helper:
+    a submitted URL may carry a token in its path or query and must not come
+    back in the result or the activity log."""
+    from app.actions.handlers import action_show_permissions
+    from app.actions.configurations import ShowPermissionsConfig
+
+    integration = er_integration_v2_provider.copy(update={"base_url": "gundi-er.pamdas.org/?token=SECRET"})
+    response = await action_show_permissions(integration, ShowPermissionsConfig())
+
+    assert response["data"]["User Details"]["error"] == "Site URL is empty or invalid."
+    assert "SECRET" not in str(response)
