@@ -16,7 +16,7 @@ The runner is a FastAPI service and can be brought up with Docker Compose agains
 Full steps are in [`local/LOCAL_DEVELOPMENT.md`](https://github.com/PADAS/gundi-integration-earthranger/blob/main/local/LOCAL_DEVELOPMENT.md);
 in short:
 
-1. In `local/`, copy `.env.local.example` to `.env.local` and set `KEYCLOAK_CLIENT_SECRET` to a stage
+1. In `local/`, copy `.env.local.example` to `.env.local` and set `GUNDI_OAUTH_CLIENT_SECRET` to a stage
    secret (ask the Gundi team).
 2. Compile `requirements.txt` if you've changed any `*.in` files (otherwise the image may miss deps).
 3. `docker compose up --build`.
