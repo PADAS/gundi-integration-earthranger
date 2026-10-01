@@ -49,6 +49,14 @@ being cleaned up; see [PR #13](https://github.com/PADAS/gundi-integration-earthr
 The integration-specific logic lives in `app/actions/` — `handlers.py` (the four actions above) and
 `configurations.py` (their config models). Everything else is Gundi action-runner framework code.
 
+## Activity-log redaction
+
+The configuration attached to every activity-log event (for example the `IntegrationActionFailed` event published when
+a pull fails) is redacted by the framework before publishing (`app/services/redaction.py`): values under secret-looking
+keys (`password`, `token`, `api_key`, `secret`, ...) and fields a config model declares as `SecretStr`,
+`Field(format="password")` or `UIOptions(widget="password")` are replaced with `**********`, matched by field name or
+alias and at any depth of nested models. Declare secrets that way and they never reach the portal's activity log in clear.
+
 ## Documentation
 
 Deeper technical documentation — architecture, the per-event state model, the ER → Gundi transform, and how to add an
