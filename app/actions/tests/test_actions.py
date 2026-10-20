@@ -2989,3 +2989,35 @@ async def test_auth_action_with_username_password_does_not_report_connected_as(m
 
     assert response == {"valid_credentials": True}
     assert not instance.get_me.called
+
+
+_ACTION_DISPLAY_NAMES = {
+    "auth": "Authentication",
+    "pull_events": "Fetch Events from EarthRanger",
+    "pull_observations": "Fetch Observations from EarthRanger",
+}
+
+
+@pytest.mark.parametrize("action_id,expected_title", _ACTION_DISPLAY_NAMES.items())
+def test_actions_carry_their_display_names(action_id, expected_title):
+    from app.actions import action_handlers
+
+    func, _config_model, _data_model = action_handlers[action_id]
+
+    assert func.action_title == expected_title
+
+
+@pytest.mark.asyncio
+async def test_registration_uses_the_action_display_names():
+    from unittest.mock import AsyncMock, MagicMock
+    from app.services.self_registration import register_integration_in_gundi
+
+    gundi_client = MagicMock()
+    gundi_client.register_integration_type = AsyncMock(return_value={})
+
+    await register_integration_in_gundi(gundi_client=gundi_client, type_slug="earth_ranger")
+
+    registered = gundi_client.register_integration_type.call_args[0][0]
+    names = {action["value"]: action["name"] for action in registered["actions"]}
+    for action_id, expected_title in _ACTION_DISPLAY_NAMES.items():
+        assert names[action_id] == expected_title

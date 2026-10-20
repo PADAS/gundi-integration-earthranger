@@ -19,7 +19,7 @@ from gundi_core.schemas.v2 import Integration
 from app import settings
 from app.services.utils import find_config_for_action
 from app.services.state import IntegrationStateManager
-from .core import ReferenceDataResponse, ReferenceOption
+from .core import ReferenceDataResponse, ReferenceOption, action_title
 from .er_schema import er_site_root, fetch_prerendered_event_schema, parse_er_event_schema
 from .configurations import AuthenticateConfig, EventFilterDateField, PullObservationsConfig, PullEventsConfig, \
     ERAuthenticationType, ShowPermissionsConfig, ListEventTypesQuery, ListEventTypeFieldsQuery, \
@@ -59,6 +59,7 @@ ER_EVENT_FILTER_KEY_BY_DATE_FIELD = {
 }
 
 
+@action_title("Authentication")
 async def action_auth(integration: Integration, action_config: AuthenticateConfig):
     auth_config = action_config
     try:
@@ -385,6 +386,7 @@ async def action_show_permissions(integration: Integration, action_config: ShowP
     return response
 
 
+@action_title("Fetch Events from EarthRanger")
 @activity_logger()
 async def action_pull_events(integration: Integration, action_config: PullEventsConfig):
     integration_id = str(integration.id)
@@ -636,6 +638,7 @@ async def action_pull_events(integration: Integration, action_config: PullEvents
     }
 
 
+@action_title("Fetch Observations from EarthRanger")
 @activity_logger()
 async def action_pull_observations(integration: Integration, action_config: PullObservationsConfig):
     integration_id = str(integration.id)
