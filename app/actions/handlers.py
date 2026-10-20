@@ -67,6 +67,7 @@ async def action_auth(integration: Integration, action_config: AuthenticateConfi
         # action_auth reports failures inside a normal result, which nothing in
         # the runner redacts; the helper's message keeps the URL out.
         return {"valid_credentials": False, "error": e.message}
+    connected_as = None
     async with client as er_client:
         try:
             if auth_config.authentication_type == ERAuthenticationType.TOKEN:
@@ -75,6 +76,8 @@ async def action_auth(integration: Integration, action_config: AuthenticateConfi
                 result = await er_client.get_me()
                 # ToDo: Support doing a deeper check on permissions here or in a separate handler
                 valid_credentials = result.get('is_active', False)
+                if valid_credentials:
+                    connected_as = _connected_as(result)
             elif auth_config.authentication_type == ERAuthenticationType.USERNAME_PASSWORD:
                 if not auth_config.username or not auth_config.password:
                     return {"valid_credentials": False, "error": "Please provide both a username and a password."}
@@ -88,7 +91,19 @@ async def action_auth(integration: Integration, action_config: AuthenticateConfi
             # raw httpx errors (it runs outside erclient's _call), so the
             # translation handles both shapes.
             return {"valid_credentials": False, "error": _as_integration_error(e).message}
+        if connected_as:
+            return {"valid_credentials": valid_credentials, "connected_as": connected_as}
         return {"valid_credentials": valid_credentials}
+
+
+def _connected_as(er_user_details):
+    """Who a token signs in as, e.g. "Gundi Service Account (gundi_service_account)",
+    or just the username when the account has no name. None without a username."""
+    username = (er_user_details.get("username") or "").strip()
+    if not username:
+        return None
+    full_name = f"{er_user_details.get('first_name') or ''} {er_user_details.get('last_name') or ''}".strip()
+    return f"{full_name} ({username})" if full_name else username
 
 
 def _extract_user_details(er_user_details):

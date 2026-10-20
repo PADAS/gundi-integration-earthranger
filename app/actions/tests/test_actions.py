@@ -61,6 +61,7 @@ async def test_execute_auth_action_with_valid_credentials(
     assert mock_config_manager_er_provider.get_integration_details.called
     assert mock_erclient_class.return_value.get_me.called
     assert response.get("valid_credentials") == True
+    assert response.get("connected_as") == "Gundi Service Account (gundi_serviceaccount)"
 
 
 @pytest.mark.parametrize(
@@ -2904,3 +2905,87 @@ async def test_translated_er_failures_keep_their_traceback_in_the_local_log(mock
 
     records = [r for r in caplog.records if r.name == "app.actions.handlers" and "EarthRanger call failed" in r.getMessage()]
     assert records and records[-1].exc_info and records[-1].exc_info[0] is ValueError
+
+
+def _auth_client_returning_me(mocker, me):
+    """Patch AsyncERClient in handlers with a client whose get_me returns me."""
+    from unittest.mock import AsyncMock, MagicMock
+    from app.actions import handlers as handlers_module
+
+    instance = MagicMock()
+    instance.get_me = AsyncMock(return_value=me)
+    instance.login = AsyncMock(return_value=True)
+    client_cls = MagicMock()
+    client_cls.return_value.__aenter__ = AsyncMock(return_value=instance)
+    client_cls.return_value.__aexit__ = AsyncMock(return_value=False)
+    mocker.patch.object(handlers_module, "AsyncERClient", client_cls)
+    return instance
+
+
+@pytest.mark.parametrize(
+    "me,expected",
+    [
+        (
+            {"username": "gundi_service_account", "first_name": "Gundi Service Account", "last_name": "", "is_active": True},
+            "Gundi Service Account (gundi_service_account)",
+        ),
+        (
+            {"username": "gundi_serviceaccount", "first_name": "Gundi", "last_name": "Service Account", "is_active": True},
+            "Gundi Service Account (gundi_serviceaccount)",
+        ),
+        (
+            {"username": "gundi_service_account", "first_name": "", "last_name": None, "is_active": True},
+            "gundi_service_account",
+        ),
+        (
+            {"username": "gundi_service_account", "first_name": " ", "last_name": " ", "is_active": True},
+            "gundi_service_account",
+        ),
+    ],
+)
+@pytest.mark.asyncio
+async def test_auth_action_with_token_reports_who_it_is_connected_as(mocker, er_integration_v2_provider, me, expected):
+    from app.actions.handlers import action_auth
+    from app.actions.configurations import AuthenticateConfig
+
+    _auth_client_returning_me(mocker, me)
+
+    response = await action_auth(er_integration_v2_provider, AuthenticateConfig(token="abc123"))
+
+    assert response == {"valid_credentials": True, "connected_as": expected}
+
+
+@pytest.mark.parametrize(
+    "me,expected",
+    [
+        ({"username": "gundi_service_account", "first_name": "Gundi", "last_name": "", "is_active": False}, False),
+        ({"username": "", "first_name": "", "last_name": "", "is_active": True}, True),
+        ({"username": None, "first_name": "Gundi", "last_name": "Service Account", "is_active": True}, True),
+    ],
+)
+@pytest.mark.asyncio
+async def test_auth_action_with_token_omits_connected_as_when_inactive_or_unnamed(mocker, er_integration_v2_provider, me, expected):
+    from app.actions.handlers import action_auth
+    from app.actions.configurations import AuthenticateConfig
+
+    _auth_client_returning_me(mocker, me)
+
+    response = await action_auth(er_integration_v2_provider, AuthenticateConfig(token="abc123"))
+
+    assert response == {"valid_credentials": expected}
+
+
+@pytest.mark.asyncio
+async def test_auth_action_with_username_password_does_not_report_connected_as(mocker, er_integration_v2_provider):
+    from app.actions.handlers import action_auth
+    from app.actions.configurations import AuthenticateConfig, ERAuthenticationType
+
+    instance = _auth_client_returning_me(mocker, {"username": "u", "first_name": "U", "is_active": True})
+
+    response = await action_auth(
+        er_integration_v2_provider,
+        AuthenticateConfig(authentication_type=ERAuthenticationType.USERNAME_PASSWORD, username="u", password="p"),
+    )
+
+    assert response == {"valid_credentials": True}
+    assert not instance.get_me.called
