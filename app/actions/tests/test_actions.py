@@ -1548,6 +1548,53 @@ def test_transform_events_serial_number_without_ui_root():
     assert transformed[0]["provider_metadata"] == {"serial_number": 5}
 
 
+def test_transform_events_reported_by_user_uses_full_name():
+    """An ER user reporter rides in provider_metadata.reported_by as a display
+    name, so CMORE can show who reported the event instead of the integration
+    account."""
+    transformed = transform_events_to_gundi_schema(
+        events=[{
+            "id": "x", "event_type": "rhino_carcass",
+            "reported_by": {"content_type": "accounts.user", "id": "u1",
+                            "username": "jdoe", "first_name": "Jane", "last_name": "Doe"},
+        }],
+    )
+    assert transformed[0]["provider_metadata"]["reported_by"] == "Jane Doe"
+
+
+def test_transform_events_reported_by_user_falls_back_to_username():
+    transformed = transform_events_to_gundi_schema(
+        events=[{
+            "id": "x", "event_type": "rhino_carcass",
+            "reported_by": {"content_type": "accounts.user", "id": "u1",
+                            "username": "jdoe", "first_name": "", "last_name": None},
+        }],
+    )
+    assert transformed[0]["provider_metadata"]["reported_by"] == "jdoe"
+
+
+def test_transform_events_reported_by_subject_uses_subject_name():
+    transformed = transform_events_to_gundi_schema(
+        events=[{
+            "id": "x", "event_type": "rhino_carcass",
+            "reported_by": {"content_type": "observations.subject", "id": "s1",
+                            "name": "Ranger Unit 4", "subject_type": "person"},
+        }],
+    )
+    assert transformed[0]["provider_metadata"]["reported_by"] == "Ranger Unit 4"
+
+
+def test_transform_events_without_reporter_omits_reported_by():
+    """No reporter (None) or an unrecognised shape adds nothing, so an older
+    event or a bare id never produces a provider_metadata key."""
+    for reported_by in (None, "a-bare-id", {"content_type": "accounts.user", "id": "u1"}):
+        transformed = transform_events_to_gundi_schema(
+            events=[{"id": "x", "event_type": "rhino_carcass", "serial_number": 5,
+                     "reported_by": reported_by}],
+        )
+        assert transformed[0]["provider_metadata"] == {"serial_number": 5}
+
+
 def test_chunked_splits_into_fixed_size_groups():
     from app.actions.handlers import _chunked
     assert list(_chunked([1, 2, 3, 4, 5], 2)) == [[1, 2], [3, 4], [5]]
