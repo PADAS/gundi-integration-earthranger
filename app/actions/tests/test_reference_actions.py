@@ -151,7 +151,7 @@ async def test_list_event_types_excludes_v1_only_types(
 
 
 @pytest.mark.asyncio
-async def test_list_event_types_group_resolves_via_unconditional_categories_fetch(
+async def test_list_event_types_groups_v2_only_categories_via_the_categories_backfill(
     er_integration_v2_provider, mock_er_client
 ):
     """A v1 event type already populates category_id_by_slug; list_event_types

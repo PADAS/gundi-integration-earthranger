@@ -536,6 +536,76 @@ async def test_pull_events_event_type_and_category_filter_passed_to_er(
     assert er_filter["event_category"] == ["6b359461-aa53-4116-bf2c-04cc580de4ef"]  # monitoring
 
 
+def _patch_pull_runtime(mocker, mock_gundi_client_v2, mock_state_manager, mock_erclient_class,
+                        mock_get_gundi_api_key, mock_gundi_sensors_client_class,
+                        mock_publish_event, mock_gundi_client_v2_class, mock_config_manager_er_provider):
+    mocker.patch("app.services.activity_logger.publish_event", mock_publish_event)
+    mocker.patch("app.services.action_runner.publish_event", mock_publish_event)
+    mocker.patch("app.services.action_runner.config_manager", mock_config_manager_er_provider)
+    mocker.patch("app.services.action_runner._portal", mock_gundi_client_v2)
+    mocker.patch("app.actions.handlers.state_manager", mock_state_manager)
+    mocker.patch("app.actions.handlers.AsyncERClient", mock_erclient_class)
+    mocker.patch("app.services.gundi.GundiClient", mock_gundi_client_v2_class)
+    mocker.patch("app.services.gundi.GundiDataSenderClient", mock_gundi_sensors_client_class)
+    mocker.patch("app.services.gundi._get_gundi_api_key", mock_get_gundi_api_key)
+
+
+@pytest.mark.asyncio
+async def test_pull_events_filter_resolves_a_v2_only_category_through_the_backfill(
+        mocker, mock_gundi_client_v2, mock_state_manager, mock_erclient_class,
+        mock_get_gundi_api_key, mock_gundi_sensors_client_class, er_integration_v2_provider,
+        mock_publish_event, mock_gundi_client_v2_class, mock_config_manager_er_provider
+):
+    """The dev regression of 2026-10-23: the v1 listing resolves "monitoring"
+    but not "cmore_8334", whose types are all v2. pull_events must pass its
+    filter to _fetch_event_type_maps so the categories endpoint fills the gap,
+    and both category UUIDs reach ER's filter."""
+    import json
+    pull_events_data = er_integration_v2_provider.get_action_config("pull_events").data
+    pull_events_data["event_types"] = []
+    pull_events_data["event_categories"] = ["monitoring", "cmore_8334"]
+    mock_erclient_class.return_value.get_event_categories = mocker.AsyncMock(return_value=[
+        {"value": "cmore_8334", "id": "cat-uuid-cmore", "display": "Cmore 8334", "is_active": True},
+    ])
+    _patch_pull_runtime(mocker, mock_gundi_client_v2, mock_state_manager, mock_erclient_class,
+                        mock_get_gundi_api_key, mock_gundi_sensors_client_class,
+                        mock_publish_event, mock_gundi_client_v2_class, mock_config_manager_er_provider)
+
+    await execute_action(integration_id=str(er_integration_v2_provider.id), action_id="pull_events")
+
+    er_filter = json.loads(mock_erclient_class.return_value.get_events.call_args.kwargs["filter"])
+    assert set(er_filter["event_category"]) == {"6b359461-aa53-4116-bf2c-04cc580de4ef", "cat-uuid-cmore"}
+
+
+@pytest.mark.asyncio
+async def test_pull_events_skips_without_advancing_when_the_category_backfill_fails(
+        mocker, mock_gundi_client_v2, mock_state_manager, mock_erclient_class,
+        mock_get_gundi_api_key, mock_gundi_sensors_client_class, er_integration_v2_provider,
+        mock_publish_event, mock_gundi_client_v2_class, mock_config_manager_er_provider
+):
+    """If the categories lookup fails while one filtered category resolved
+    from v1, pulling with the partial filter would advance the watermark past
+    events of the unresolved category and lose them. Skip instead, leaving
+    the watermark where it was so the next run re-pulls the window."""
+    pull_events_data = er_integration_v2_provider.get_action_config("pull_events").data
+    pull_events_data["event_types"] = []
+    pull_events_data["event_categories"] = ["monitoring", "cmore_8334"]
+    mock_erclient_class.return_value.get_event_categories = mocker.AsyncMock(side_effect=RuntimeError("503"))
+    _patch_pull_runtime(mocker, mock_gundi_client_v2, mock_state_manager, mock_erclient_class,
+                        mock_get_gundi_api_key, mock_gundi_sensors_client_class,
+                        mock_publish_event, mock_gundi_client_v2_class, mock_config_manager_er_provider)
+
+    result = await execute_action(integration_id=str(er_integration_v2_provider.id), action_id="pull_events")
+
+    assert not mock_erclient_class.return_value.get_events.called
+    assert result["skipped_reason"] == "event_category_lookup_failed"
+    watermark_writes = [
+        c for c in mock_state_manager.set_state.await_args_list
+        if "last_execution" in (c.kwargs.get("state") or {})
+    ]
+    assert watermark_writes == []
+
+
 @pytest.mark.asyncio
 async def test_pull_events_requests_notes_from_er(
         mocker, mock_gundi_client_v2, mock_state_manager, mock_erclient_class,

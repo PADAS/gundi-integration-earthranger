@@ -498,6 +498,27 @@ async def action_pull_events(integration: Integration, action_config: PullEvents
                 "skipped_reason": "no_resolvable_event_categories",
             }
 
+        # A filtered category left unresolved because the categories lookup
+        # failed (not because it does not exist) must not be dropped from the
+        # filter: pulling with the rest would advance the watermark past that
+        # category's events for good. Skip; the watermark is NOT advanced.
+        if unresolved_categories and event_type_maps.categories_backfill_failed:
+            await log_action_activity(
+                integration_id=integration_id,
+                action_id="pull_events",
+                title="Could not look up ER event categories; skipping pull",
+                level=LogLevel.ERROR,
+                data={"unresolved_event_categories": unresolved_categories},
+            )
+            return {
+                "events_extracted": 0,
+                "events_updated": 0,
+                "updates_emitted": 0,
+                "events_skipped_unchanged": 0,
+                "attachments_forwarded": 0,
+                "skipped_reason": "event_category_lookup_failed",
+            }
+
         date_filter_key = ER_EVENT_FILTER_KEY_BY_DATE_FIELD[pull_config.filter_date_field]
         event_filter = {
             date_filter_key: {"lower": start_datetime}
@@ -1156,6 +1177,10 @@ class EventTypeMaps:
     category_slug_by_type_slug: Dict[str, str] = field(default_factory=dict)
     category_display_by_slug: Dict[str, str] = field(default_factory=dict)
     v2_slugs: set = field(default_factory=set)
+    # True when the categories endpoint was needed (a wanted category was
+    # unresolved) and the call failed; the pull then cannot tell a missing
+    # category from a lookup outage.
+    categories_backfill_failed: bool = False
 
 
 def _failure_summary(exc: Exception) -> str:
@@ -1244,6 +1269,7 @@ async def _fetch_event_type_maps(
         try:
             categories = await er_client.get_event_categories(include_inactive=True)
         except Exception as e:
+            maps.categories_backfill_failed = True
             logger.warning(
                 "Could not fetch ER event categories: %s. %s",
                 _failure_summary(e),
@@ -1696,15 +1722,12 @@ async def action_list_event_types(integration: Integration, action_config: ListE
     async with _translating_er_client(integration) as earth_ranger:
         maps = await _fetch_event_type_maps(earth_ranger, strict_v2=True, all_categories=True)
 
-    # all_categories=True makes `_fetch_event_type_maps` backfill every
-    # category from the categories endpoint, so v2-only categories are named.
-    group_display_by_slug = maps.category_display_by_slug
 
     options = [
         ReferenceOption(
             value=slug,
             label=maps.display_by_slug.get(slug, slug),
-            group=group_display_by_slug.get(maps.category_slug_by_type_slug.get(slug)),
+            group=maps.category_display_by_slug.get(maps.category_slug_by_type_slug.get(slug)),
         )
         for slug in maps.v2_slugs
     ]
