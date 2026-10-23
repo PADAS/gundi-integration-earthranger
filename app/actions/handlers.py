@@ -1306,6 +1306,27 @@ def _er_ui_root(url_parse) -> str:
     return f"{url_parse.scheme}://{url_parse.netloc}"
 
 
+def _reporter_display_name(reported_by) -> Optional[str]:
+    """Display name for an ER event's ``reported_by``, or None.
+
+    ER serializes the reporter as a user (``accounts.user``: username, first
+    and last name) or a subject (``observations.subject``: name). A user is
+    shown as "First Last", falling back to the username; a subject as its
+    name. Anything else (None, a bare id, an object with no usable name)
+    yields None so no provider_metadata key is emitted.
+    """
+    if not isinstance(reported_by, dict):
+        return None
+    full_name = " ".join(
+        part.strip() for part in (reported_by.get("first_name"), reported_by.get("last_name"))
+        if isinstance(part, str) and part.strip()
+    )
+    for candidate in (full_name, reported_by.get("username"), reported_by.get("name")):
+        if isinstance(candidate, str) and candidate.strip():
+            return candidate.strip()
+    return None
+
+
 def transform_events_to_gundi_schema(events, event_type_display_by_slug=None, er_ui_root=None):
     """Map an ER event payload list to the Gundi sensors-API event schema.
 
@@ -1363,6 +1384,13 @@ def transform_events_to_gundi_schema(events, event_type_display_by_slug=None, er
             serial_number = event.get("serial_number")
             if serial_number is not None:
                 provider_metadata["serial_number"] = serial_number
+            # The original reporter, so a destination can attribute the event
+            # to the person or subject who reported it in ER rather than to
+            # the integration's own account (CMORE puts it in a tag field or
+            # the source comment).
+            reported_by = _reporter_display_name(event.get("reported_by"))
+            if reported_by:
+                provider_metadata["reported_by"] = reported_by
             if provider_metadata:
                 transformed_event["provider_metadata"] = provider_metadata
             # Save other fields in additional
