@@ -1254,6 +1254,44 @@ async def test_fetch_event_type_maps_falls_back_to_categories_endpoint(mocker):
 
 
 @pytest.mark.asyncio
+async def test_fetch_event_type_maps_fills_v2_only_categories_from_the_categories_endpoint(mocker):
+    """A site with older v1 types AND a category holding only v2 types (e.g.
+    the CMORE connector's generated cmore_<group> category): v1 contributes
+    its own categories, so the map is not empty, but the v2-only category is
+    missing from it. The categories endpoint must still fill the gap, or a
+    pull filtered on that category resolves nothing (seen on dev, 2026-10-23)."""
+    from erclient import VERSION_1_0, VERSION_2_0
+    er_client = mocker.MagicMock()
+
+    async def fake_get_event_types(version=VERSION_1_0, **kwargs):
+        if version == VERSION_1_0:
+            return [{
+                "value": "wildlife_sighting_rep", "display": "Wildlife Sighting Report", "id": "v1-type-uuid",
+                "category": {"value": "wildlife", "id": "cat-uuid-w", "is_active": True},
+            }]
+        return [{
+            "value": "cmore_8334_20_evidence_of_poacher", "display": "Evidence of Poacher",
+            "id": "v2-type-uuid", "category": "cmore_8334",
+        }]
+
+    async def fake_get_event_categories(**kwargs):
+        return [
+            {"value": "wildlife", "id": "cat-uuid-w-from-endpoint", "display": "Wildlife", "is_active": True},
+            {"value": "cmore_8334", "id": "cat-uuid-cmore", "display": "Cmore 8334", "is_active": True},
+        ]
+
+    er_client.get_event_types = fake_get_event_types
+    er_client.get_event_categories = fake_get_event_categories
+
+    maps = await _fetch_event_type_maps(er_client)
+    assert maps.category_id_by_slug == {
+        "wildlife": "cat-uuid-w",  # v1's own answer is kept
+        "cmore_8334": "cat-uuid-cmore",  # the v2-only category is filled in
+    }
+    assert maps.category_display_by_slug["cmore_8334"] == "Cmore 8334"
+
+
+@pytest.mark.asyncio
 async def test_fetch_event_type_maps_v1_succeeds_v2_fails(mocker):
     """One endpoint failing doesn't break the other."""
     from erclient import VERSION_1_0, VERSION_2_0
