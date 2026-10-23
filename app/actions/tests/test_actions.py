@@ -1201,6 +1201,7 @@ async def test_fetch_event_type_maps_merges_v1_and_v2(mocker):
         return []
 
     er_client.get_event_types = fake_get_event_types
+    er_client.get_event_categories = mocker.AsyncMock(return_value=[])
     maps = await _fetch_event_type_maps(er_client)
     # Both versions contribute to display + id maps.
     assert maps.display_by_slug == {
@@ -1211,9 +1212,10 @@ async def test_fetch_event_type_maps_merges_v1_and_v2(mocker):
         "wildlife_sighting_rep": "v1-type-uuid",
         "coyote_carcass": "v2-type-uuid",
     }
-    # v1's nested category dict populates category_id_by_slug; the v2 fetch
-    # didn't need to fall back to get_event_categories.
+    # v1's nested category dict populates category_id_by_slug. No category
+    # filter was asked for, so the categories endpoint is not called.
     assert maps.category_id_by_slug == {"wildlife": "cat-uuid-w"}
+    er_client.get_event_categories.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -1244,9 +1246,9 @@ async def test_fetch_event_type_maps_falls_back_to_categories_endpoint(mocker):
     er_client.get_event_types = fake_get_event_types
     er_client.get_event_categories = fake_get_event_categories
 
-    maps = await _fetch_event_type_maps(er_client)
+    maps = await _fetch_event_type_maps(er_client, wanted_categories=["wildlife"])
     assert maps.id_by_slug == {"coyote_carcass": "v2-type-uuid"}
-    # category_id_by_slug was empty after v1+v2 → categories endpoint backfilled it.
+    # "wildlife" was wanted and missing after v1+v2 → categories endpoint backfilled.
     assert maps.category_id_by_slug == {
         "wildlife": "cat-uuid-w",
         "monitoring": "cat-uuid-m",
@@ -1283,12 +1285,55 @@ async def test_fetch_event_type_maps_fills_v2_only_categories_from_the_categorie
     er_client.get_event_types = fake_get_event_types
     er_client.get_event_categories = fake_get_event_categories
 
-    maps = await _fetch_event_type_maps(er_client)
+    maps = await _fetch_event_type_maps(er_client, wanted_categories=["cmore_8334"])
     assert maps.category_id_by_slug == {
         "wildlife": "cat-uuid-w",  # v1's own answer is kept
         "cmore_8334": "cat-uuid-cmore",  # the v2-only category is filled in
     }
     assert maps.category_display_by_slug["cmore_8334"] == "Cmore 8334"
+
+
+@pytest.mark.asyncio
+async def test_fetch_event_type_maps_skips_the_categories_call_when_every_wanted_slug_resolved(mocker):
+    """No extra request (and no warning on a site that refuses the endpoint)
+    when v1 already resolved every category the pull filters on."""
+    from erclient import VERSION_1_0
+    er_client = mocker.MagicMock()
+
+    async def fake_get_event_types(version=VERSION_1_0, **kwargs):
+        if version == VERSION_1_0:
+            return [{"value": "a", "display": "A", "id": "t1",
+                     "category": {"value": "wildlife", "id": "cat-w", "display": "Wildlife"}}]
+        return []
+
+    er_client.get_event_types = fake_get_event_types
+    er_client.get_event_categories = mocker.AsyncMock(side_effect=AssertionError("must not be called"))
+    maps = await _fetch_event_type_maps(er_client, wanted_categories=["wildlife"])
+    assert maps.category_id_by_slug == {"wildlife": "cat-w"}
+
+
+@pytest.mark.asyncio
+async def test_fetch_event_type_maps_backfill_includes_inactive_and_prefers_endpoint_display(mocker):
+    """Inactive categories resolve like v1-backed ones do, and the categories
+    endpoint's display name wins over a v1 copy (it is the canonical one)."""
+    from erclient import VERSION_1_0
+    er_client = mocker.MagicMock()
+
+    async def fake_get_event_types(version=VERSION_1_0, **kwargs):
+        if version == VERSION_1_0:
+            return [{"value": "a", "display": "A", "id": "t1",
+                     "category": {"value": "wildlife", "id": "cat-w", "display": "Old label"}}]
+        return []
+
+    er_client.get_event_types = fake_get_event_types
+    er_client.get_event_categories = mocker.AsyncMock(return_value=[
+        {"value": "wildlife", "id": "cat-w", "display": "Wildlife", "is_active": True},
+        {"value": "retired", "id": "cat-r", "display": "Retired", "is_active": False},
+    ])
+    maps = await _fetch_event_type_maps(er_client, all_categories=True)
+    er_client.get_event_categories.assert_awaited_once_with(include_inactive=True)
+    assert maps.category_id_by_slug["retired"] == "cat-r"
+    assert maps.category_display_by_slug["wildlife"] == "Wildlife"
 
 
 @pytest.mark.asyncio
