@@ -5,7 +5,7 @@ import time
 from collections import defaultdict
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
-from typing import Dict, Optional
+from typing import Iterable, Dict, Optional
 from urllib.parse import urlparse
 
 import httpx
@@ -438,7 +438,9 @@ async def action_pull_events(integration: Integration, action_config: PullEvents
         #      ER filters by event_type__id__in, not by slug.
         #   2) Titleless events fall back to the EventType display name.
         # Best-effort: if the lookup fails we degrade gracefully.
-        event_type_maps = await _fetch_event_type_maps(earth_ranger)
+        event_type_maps = await _fetch_event_type_maps(
+            earth_ranger, wanted_categories=pull_config.event_categories
+        )
         event_type_display_by_slug = event_type_maps.display_by_slug
 
         # Resolve configured slugs → ER UUIDs for the filter.
@@ -494,6 +496,27 @@ async def action_pull_events(integration: Integration, action_config: PullEvents
                 "events_skipped_unchanged": 0,
                 "attachments_forwarded": 0,
                 "skipped_reason": "no_resolvable_event_categories",
+            }
+
+        # A filtered category left unresolved because the categories lookup
+        # failed (not because it does not exist) must not be dropped from the
+        # filter: pulling with the rest would advance the watermark past that
+        # category's events for good. Skip; the watermark is NOT advanced.
+        if unresolved_categories and event_type_maps.categories_backfill_failed:
+            await log_action_activity(
+                integration_id=integration_id,
+                action_id="pull_events",
+                title="Could not look up ER event categories; skipping pull",
+                level=LogLevel.ERROR,
+                data={"unresolved_event_categories": unresolved_categories},
+            )
+            return {
+                "events_extracted": 0,
+                "events_updated": 0,
+                "updates_emitted": 0,
+                "events_skipped_unchanged": 0,
+                "attachments_forwarded": 0,
+                "skipped_reason": "event_category_lookup_failed",
             }
 
         date_filter_key = ER_EVENT_FILTER_KEY_BY_DATE_FIELD[pull_config.filter_date_field]
@@ -1154,6 +1177,10 @@ class EventTypeMaps:
     category_slug_by_type_slug: Dict[str, str] = field(default_factory=dict)
     category_display_by_slug: Dict[str, str] = field(default_factory=dict)
     v2_slugs: set = field(default_factory=set)
+    # True when the categories endpoint was needed (a wanted category was
+    # unresolved) and the call failed; the pull then cannot tell a missing
+    # category from a lookup outage.
+    categories_backfill_failed: bool = False
 
 
 def _failure_summary(exc: Exception) -> str:
@@ -1163,7 +1190,13 @@ def _failure_summary(exc: Exception) -> str:
     return f"{type(exc).__name__} (status {status})" if status else type(exc).__name__
 
 
-async def _fetch_event_type_maps(er_client, *, strict_v2: bool = False) -> EventTypeMaps:
+async def _fetch_event_type_maps(
+    er_client,
+    *,
+    strict_v2: bool = False,
+    wanted_categories: Optional[Iterable[str]] = None,
+    all_categories: bool = False,
+) -> EventTypeMaps:
     """Build slug→display, slug→type_id, and category_slug→category_id maps.
 
     ER's EventType has a ``version`` field — each type is exclusively v1 OR
@@ -1174,10 +1207,14 @@ async def _fetch_event_type_maps(er_client, *, strict_v2: bool = False) -> Event
 
     Neither endpoint returns the other version's types, so we query both and
     merge. v1 responses carry a nested category dict (`id`, `value`, ...);
-    v2 responses carry only the category slug. As a fallback for category
-    UUIDs we hit ``GET /activity/events/categories`` if the merged maps
-    haven't already populated ``category_id_by_slug`` (e.g. an ER instance
-    with only v2 event types).
+    v2 responses carry only the category slug, so a category holding only v2
+    types gets no UUID or display name from either listing. The canonical
+    ``GET /activity/events/categories`` (inactive included) fills those in,
+    and is called only when needed: ``all_categories=True`` (list_event_types
+    groups every v2 type by category name), or a slug in
+    ``wanted_categories`` (the pull's event_categories filter) that the
+    listings did not resolve. Its display names win over v1's nested copies;
+    v1's category ids are kept.
 
     All three fetches are best-effort and logged independently — a 403 on
     one doesn't break the others. If everything fails, all maps are empty;
@@ -1223,15 +1260,21 @@ async def _fetch_event_type_maps(er_client, *, strict_v2: bool = False) -> Event
             if isinstance(et, dict):
                 _absorb_event_type(maps, et, with_category=True)
 
-    # If we got no category UUIDs from the v1 event types (e.g. ER has only
-    # v2 types defined), the canonical categories endpoint fills the gap.
-    if not maps.category_id_by_slug:
+    # The v1 listing only carries categories that hold v1 types, so a category
+    # whose types are all v2 (e.g. the CMORE connector's generated
+    # cmore_<group>) is missing even when the map is not empty. Backfill from
+    # the categories endpoint, but only when a caller needs it.
+    missing = [slug for slug in (wanted_categories or []) if slug not in maps.category_id_by_slug]
+    if all_categories or missing:
         try:
-            categories = await er_client.get_event_categories()
+            categories = await er_client.get_event_categories(include_inactive=True)
         except Exception as e:
+            maps.categories_backfill_failed = True
             logger.warning(
-                "Could not fetch ER event categories: %s. event_category filter slugs will not resolve.",
+                "Could not fetch ER event categories: %s. %s",
                 _failure_summary(e),
+                f"Unresolved event_category filter slugs: {missing}." if missing
+                else "Event types will not be grouped by category.",
             )
         else:
             for cat in _as_list(categories):
@@ -1242,7 +1285,7 @@ async def _fetch_event_type_maps(er_client, *, strict_v2: bool = False) -> Event
                 if cat_slug and cat_id:
                     maps.category_id_by_slug.setdefault(cat_slug, cat_id)
                 if cat_slug and cat.get("display"):
-                    maps.category_display_by_slug.setdefault(cat_slug, cat["display"])
+                    maps.category_display_by_slug[cat_slug] = cat["display"]
 
     return maps
 
@@ -1275,8 +1318,9 @@ def _absorb_event_type(maps: EventTypeMaps, et: dict, *, with_category: bool, is
         if with_category and cat_slug and cat_id:
             maps.category_id_by_slug.setdefault(cat_slug, cat_id)
     elif isinstance(category, str) and category:
-        # v2: category is a bare slug string; no display name available here
-        # (resolved via the categories-endpoint fallback above, if needed).
+        # v2: category is a bare slug string; no display name or UUID here.
+        # _fetch_event_type_maps backfills both from the categories endpoint
+        # when a caller needs them.
         maps.category_slug_by_type_slug.setdefault(slug, category)
 
 
@@ -1664,32 +1708,6 @@ def _is_earthranger_failure(exc: Exception, site: httpx.URL) -> bool:
     return False
 
 
-async def _fetch_category_display_map(er_client) -> Dict[str, str]:
-    """Best-effort category slug → display name, unconditionally fetched.
-
-    Unlike `_fetch_event_type_maps`'s `category_id_by_slug` fallback (which
-    only hits `get_event_categories` when v1 records didn't already supply
-    category UUIDs — a condition tuned for `pull_events`' filter-resolution
-    needs), `list_event_types` needs display names for every category that
-    has a v2 event type in it, regardless of what v1 already resolved. A
-    v1-heavy merge can leave category_id_by_slug non-empty (skipping that
-    fallback) while a v2-only category's display name is still unknown, so
-    this reference action always fetches the categories endpoint itself.
-    """
-    try:
-        categories = await er_client.get_event_categories()
-    except Exception as e:
-        logger.warning(
-            "Could not fetch ER event categories for list_event_types grouping: %s.", _failure_summary(e),
-        )
-        return {}
-    return {
-        cat["value"]: cat["display"]
-        for cat in _as_list(categories)
-        if isinstance(cat, dict) and cat.get("value") and cat.get("display")
-    }
-
-
 async def action_list_event_types(integration: Integration, action_config: ListEventTypesQuery):
     """Reference action: v2 ER event types visible to this integration's credentials.
 
@@ -1702,19 +1720,14 @@ async def action_list_event_types(integration: Integration, action_config: ListE
     category has no known display name), sorted by group then label.
     """
     async with _translating_er_client(integration) as earth_ranger:
-        maps = await _fetch_event_type_maps(earth_ranger, strict_v2=True)
-        category_display = await _fetch_category_display_map(earth_ranger)
+        maps = await _fetch_event_type_maps(earth_ranger, strict_v2=True, all_categories=True)
 
-    # The unconditional fetch above is authoritative (covers every category,
-    # regardless of what `_fetch_event_type_maps` already resolved from v1);
-    # `maps.category_display_by_slug` fills any gap if that fetch failed.
-    group_display_by_slug = {**maps.category_display_by_slug, **category_display}
 
     options = [
         ReferenceOption(
             value=slug,
             label=maps.display_by_slug.get(slug, slug),
-            group=group_display_by_slug.get(maps.category_slug_by_type_slug.get(slug)),
+            group=maps.category_display_by_slug.get(maps.category_slug_by_type_slug.get(slug)),
         )
         for slug in maps.v2_slugs
     ]
@@ -1749,8 +1762,8 @@ async def _fetch_event_type_fields(er_client, base_url: str, event_type: str):
 async def action_list_event_categories(integration: Integration, action_config: ListEventCategoriesQuery):
     """Reference action: ER event categories visible to this integration's credentials.
 
-    Unlike `_fetch_category_display_map` (best-effort enrichment for
-    list_event_types' grouping), this fetch is load-bearing — errors
+    Unlike the categories backfill in `_fetch_event_type_maps` (best-effort
+    enrichment for pull filters and list_event_types' grouping), this fetch is load-bearing — errors
     propagate so the portal shows its "couldn't load options" degrade
     instead of silently offering an empty list.
     """

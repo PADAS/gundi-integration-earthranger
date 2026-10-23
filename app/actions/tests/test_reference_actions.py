@@ -151,15 +151,13 @@ async def test_list_event_types_excludes_v1_only_types(
 
 
 @pytest.mark.asyncio
-async def test_list_event_types_group_resolves_via_unconditional_categories_fetch(
+async def test_list_event_types_groups_v2_only_categories_via_the_categories_backfill(
     er_integration_v2_provider, mock_er_client
 ):
-    """A v1 event type already populates category_id_by_slug, which would
-    normally suppress `_fetch_event_type_maps`'s own categories-endpoint
-    fallback (that fallback is tuned for pull_events' UUID-resolution need,
-    not display names). list_event_types must still resolve display names
-    for categories only seen via v2 — via its own unconditional
-    get_event_categories fetch — rather than leaving them ungrouped."""
+    """A v1 event type already populates category_id_by_slug; list_event_types
+    must still resolve display names for categories only seen via v2 rather
+    than leaving them ungrouped. `_fetch_event_type_maps` backfills every
+    category from the categories endpoint, in one fetch."""
     from erclient import VERSION_1_0, VERSION_2_0
 
     async def fake_get_event_types(version=VERSION_1_0, **kwargs):
