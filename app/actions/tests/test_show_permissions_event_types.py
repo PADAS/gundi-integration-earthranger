@@ -76,6 +76,22 @@ async def test_show_permissions_raises_when_both_versions_fail():
 
 
 @pytest.mark.asyncio
+async def test_show_permissions_uses_one_category_name_for_v1_and_v2():
+    client = _er_client()
+    client.get_event_categories = AsyncMock(
+        return_value=[{"value": "monitoring", "display": "Monitoring & Patrols"}]
+    )
+
+    event_types = await _fetch_all_event_types_v1_shape(client)
+
+    categories = _merge_event_categories_and_type_perms(
+        global_category_permissions={}, er_event_types=event_types,
+    )
+    assert categories["Monitoring & Patrols"]["Event Types"] == ["Accident Report", "Wildlife Sighting"]
+    assert "Monitoring" not in categories
+
+
+@pytest.mark.asyncio
 async def test_show_permissions_falls_back_to_slug_when_categories_fail():
     client = _er_client()
     client.get_event_categories = AsyncMock(side_effect=RuntimeError("categories unavailable"))

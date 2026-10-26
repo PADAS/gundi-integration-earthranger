@@ -305,6 +305,19 @@ async def _fetch_all_event_types_v1_shape(er_client):
                     for cat in _as_list(categories)
                     if isinstance(cat, dict) and cat.get("value") and cat.get("display")
                 })
+        # The same final name goes on v1 types too: the categories endpoint can
+        # name a category differently from v1's nested copy, and the card
+        # groups by name, so one category would otherwise show twice.
+        event_types = [
+            {**et, "category": {
+                **et["category"],
+                "display": category_display_by_slug[et["category"]["value"]],
+            }}
+            if isinstance(et.get("category"), dict)
+            and et["category"].get("value") in category_display_by_slug
+            else et
+            for et in event_types
+        ]
         for et in v2_types:
             category_slug = et.get("category")
             if isinstance(category_slug, str) and category_slug:
