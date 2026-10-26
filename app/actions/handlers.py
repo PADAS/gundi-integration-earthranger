@@ -284,18 +284,27 @@ async def _fetch_all_event_types_v1_shape(er_client):
         errors.append(e)
     else:
         v2_types = [et for et in _as_list(v2_types) if isinstance(et, dict)]
-        category_display_by_slug = {}
+        # v1 types already name their categories; seeding from them keeps a
+        # v1 and a v2 type in the same category grouped together even when the
+        # categories request fails.
+        category_display_by_slug = {
+            et["category"]["value"]: et["category"]["display"]
+            for et in event_types
+            if isinstance(et.get("category"), dict)
+            and et["category"].get("value")
+            and et["category"].get("display")
+        }
         if v2_types:
             try:
                 categories = await er_client.get_event_categories()
             except Exception as e:
                 logger.warning("Could not fetch ER event categories: %s", _failure_summary(e))
             else:
-                category_display_by_slug = {
-                    cat["value"]: cat.get("display") or cat["value"]
+                category_display_by_slug.update({
+                    cat["value"]: cat["display"]
                     for cat in _as_list(categories)
-                    if isinstance(cat, dict) and cat.get("value")
-                }
+                    if isinstance(cat, dict) and cat.get("value") and cat.get("display")
+                })
         for et in v2_types:
             category_slug = et.get("category")
             if isinstance(category_slug, str) and category_slug:

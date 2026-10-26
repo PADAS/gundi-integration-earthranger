@@ -84,3 +84,9 @@ async def test_show_permissions_falls_back_to_slug_when_categories_fail():
 
     fire = next(et for et in event_types if et["value"] == "fire")
     assert fire["category"] == {"value": "security", "display": "security", "is_active": True}
+    # The v1 type names "monitoring", so the v2 type in it still groups with it.
+    categories = _merge_event_categories_and_type_perms(
+        global_category_permissions={}, er_event_types=event_types,
+    )
+    assert categories["Monitoring"]["Event Types"] == ["Accident Report", "Wildlife Sighting"]
+    assert "monitoring" not in categories
