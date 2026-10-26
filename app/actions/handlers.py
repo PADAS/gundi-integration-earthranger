@@ -255,6 +255,84 @@ def _merge_event_categories_and_type_perms(global_category_permissions, er_event
     }
 
 
+async def _fetch_all_event_types_v1_shape(er_client):
+    """Every event type the user can see, v1 and v2 alike, in the v1 shape.
+
+    ER's v1 and v2 list endpoints each return only their own version's types
+    (see _fetch_event_type_maps), so both are fetched. v2 records carry the
+    category as a bare slug; it is expanded into the nested dict v1 uses, with
+    the display name from the categories endpoint. The v2 endpoint already
+    leaves out inactive categories, so those are marked active.
+
+    One failing endpoint is logged and the other's types are still returned;
+    only when both fail does the error propagate.
+    """
+    errors = []
+    event_types = []
+    try:
+        v1_types = await er_client.get_event_types(version=VERSION_1_0)
+    except Exception as e:
+        logger.warning("Could not fetch ER v1 event types: %s", _failure_summary(e))
+        errors.append(e)
+    else:
+        event_types.extend(et for et in _as_list(v1_types) if isinstance(et, dict))
+
+    try:
+        v2_types = await er_client.get_event_types(version=VERSION_2_0)
+    except Exception as e:
+        logger.warning("Could not fetch ER v2 event types: %s", _failure_summary(e))
+        errors.append(e)
+    else:
+        v2_types = [et for et in _as_list(v2_types) if isinstance(et, dict)]
+        # v1 types already name their categories; seeding from them keeps a
+        # v1 and a v2 type in the same category grouped together even when the
+        # categories request fails.
+        category_display_by_slug = {
+            et["category"]["value"]: et["category"]["display"]
+            for et in event_types
+            if isinstance(et.get("category"), dict)
+            and et["category"].get("value")
+            and et["category"].get("display")
+        }
+        if v2_types:
+            try:
+                categories = await er_client.get_event_categories()
+            except Exception as e:
+                logger.warning("Could not fetch ER event categories: %s", _failure_summary(e))
+            else:
+                category_display_by_slug.update({
+                    cat["value"]: cat["display"]
+                    for cat in _as_list(categories)
+                    if isinstance(cat, dict) and cat.get("value") and cat.get("display")
+                })
+        # The same final name goes on v1 types too: the categories endpoint can
+        # name a category differently from v1's nested copy, and the card
+        # groups by name, so one category would otherwise show twice.
+        event_types = [
+            {**et, "category": {
+                **et["category"],
+                "display": category_display_by_slug[et["category"]["value"]],
+            }}
+            if isinstance(et.get("category"), dict)
+            and et["category"].get("value") in category_display_by_slug
+            else et
+            for et in event_types
+        ]
+        for et in v2_types:
+            category_slug = et.get("category")
+            if isinstance(category_slug, str) and category_slug:
+                et = {**et, "category": {
+                    "value": category_slug,
+                    "display": category_display_by_slug.get(category_slug, category_slug),
+                    "is_active": True,
+                }}
+            event_types.append(et)
+
+    if len(errors) == 2:
+        raise errors[-1]
+    return event_types
+
+
 def _extract_subject_groups(er_subject_groups):
     result = {}
 
@@ -353,12 +431,11 @@ async def action_show_permissions(integration: Integration, action_config: ShowP
         user_global_permissions = er_user_details.get("permissions", {})
         response["data"]["Global Permissions"] = _extract_global_permissions(er_user_permissions=user_global_permissions)
         global_category_permissions = _extract_category_permissions(er_user_permissions=user_global_permissions)
-        try:  # Get event categories and types from the activity/events/eventtypes endpoint
-            event_types_response = _as_list(await er_client.get_event_types())
+        try:  # Get event categories and types from both the v1 and v2 endpoints
+            event_types_response = await _fetch_all_event_types_v1_shape(er_client)
         except Exception as e:
             response["data"]["Event Categories"]["error"] = _as_integration_error(e).message
         else:
-            event_types_response = [et for et in event_types_response if isinstance(et, dict)]
             response["data"]["Event Categories"] = _merge_event_categories_and_type_perms(
                 global_category_permissions=global_category_permissions,
                 er_event_types=event_types_response
