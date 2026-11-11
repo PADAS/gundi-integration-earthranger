@@ -183,11 +183,11 @@ class PullObservationsConfig(PullActionConfiguration):
     )
     subject_group_ids: List[str] = Field(
         default_factory=list,
-        title="Subject Group UUIDs",
+        title="Subject Groups",
         description=(
-            "List of ER subject-group UUIDs whose members' observations should be included. "
+            "ER subject groups whose members' observations should be included. Pick a group "
+            "from the list, or paste its UUID (the Show Permissions action lists every group's UUID). "
             "Picking a parent group includes its sub-groups' subjects (resolved recursively). "
-            "Run the 'show_permissions' action to find UUIDs available to this account. "
             "An empty list applies no group constraint."
         ),
     )
@@ -230,6 +230,20 @@ class PullObservationsConfig(PullActionConfiguration):
     ui_global_options: GlobalUISchemaOptions = GlobalUISchemaOptions(
         order=["start_datetime", "end_datetime", "subject_group_ids", "subwindow_days", "force_run_since_start", "continue_immediately", "run_on_schedule"],
     )
+
+    @classmethod
+    def ui_schema(cls, *args, **kwargs):
+        """Offer the site's subject groups by name (gundi:reference), and ask
+        the portal to confirm, on Save, which subjects this pull will send
+        (see _share_preview)."""
+        base = super().ui_schema(*args, **kwargs)
+        # Each list item is a dropdown of the site's subject groups by name;
+        # the stored value stays the group UUID.
+        base["subject_group_ids"] = {"items": {"gundi:reference": _reference("list_subject_groups")}}
+        base["gundi:share_preview"] = _share_preview(
+            "preview_subjects_share", "subjects", ["subject_group_ids"]
+        )
+        return base
 
 
 class PullEventsConfig(PullActionConfiguration):
@@ -341,6 +355,9 @@ class PullEventsConfig(PullActionConfiguration):
         base = super().ui_schema(*args, **kwargs)
         base["event_types"] = {"items": {"gundi:reference": _reference("list_event_types")}}
         base["event_categories"] = {"items": {"gundi:reference": _reference("list_event_categories")}}
+        base["gundi:share_preview"] = _share_preview(
+            "preview_events_share", "events", ["event_types", "event_categories"]
+        )
         return base
 
 
@@ -355,12 +372,40 @@ def _reference(action: str, params: Optional[dict] = None) -> dict:
     }
 
 
+def _share_preview(action: str, kind: str, selection_fields: List[str]) -> dict:
+    """gundi:share_preview ui_schema annotation: before saving the action, the
+    portal shows what it will send, read from the preview action `action` with
+    the section's unsaved values. `kind` is "events" or "subjects";
+    `selection_fields` are the fields the user picks in (all empty means
+    everything). Spec: gundi-portal
+    docs/superpowers/specs/2026-11-09-er2er-sharing-preview-modal-design.md
+    """
+    return {"action": action, "kind": kind, "selection_fields": list(selection_fields)}
+
+
+class PreviewEventsShareQuery(ReferenceActionConfiguration):
+    """What Pull Events would send with these values. The portal sends the
+    section's whole form; only the event type and category filters are read."""
+    event_types: List[str] = Field(default_factory=list)
+    event_categories: List[str] = Field(default_factory=list)
+
+
+class PreviewSubjectsShareQuery(ReferenceActionConfiguration):
+    """What Pull Observations would send with these values. The portal sends
+    the section's whole form; only the subject group filter is read."""
+    subject_group_ids: List[str] = Field(default_factory=list)
+
+
 class ListEventTypesQuery(ReferenceActionConfiguration):
     """List the ER event types visible to this integration's credentials."""
 
 
 class ListEventCategoriesQuery(ReferenceActionConfiguration):
     """List the ER event categories visible to this integration's credentials."""
+
+
+class ListSubjectGroupsQuery(ReferenceActionConfiguration):
+    """List the ER subject groups visible to this integration's credentials."""
 
 
 class ListSubjectTypesQuery(ReferenceActionConfiguration):

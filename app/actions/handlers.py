@@ -1,3 +1,5 @@
+import asyncio
+import functools
 import json
 import datetime
 import logging
@@ -23,7 +25,9 @@ from .core import ReferenceDataResponse, ReferenceOption, action_title
 from .er_schema import er_site_root, fetch_prerendered_event_schema, parse_er_event_schema
 from .configurations import AuthenticateConfig, EventFilterDateField, PullObservationsConfig, PullEventsConfig, \
     ERAuthenticationType, ShowPermissionsConfig, ListEventTypesQuery, ListEventTypeFieldsQuery, \
-    ListEventFieldValuesQuery, ListEventCategoriesQuery, ListSubjectTypesQuery
+    ListEventFieldValuesQuery, ListEventCategoriesQuery, ListSubjectTypesQuery, ListSubjectGroupsQuery, PreviewEventsShareQuery, \
+    PreviewSubjectsShareQuery
+from .share_preview import ListReader, preview_events, preview_subjects, subjects_in_groups, walk_groups
 from .source_profiles import SourceProfileResolver
 from ..services.activity_logger import activity_logger, log_action_activity
 from ..services.errors import (
@@ -375,17 +379,7 @@ def _collect_group_uuids(er_subject_groups):
     only reachable by walking. Operators may legitimately want to filter by a
     sub-group UUID, so we expose all of them.
     """
-    uuids = set()
-
-    def walk(group):
-        if group.get("id"):
-            uuids.add(group["id"])
-        for sub in group.get("subgroups", []):
-            walk(sub)
-
-    for group in er_subject_groups:
-        walk(group)
-    return uuids
+    return {g["id"] for g in walk_groups(er_subject_groups) if g.get("id")}
 
 
 async def action_show_permissions(integration: Integration, action_config: ShowPermissionsConfig):
@@ -932,7 +926,8 @@ async def action_pull_observations(integration: Integration, action_config: Pull
             await _release_backfill_lease(integration_id)
 
 
-async def _fetch_source_assignments(er_client, subject_ids, *, integration_id=None):
+async def _fetch_source_assignments(er_client, subject_ids, *, integration_id=None,
+                                    concurrency=1, report=None):
     """Fetch subjectsources for many subjects, chunked to keep URLs short and
     each response within a single page.
 
@@ -942,13 +937,31 @@ async def _fetch_source_assignments(er_client, subject_ids, *, integration_id=No
     sidesteps both. As a safety net we WARN if any chunk response still carries a
     ``next`` (the single-page assumption breaking), and we capture diagnostics on
     unexpected/malformed shapes (problem (b)).
+
+    ``concurrency`` chunks are requested at a time (the pull reads them one by
+    one; the share preview runs inside Save, so it reads a few at once). When
+    ``report`` is given, ``report["incomplete"]`` is set if any chunk may have
+    left assignments out (a further page, an unexpected shape, a malformed record).
     """
     assignments = []
     malformed = 0
-    for chunk in _chunked(subject_ids, SUBJECT_ID_CHUNK_SIZE):
-        raw = await er_client.get_source_assignments(subject_ids=chunk)
+    chunks = list(_chunked(subject_ids, SUBJECT_ID_CHUNK_SIZE))
+    gate = asyncio.Semaphore(max(1, concurrency))
+
+    async def fetch(chunk):
+        async with gate:
+            return await er_client.get_source_assignments(subject_ids=chunk)
+
+    responses = await asyncio.gather(*(fetch(chunk) for chunk in chunks))
+
+    def incomplete():
+        if report is not None:
+            report["incomplete"] = True
+
+    for chunk, raw in zip(chunks, responses):
         if isinstance(raw, dict):
             if raw.get("next"):
+                incomplete()
                 logger.warning(
                     "subjectsources chunk returned a paginated 'next' "
                     "(count=%s, chunk_size=%d) — sources may be dropped; "
@@ -960,6 +973,7 @@ async def _fetch_source_assignments(er_client, subject_ids, *, integration_id=No
         elif isinstance(raw, list):
             records = raw
         else:
+            incomplete()
             logger.warning(
                 "Unexpected subjectsources response type %s: %.200r",
                 type(raw).__name__, raw,
@@ -976,6 +990,7 @@ async def _fetch_source_assignments(er_client, subject_ids, *, integration_id=No
                 assignments.append(rec)
             else:
                 malformed += 1
+                incomplete()
                 logger.warning(
                     "Skipping malformed subjectsource record: %r", rec,
                     extra={"attention_needed": True},
@@ -1002,20 +1017,9 @@ async def _resolve_source_ids(er_client, group_ids, *, integration_id=None):
     if not group_ids:
         return set()
 
-    wanted = set(group_ids)
-    groups = await er_client.get_subjectgroups(flat=False)
-    subject_ids = set()
-
-    def walk(group, inherited=False):
-        matched = inherited or group.get("id") in wanted
-        if matched:
-            for subject in group.get("subjects", []):
-                subject_ids.add(subject["id"])
-        for sub in group.get("subgroups", []):
-            walk(sub, inherited=matched)
-
-    for group in groups:
-        walk(group)
+    groups = _as_list(await er_client.get_subjectgroups(flat=False))
+    # The share preview resolves picked groups with the same function.
+    subject_ids = {str(s["id"]) for s in subjects_in_groups(groups, group_ids)}
 
     if not subject_ids:
         return set()
@@ -1854,6 +1858,81 @@ async def action_list_event_categories(integration: Integration, action_config: 
     ]
     options.sort(key=lambda o: o.label or o.value)
     return ReferenceDataResponse(options=options, truncated=False).dict()
+
+
+async def action_list_subject_groups(integration: Integration, action_config: ListSubjectGroupsQuery):
+    """Reference action: ER subject groups visible to this integration's credentials.
+
+    Feeds the Subject Groups dropdown of pull_observations: the user picks a
+    group by name and the group's UUID is stored. Reads the same subject group
+    tree pull_observations resolves the picked groups in, so every group it
+    can match is offered. A subgroup is grouped under its parent's path
+    ("Parent / Child"), since sibling groups can share a name, the way
+    list_event_types groups types by category. Like list_event_types, it
+    offers names only: ER has no lighter call for the group names, and the
+    portal keeps the answer for cache_ttl_seconds. The fetch is load-bearing:
+    errors propagate so the portal says why the list is empty.
+    """
+    reader = ListReader()
+    async with _translating_er_client(integration) as earth_ranger:
+        tree = reader.records(await earth_ranger.get_subjectgroups(flat=False))
+
+    options = []
+
+    def walk(groups, path):
+        for group in _as_list(groups):
+            if not isinstance(group, dict) or not group.get("id"):
+                continue
+            name = group.get("name") or str(group["id"])
+            options.append(ReferenceOption(
+                value=str(group["id"]),
+                label=name,
+                group=" / ".join(path) or None,
+            ))
+            walk(group.get("subgroups") or [], path + [name])
+
+    walk(tree, [])
+    options.sort(key=lambda o: ((o.group or "").lower(), (o.label or "").lower()))
+    # A paginated answer with more pages means the list is cut short.
+    return ReferenceDataResponse(options=options, truncated=reader.incomplete).dict()
+
+
+@action_title("Preview Pulled Events")
+async def action_preview_events_share(integration: Integration, action_config: PreviewEventsShareQuery):
+    """What Pull Events would send with the given filters, for the portal's
+    confirmation on Save (gundi:share_preview). Failures propagate, so the
+    portal can say why the preview is missing."""
+    async with _translating_er_client(integration) as earth_ranger:
+        return await preview_events(
+            earth_ranger, er_site_root(integration.base_url),
+            action_config.event_types, action_config.event_categories,
+        )
+
+
+@action_title("Preview Pulled Subjects")
+async def action_preview_subjects_share(integration: Integration, action_config: PreviewSubjectsShareQuery):
+    """What Pull Observations would send with the given subject groups, for
+    the portal's confirmation on Save (gundi:share_preview)."""
+    async with _translating_er_client(integration) as earth_ranger:
+        return await preview_subjects(
+            earth_ranger, er_site_root(integration.base_url), action_config.subject_group_ids,
+            # The pull's own device lookup: a subject without a device sends nothing.
+            source_assignments=functools.partial(_preview_source_assignments, earth_ranger),
+        )
+
+
+# subjectsources chunks the share preview reads at once, so a large group
+# answers within the portal's preview timeout.
+PREVIEW_ASSIGNMENT_CONCURRENCY = 8
+
+
+async def _preview_source_assignments(er_client, subject_ids):
+    """The pull's device lookup, a few chunks at a time, and whether it read
+    every assignment."""
+    report = {}
+    found = await _fetch_source_assignments(
+        er_client, subject_ids, concurrency=PREVIEW_ASSIGNMENT_CONCURRENCY, report=report)
+    return found, not report.get("incomplete")
 
 
 async def action_list_subject_types(integration: Integration, action_config: ListSubjectTypesQuery):
