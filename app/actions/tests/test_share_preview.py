@@ -11,6 +11,7 @@ from app.actions.configurations import (
     PullObservationsConfig,
 )
 from app.actions.share_preview import ITEM_CAP, preview_events, preview_subjects
+from app.actions import handlers
 
 SITE = "https://site.pamdas.org"
 
@@ -220,7 +221,7 @@ async def test_subjects_preview_includes_subgroups_of_a_picked_group():
 async def test_subjects_preview_leaves_out_subjects_without_a_device():
     async def assignments(subject_ids):
         assert subject_ids == ["s1", "s2"]
-        return [{"subject": "s2", "source": "src-2"}]
+        return [{"subject": "s2", "source": "src-2"}], True
 
     result = await preview_subjects(_er_client(subjectgroups=SUBJECT_TREE), SITE, ["g-parent"], assignments)
 
@@ -249,6 +250,88 @@ async def test_subjects_preview_cuts_long_groups_and_keeps_the_exact_count():
     assert result["truncated"] is True
     assert len(result["groups"][0]["items"]) == ITEM_CAP
     assert result["groups"][0]["total_count"] == ITEM_CAP + 5
+
+
+
+@pytest.mark.asyncio
+async def test_blank_entries_filter_like_the_pull_instead_of_meaning_everything():
+    events = await preview_events(_er_client(), SITE, [""], None)
+    assert events["mode"] == "selected" and events["selected_count"] == 0
+    assert "Pull Events skips every run" in events["warning"]
+
+    subjects = await preview_subjects(_er_client(subjectgroups=SUBJECT_TREE), SITE, [" "])
+    assert subjects["mode"] == "selected" and subjects["selected_count"] == 0
+    assert "Pull Observations skips every run" in subjects["warning"]
+
+
+@pytest.mark.asyncio
+async def test_events_preview_says_the_pull_skips_when_no_picked_type_resolves():
+    result = await preview_events(_er_client(), SITE, ["cmore_1_old", "nope"], None)
+    assert result["selected_count"] == 0
+    assert "Pull Events skips every run" in result["warning"]
+
+    fine = await preview_events(_er_client(), SITE, ["cmore_1_poacher"], None)
+    assert "skips every run" not in (fine["warning"] or "")
+
+
+@pytest.mark.asyncio
+async def test_subjects_preview_says_the_pull_skips_when_no_picked_subject_has_a_device():
+    async def assignments(subject_ids):
+        return [], True
+
+    result = await preview_subjects(_er_client(subjectgroups=SUBJECT_TREE), SITE, ["g-parent"], assignments)
+    assert result["selected_count"] == 0
+    assert "Pull Observations skips every run" in result["warning"]
+
+
+@pytest.mark.asyncio
+async def test_subjects_preview_checks_devices_with_no_group_picked_too():
+    async def assignments(subject_ids):
+        return [{"subject": "s2", "source": "src-2"}], True
+
+    result = await preview_subjects(_er_client(subjectgroups=SUBJECT_TREE), SITE, [], assignments)
+    assert result["mode"] == "all"
+    assert [i["label"] for g in result["groups"] for i in g["items"]] == ["Lion"]
+    assert result["selected_count"] == 1
+    assert "1 subject has no device" in result["warning"]
+    assert "skips every run" not in result["warning"]
+
+
+@pytest.mark.asyncio
+async def test_subjects_preview_marks_an_incomplete_device_lookup():
+    async def assignments(subject_ids):
+        return [{"subject": "s2", "source": "src-2"}], False
+
+    result = await preview_subjects(_er_client(subjectgroups=SUBJECT_TREE), SITE, ["g-parent"], assignments)
+    assert result["truncated"] is True
+    assert "sent only part of this list" in result["warning"]
+
+
+@pytest.mark.asyncio
+async def test_preview_device_lookup_reads_chunks_at_once_and_reports_gaps():
+    import asyncio
+    running = peak = 0
+
+    async def get_source_assignments(subject_ids):
+        nonlocal running, peak
+        running += 1
+        peak = max(peak, running)
+        await asyncio.sleep(0)
+        running -= 1
+        if subject_ids[0] == "s0":
+            return {"results": [{"subject": "s0", "source": "src-0"}], "next": "page2"}
+        return [{"subject": s, "source": f"src-{s}"} for s in subject_ids]
+
+    client = MagicMock()
+    client.get_source_assignments = AsyncMock(side_effect=get_source_assignments)
+    ids = [f"s{i}" for i in range(handlers.SUBJECT_ID_CHUNK_SIZE * 4)]
+
+    found, complete = await handlers._preview_source_assignments(client, ids)
+
+    assert client.get_source_assignments.await_count == 4
+    assert peak > 1
+    assert complete is False
+    assert len(found) == 1 + handlers.SUBJECT_ID_CHUNK_SIZE * 3
 
 
 def test_pull_actions_ask_the_portal_for_the_preview():

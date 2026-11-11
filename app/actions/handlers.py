@@ -1,3 +1,5 @@
+import asyncio
+import functools
 import json
 import datetime
 import logging
@@ -934,7 +936,8 @@ async def action_pull_observations(integration: Integration, action_config: Pull
             await _release_backfill_lease(integration_id)
 
 
-async def _fetch_source_assignments(er_client, subject_ids, *, integration_id=None):
+async def _fetch_source_assignments(er_client, subject_ids, *, integration_id=None,
+                                    concurrency=1, report=None):
     """Fetch subjectsources for many subjects, chunked to keep URLs short and
     each response within a single page.
 
@@ -944,13 +947,31 @@ async def _fetch_source_assignments(er_client, subject_ids, *, integration_id=No
     sidesteps both. As a safety net we WARN if any chunk response still carries a
     ``next`` (the single-page assumption breaking), and we capture diagnostics on
     unexpected/malformed shapes (problem (b)).
+
+    ``concurrency`` chunks are requested at a time (the pull reads them one by
+    one; the share preview runs inside Save, so it reads a few at once). When
+    ``report`` is given, ``report["incomplete"]`` is set if any chunk may have
+    left assignments out (a further page, an unexpected shape, a malformed record).
     """
     assignments = []
     malformed = 0
-    for chunk in _chunked(subject_ids, SUBJECT_ID_CHUNK_SIZE):
-        raw = await er_client.get_source_assignments(subject_ids=chunk)
+    chunks = list(_chunked(subject_ids, SUBJECT_ID_CHUNK_SIZE))
+    gate = asyncio.Semaphore(max(1, concurrency))
+
+    async def fetch(chunk):
+        async with gate:
+            return await er_client.get_source_assignments(subject_ids=chunk)
+
+    responses = await asyncio.gather(*(fetch(chunk) for chunk in chunks))
+
+    def incomplete():
+        if report is not None:
+            report["incomplete"] = True
+
+    for chunk, raw in zip(chunks, responses):
         if isinstance(raw, dict):
             if raw.get("next"):
+                incomplete()
                 logger.warning(
                     "subjectsources chunk returned a paginated 'next' "
                     "(count=%s, chunk_size=%d) — sources may be dropped; "
@@ -962,6 +983,7 @@ async def _fetch_source_assignments(er_client, subject_ids, *, integration_id=No
         elif isinstance(raw, list):
             records = raw
         else:
+            incomplete()
             logger.warning(
                 "Unexpected subjectsources response type %s: %.200r",
                 type(raw).__name__, raw,
@@ -978,6 +1000,7 @@ async def _fetch_source_assignments(er_client, subject_ids, *, integration_id=No
                 assignments.append(rec)
             else:
                 malformed += 1
+                incomplete()
                 logger.warning(
                     "Skipping malformed subjectsource record: %r", rec,
                     extra={"attention_needed": True},
@@ -1915,8 +1938,22 @@ async def action_preview_subjects_share(integration: Integration, action_config:
         return await preview_subjects(
             earth_ranger, er_site_root(integration.base_url), action_config.subject_group_ids,
             # The pull's own device lookup: a subject without a device sends nothing.
-            source_assignments=lambda subject_ids: _fetch_source_assignments(earth_ranger, subject_ids),
+            source_assignments=functools.partial(_preview_source_assignments, earth_ranger),
         )
+
+
+# subjectsources chunks the share preview reads at once, so a large group
+# answers within the portal's preview timeout.
+PREVIEW_ASSIGNMENT_CONCURRENCY = 8
+
+
+async def _preview_source_assignments(er_client, subject_ids):
+    """The pull's device lookup, a few chunks at a time, and whether it read
+    every assignment."""
+    report = {}
+    found = await _fetch_source_assignments(
+        er_client, subject_ids, concurrency=PREVIEW_ASSIGNMENT_CONCURRENCY, report=report)
+    return found, not report.get("incomplete")
 
 
 async def action_list_subject_types(integration: Integration, action_config: ListSubjectTypesQuery):

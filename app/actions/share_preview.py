@@ -11,7 +11,7 @@ they already read (event types, event categories, the subject group tree), so
 they need no new token permissions.
 """
 import logging
-from typing import Awaitable, Callable, Dict, Iterable, List, Optional
+from typing import Awaitable, Callable, Dict, Iterable, List, Optional, Tuple
 
 from erclient import VERSION_1_0, VERSION_2_0
 
@@ -22,10 +22,10 @@ ITEM_CAP = 200
 
 
 def _wanted(values: Optional[Iterable]) -> List[str]:
-    """The picked values, blank rows left out, kept exactly as given (the pull
-    actions compare them as stored). Empty means "everything". The portal
-    drops blank rows on Save too, so a stored list never holds them."""
-    return [str(v) for v in (values or []) if v is not None and str(v).strip()]
+    """The picked values exactly as given, blank ones included: the pull
+    actions use the stored list as it is, so a list holding only a blank
+    entry still filters (and skips), it doesn't mean "everything"."""
+    return [str(v) for v in (values or []) if v is not None]
 
 
 INCOMPLETE = "EarthRanger sent only part of this list, so some items may be missing below."
@@ -202,7 +202,11 @@ async def preview_events(er_client, site_url: str, event_types: Optional[Iterabl
     # both filters, so their events are left out.
     outside = [by_value[v].get("display") or v for v in used_types
                if wanted_categories and _category_of(by_value[v]) not in used_categories]
+    # The pull skips the run when a filter it was given resolves to nothing.
+    skips = (wanted_types and not used_types) or (wanted_categories and not used_categories)
     warning = _warning(
+        ("None of the chosen event types or categories can be used on this site, so Pull Events "
+         "skips every run and sends nothing.") if skips else None,
         (f"These event types are inactive, so their events won't be shared: {_names(inactive)}."
          if inactive else None),
         (f"These event types aren't in the chosen categories, so their events won't be shared: "
@@ -242,7 +246,7 @@ def subjects_under(group: dict) -> List[dict]:
 
 async def preview_subjects(
         er_client, site_url: str, subject_group_ids: Optional[Iterable],
-        source_assignments: Optional[Callable[[List[str]], Awaitable[List[dict]]]] = None,
+        source_assignments: Optional[Callable[[List[str]], Awaitable[Tuple[List[dict], bool]]]] = None,
 ) -> dict:
     """Subjects grouped by subject group, each with its icon and last point.
 
@@ -252,9 +256,12 @@ async def preview_subjects(
     warning says that subjects outside every group are sent too. Counts are
     distinct subjects: a subject in two groups is pulled once.
 
-    With groups picked, the pull sends points by the devices assigned to the
-    subjects (``source_assignments``, the pull's own lookup), so a subject
-    with no device is left out and counted in a warning.
+    The pull sends points by the devices assigned to the subjects
+    (``source_assignments``, the pull's own lookup, answering the assignments
+    and whether it read them all), so a subject with no device is left out
+    and counted in a warning, whether groups are picked or not. When picked
+    groups leave no subject with a device, the pull skips, and the warning
+    says so.
     """
     reader = _Reader()
     wanted = _wanted(subject_group_ids)
@@ -269,12 +276,16 @@ async def preview_subjects(
         picked = [(g, subjects_under(g)) for g in every if str(g.get("id")) in wanted]
 
     no_device = 0
-    if mode == "selected" and source_assignments is not None:
+    if source_assignments is not None:
         subject_ids = sorted({str(s["id"]) for _, subjects in picked for s in subjects if s.get("id")})
-        with_device = ({str(a.get("subject")) for a in await source_assignments(subject_ids)}
-                       if subject_ids else set())
+        assignments, complete = await source_assignments(subject_ids) if subject_ids else ([], True)
+        if not complete:
+            reader.incomplete = True
+        with_device = {str(a.get("subject")) for a in assignments}
         no_device = len(set(subject_ids) - with_device)
         picked = [(g, [s for s in subjects if str(s.get("id")) in with_device]) for g, subjects in picked]
+        if mode == "all":
+            picked = [(g, subjects) for g, subjects in picked if subjects]
 
     def icon(url: Optional[str]) -> Optional[str]:
         if not url:
@@ -311,13 +322,17 @@ async def preview_subjects(
         groups=groups,
         missing=[v for v in wanted if v not in known],
         warning=_warning(
+            ("The chosen groups have no subject with a device on this site, so Pull Observations "
+             "skips every run and sends nothing.") if mode == "selected" and not any(subjects for _, subjects in picked)
+            else None,
             ("With no subject group picked, subjects that aren't in any subject group are sent too, "
              "and they aren't listed below.") if mode == "all" else
             # The pull picks the devices these subjects use now and sends all
             # their points in the time window, whoever carried them then.
             ("Points are picked by the devices these subjects use now, so points a device recorded "
              "earlier for another subject can be sent too."),
-            (f"{no_device} subject{'' if no_device == 1 else 's'} in these groups "
+            (f"{no_device} subject{'' if no_device == 1 else 's'} "
+             f"{'in these groups ' if mode == 'selected' else ''}"
              f"{'has' if no_device == 1 else 'have'} no device, so nothing is sent for "
              f"{'it' if no_device == 1 else 'them'}.") if no_device else None,
             INCOMPLETE if reader.incomplete else None,
