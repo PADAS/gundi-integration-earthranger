@@ -72,12 +72,14 @@ async def test_events_preview_flags_missing_values_and_types_outside_the_categor
 
 
 @pytest.mark.asyncio
-async def test_events_preview_category_only_lists_its_active_types():
+async def test_events_preview_category_only_lists_its_types_inactive_included():
+    # pull_events adds no active-type constraint, so an inactive type's events are sent.
     result = await preview_events(_er_client(), SITE, [], ["cmore_1"])
 
-    labels = [i["label"] for g in result["groups"] for i in g["items"]]
-    assert labels == ["Evidence of Poacher", "Pangolin Trade"]
-    assert result["groups"][0]["total_count"] == 2
+    items = [i for g in result["groups"] for i in g["items"]]
+    assert [i["label"] for i in items] == ["Evidence of Poacher", "Old Type", "Pangolin Trade"]
+    assert [i["is_active"] for i in items] == [True, False, True]
+    assert result["groups"][0]["total_count"] == 3
 
 
 @pytest.mark.asyncio
@@ -93,13 +95,13 @@ async def test_events_preview_with_no_filter_lists_every_active_type_v1_included
     result = await preview_events(_er_client(), SITE, [], [])
 
     assert result["mode"] == "all"
-    assert result["total_count"] == 4
+    assert result["total_count"] == 5
     # Ordered by category ordernum; v1's nested category becomes a group.
     assert [g["label"] for g in result["groups"]] == ["Security", "Monitoring", "Cmore 1"]
 
 
 @pytest.mark.asyncio
-async def test_events_preview_survives_v1_and_category_failures():
+async def test_events_preview_warns_when_v1_types_are_missing_and_survives_a_category_failure():
     client = _er_client()
 
     async def get_event_types(include_inactive=False, include_schema=False, version=None):
@@ -109,10 +111,35 @@ async def test_events_preview_survives_v1_and_category_failures():
 
     client.get_event_types = AsyncMock(side_effect=get_event_types)
     client.get_event_categories = AsyncMock(side_effect=RuntimeError("down"))
-    result = await preview_events(client, SITE, [], ["cmore_1"])
+    result = await preview_events(client, SITE, ["cmore_1_poacher"], [])
 
+    # Without category names, the group is named by its slug.
     assert result["groups"][0]["label"] == "cmore_1"
-    assert result["selected_count"] == 2
+    assert result["selected_count"] == 1
+    assert "classic (v1)" in result["warning"]
+
+
+@pytest.mark.asyncio
+async def test_events_preview_fails_when_a_picked_category_cant_be_resolved():
+    # v2 types carry the category as a bare slug, so without the categories
+    # call pull_events can't resolve cmore_1 to its UUID and skips the pull.
+    client = _er_client()
+    client.get_event_categories = AsyncMock(side_effect=RuntimeError("down"))
+    with pytest.raises(RuntimeError):
+        await preview_events(client, SITE, [], ["cmore_1"])
+
+    # A category v1 types already resolve is still previewed.
+    result = await preview_events(client, SITE, [], ["security"])
+    assert result["groups"][0]["items"][0]["value"] == "carcass_rep"
+
+
+@pytest.mark.asyncio
+async def test_events_preview_says_when_er_sent_only_part_of_a_list():
+    client = _er_client(types_v2={"results": V2_TYPES, "next": "https://site/api?page=2"})
+    result = await preview_events(client, SITE, [], [])
+
+    assert result["truncated"] is True
+    assert "only part of this list" in result["warning"]
 
 
 SUBJECT_TREE = [
@@ -151,6 +178,7 @@ async def test_subjects_preview_with_no_group_lists_every_group_with_subjects_on
     result = await preview_subjects(_er_client(subjectgroups=SUBJECT_TREE), SITE, [])
 
     assert result["mode"] == "all"
+    assert "aren't in any subject group" in result["warning"]
     assert [g["label"] for g in result["groups"]] == ["Child", "Parent"]
     assert result["selected_count"] == result["total_count"] == 2
 

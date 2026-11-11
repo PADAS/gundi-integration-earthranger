@@ -23,15 +23,34 @@ ITEM_CAP = 200
 
 def _wanted(values: Optional[Iterable]) -> List[str]:
     """The picked values, blank rows left out, kept exactly as given (the pull
-    actions compare them as stored). Empty means "everything"."""
+    actions compare them as stored). Empty means "everything". The portal
+    drops blank rows on Save too, so a stored list never holds them."""
     return [str(v) for v in (values or []) if v is not None and str(v).strip()]
 
 
-def _records(response) -> List[dict]:
-    """An ER list response as a list of dicts (flat list or paginated envelope)."""
-    if isinstance(response, dict):
-        response = response.get("results", [])
-    return [r for r in (response or []) if isinstance(r, dict)]
+INCOMPLETE = "EarthRanger sent only part of this list, so some items may be missing below."
+
+
+class _Reader:
+    """Reads ER list responses and remembers when one came back paginated
+    with more pages: these endpoints answer with one full list on the sites
+    we know, and the pull actions read the same single response, so a further
+    page is not fetched; the preview says it may be incomplete instead."""
+
+    def __init__(self):
+        self.incomplete = False
+
+    def records(self, response) -> List[dict]:
+        """An ER list response as a list of dicts (flat list or paginated envelope)."""
+        if isinstance(response, dict):
+            if response.get("next"):
+                self.incomplete = True
+            response = response.get("results", [])
+        return [r for r in (response or []) if isinstance(r, dict)]
+
+
+def _warning(*sentences: Optional[str]) -> Optional[str]:
+    return " ".join(s for s in sentences if s) or None
 
 
 def _category_of(event_type: dict) -> Optional[str]:
@@ -51,8 +70,8 @@ def _names(values: List[str]) -> str:
 
 
 def _response(site_url: str, mode: str, selected_count: int, total_count: int, groups: List[dict],
-              missing: List[str], warning: Optional[str]) -> dict:
-    truncated = False
+              missing: List[str], warning: Optional[str], incomplete: bool = False) -> dict:
+    truncated = incomplete
     for group in groups:
         if len(group["items"]) > ITEM_CAP:
             group["items"] = group["items"][:ITEM_CAP]
@@ -75,31 +94,47 @@ async def preview_events(er_client, site_url: str, event_types: Optional[Iterabl
 
     pull_events filters by event type AND event category, so a type is listed
     only when it passes both filters that are set. With neither set, every
-    event is pulled, of any type. v2 types are load-bearing (a failure
-    propagates, so the portal says why); v1 types and category names only
-    complete the list.
+    event is pulled, of any type. Inactive types are listed too (marked
+    inactive): the pull adds no active-type constraint, so their events are
+    sent. v2 types are load-bearing (a failure propagates, so the portal says
+    why). A failed v1 lookup leaves a warning, since v1 events are sent too.
+    A failed categories lookup propagates only when a picked category can't be
+    resolved without it, which is when the pull itself skips.
     """
+    reader = _Reader()
     wanted_types = _wanted(event_types)
     wanted_categories = _wanted(event_categories)
     mode = "selected" if (wanted_types or wanted_categories) else "all"
 
-    types = _records(await er_client.get_event_types(include_inactive=True, version=VERSION_2_0))
+    types = reader.records(await er_client.get_event_types(include_inactive=True, version=VERSION_2_0))
     seen = {t.get("value") for t in types}
+    v1_failed = None
     try:
-        v1_types = _records(await er_client.get_event_types(include_inactive=True, version=VERSION_1_0))
+        v1_types = reader.records(await er_client.get_event_types(include_inactive=True, version=VERSION_1_0))
     except Exception as e:  # best-effort, as in _fetch_event_type_maps
         logger.warning("Preview: could not fetch ER v1 event types: %s", type(e).__name__)
+        v1_failed = ("EarthRanger didn't send its classic (v1) event types, so their events "
+                     "may be sent too without being listed below.")
     else:
         types += [t for t in v1_types if t.get("value") not in seen]
     types = [t for t in types if t.get("value")]
 
     categories: Dict[str, dict] = {}
     try:
-        for c in _records(await er_client.get_event_categories(include_inactive=True)):
+        for c in reader.records(await er_client.get_event_categories(include_inactive=True)):
             if c.get("value"):
                 categories[c["value"]] = c
     except Exception as e:
         logger.warning("Preview: could not fetch ER event categories: %s", type(e).__name__)
+        # pull_events resolves a picked category to its UUID from v1's nested
+        # category records or from this call, and skips when it can't; the
+        # preview must not show a list the pull won't send.
+        v1_category_ids = {
+            t["category"].get("value") for t in types
+            if isinstance(t.get("category"), dict) and t["category"].get("id")
+        }
+        if any(c not in v1_category_ids for c in wanted_categories):
+            raise
     # A category a type points at always gets a group, named after the type's
     # own category record when the categories call didn't return it.
     for t in types:
@@ -115,9 +150,7 @@ async def preview_events(er_client, site_url: str, event_types: Optional[Iterabl
     def active(t: dict) -> bool:
         return t.get("is_active") is not False
 
-    # A deactivated type is listed (marked inactive) when it was picked by
-    # name; otherwise only active types are listed.
-    picked = [t for t in types if passes(t) and (active(t) or t["value"] in wanted_types)]
+    picked = [t for t in types if passes(t)]
 
     def item(t: dict) -> dict:
         return {
@@ -138,7 +171,7 @@ async def preview_events(er_client, site_url: str, event_types: Optional[Iterabl
             "value": slug,
             "label": category.get("display") or slug,
             "order": category.get("ordernum") or 0,
-            "total_count": sum(1 for t in types if _category_of(t) == slug and active(t)),
+            "total_count": sum(1 for t in types if _category_of(t) == slug),
             "items": items,
         })
     groups.sort(key=lambda g: (g["order"], (g["label"] or "").lower()))
@@ -151,16 +184,21 @@ async def preview_events(er_client, site_url: str, event_types: Optional[Iterabl
     outside = [t.get("display") or t["value"] for t in types
                if t["value"] in wanted_types and wanted_categories
                and _category_of(t) not in wanted_categories]
-    warning = (f"These event types aren't in the chosen categories, so their events won't be shared: "
-               f"{_names(outside)}." if outside else None)
+    warning = _warning(
+        (f"These event types aren't in the chosen categories, so their events won't be shared: "
+         f"{_names(outside)}.") if outside else None,
+        v1_failed,
+        INCOMPLETE if reader.incomplete else None,
+    )
 
     return _response(
         site_url, mode,
         selected_count=len(picked),
-        total_count=sum(1 for t in types if active(t)),
+        total_count=len(types),
         groups=groups,
         missing=missing,
         warning=warning,
+        incomplete=reader.incomplete,
     )
 
 
@@ -187,13 +225,15 @@ async def preview_subjects(er_client, site_url: str, subject_group_ids: Optional
 
     pull_observations includes a picked group's subgroups, so each picked group
     lists its subgroups' subjects too. With no group picked, every source the
-    token reads is pulled, so every group with subjects is listed. Counts are
+    token reads is pulled, so every group with subjects is listed, and a
+    warning says that subjects outside every group are sent too. Counts are
     distinct subjects: a subject in two groups is pulled once.
     """
+    reader = _Reader()
     wanted = _wanted(subject_group_ids)
     mode = "selected" if wanted else "all"
     # The same call pull_observations makes to resolve the picked groups.
-    tree = _records(await er_client.get_subjectgroups(flat=False))
+    tree = reader.records(await er_client.get_subjectgroups(flat=False))
     every = [g for g, _ in _walk(tree)]
     if mode == "all":
         picked = [(g, [s for s in (g.get("subjects") or []) if isinstance(s, dict)]) for g in every]
@@ -235,5 +275,10 @@ async def preview_subjects(er_client, site_url: str, subject_group_ids: Optional
         total_count=distinct(_subjects_under(g) for g in tree),
         groups=groups,
         missing=[v for v in wanted if v not in known],
-        warning=None,
+        warning=_warning(
+            ("With no subject group picked, subjects that aren't in any subject group are sent too, "
+             "and they aren't listed below.") if mode == "all" else None,
+            INCOMPLETE if reader.incomplete else None,
+        ),
+        incomplete=reader.incomplete,
     )
