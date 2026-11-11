@@ -1872,6 +1872,8 @@ async def action_list_subject_groups(integration: Integration, action_config: Li
         tree = await earth_ranger.get_subjectgroups(flat=False)
 
     options = []
+    # A paginated answer with more pages means the list is cut short.
+    truncated = isinstance(tree, dict) and bool(tree.get("next"))
 
     def walk(groups, path):
         for group in _as_list(groups):
@@ -1890,7 +1892,7 @@ async def action_list_subject_groups(integration: Integration, action_config: Li
 
     walk(tree, [])
     options.sort(key=lambda o: ((o.group or "").lower(), (o.label or "").lower()))
-    return ReferenceDataResponse(options=options, truncated=False).dict()
+    return ReferenceDataResponse(options=options, truncated=truncated).dict()
 
 
 @action_title("Preview Pulled Events")

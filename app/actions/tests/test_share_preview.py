@@ -27,8 +27,8 @@ V1_TYPES = [
      "category": {"value": "security", "display": "Security", "id": "c-sec"}},
 ]
 CATEGORIES = [
-    {"value": "cmore_1", "display": "Cmore 1", "ordernum": 2},
-    {"value": "monitoring", "display": "Monitoring", "ordernum": 1},
+    {"id": "c-cmore", "value": "cmore_1", "display": "Cmore 1", "ordernum": 2},
+    {"id": "c-mon", "value": "monitoring", "display": "Monitoring", "ordernum": 1},
 ]
 
 
@@ -83,11 +83,33 @@ async def test_events_preview_category_only_lists_its_types_inactive_included():
 
 
 @pytest.mark.asyncio
-async def test_events_preview_lists_an_inactive_type_picked_by_name():
-    result = await preview_events(_er_client(), SITE, ["cmore_1_old"], [])
+async def test_events_preview_drops_an_inactive_type_picked_by_name():
+    # pull_events resolves picked types from the active listings only.
+    result = await preview_events(_er_client(), SITE, ["cmore_1_old", "cmore_1_trade"], [])
 
-    item = result["groups"][0]["items"][0]
-    assert item["value"] == "cmore_1_old" and item["is_active"] is False
+    assert [i["value"] for g in result["groups"] for i in g["items"]] == ["cmore_1_trade"]
+    assert "inactive" in result["warning"] and "Old Type" in result["warning"]
+
+
+@pytest.mark.asyncio
+async def test_events_preview_drops_a_category_the_pull_cant_resolve():
+    # A v2 type's category missing from the categories answer has no UUID, so
+    # the pull can't filter by it and skips: nothing is listed.
+    types = V2_TYPES + [{"value": "x_rep", "display": "X", "category": "ghost", "is_active": True}]
+    result = await preview_events(_er_client(types_v2=types), SITE, [], ["ghost"])
+
+    assert result["groups"] == [] and result["selected_count"] == 0
+    assert result["missing_values"] == ["ghost"]
+
+
+@pytest.mark.asyncio
+async def test_events_preview_lists_types_without_a_category_as_uncategorized():
+    types = V2_TYPES + [{"value": "loose_rep", "display": "Loose", "category": None, "is_active": True}]
+    result = await preview_events(_er_client(types_v2=types), SITE, ["loose_rep"], [])
+
+    assert [(g["label"], [i["value"] for i in g["items"]]) for g in result["groups"]] == [
+        ("Uncategorized", ["loose_rep"])
+    ]
 
 
 @pytest.mark.asyncio
@@ -171,6 +193,7 @@ async def test_subjects_preview_includes_subgroups_of_a_picked_group():
     assert group["items"][0]["icon_url"] == "https://cdn/lion.svg"
     assert result["selected_count"] == 2
     assert result["missing_values"] == ["missing"]
+    assert "devices these subjects use now" in result["warning"]
 
 
 @pytest.mark.asyncio
@@ -233,6 +256,11 @@ async def test_list_subject_groups_offers_every_group_by_name_under_its_parent(m
     # A parent counts its subgroups' subjects, as picking it includes them.
     assert options["g-parent"]["description"] == "2 subjects"
     assert options["g-child"]["description"] == "2 subjects"
+    assert result["truncated"] is False
+
+    client.get_subjectgroups = AsyncMock(return_value={"results": SUBJECT_TREE, "next": "https://site/api?page=2"})
+    result = await handlers_module.action_list_subject_groups(er_integration_v2_provider, ListSubjectGroupsQuery())
+    assert result["truncated"] is True
 
 
 def test_subject_groups_field_is_a_dropdown_of_the_site_groups():

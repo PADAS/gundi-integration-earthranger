@@ -93,10 +93,11 @@ async def preview_events(er_client, site_url: str, event_types: Optional[Iterabl
     """Event types grouped by category, each with its icon and default priority.
 
     pull_events filters by event type AND event category, so a type is listed
-    only when it passes both filters that are set. With neither set, every
-    event is pulled, of any type. Inactive types are listed too (marked
-    inactive): the pull adds no active-type constraint, so their events are
-    sent. v2 types are load-bearing (a failure propagates, so the portal says
+    only when it passes both filters that are set, as the pull resolves them
+    to UUIDs. With neither set, every event is pulled, of any type. Inactive
+    types are listed too (marked inactive) unless picked by name: the pull
+    adds no active-type constraint, but resolves picked types from the active
+    listings only. v2 types are load-bearing (a failure propagates, so the portal says
     why). A failed v1 lookup leaves a warning, since v1 events are sent too.
     A failed categories lookup propagates only when a picked category can't be
     resolved without it, which is when the pull itself skips.
@@ -120,21 +121,30 @@ async def preview_events(er_client, site_url: str, event_types: Optional[Iterabl
     types = [t for t in types if t.get("value")]
 
     categories: Dict[str, dict] = {}
+    categories_error = None
     try:
         for c in reader.records(await er_client.get_event_categories(include_inactive=True)):
             if c.get("value"):
                 categories[c["value"]] = c
     except Exception as e:
         logger.warning("Preview: could not fetch ER event categories: %s", type(e).__name__)
-        # pull_events resolves a picked category to its UUID from v1's nested
-        # category records or from this call, and skips when it can't; the
-        # preview must not show a list the pull won't send.
-        v1_category_ids = {
-            t["category"].get("value") for t in types
-            if isinstance(t.get("category"), dict) and t["category"].get("id")
-        }
-        if any(c not in v1_category_ids for c in wanted_categories):
-            raise
+        categories_error = e
+
+    # pull_events resolves a picked category to its UUID from v1's nested
+    # category records or from the categories call, drops the ones it can't
+    # resolve, and skips when the categories call failed for one of them.
+    resolvable_categories = {slug for slug, c in categories.items() if c.get("id")} | {
+        t["category"].get("value") for t in types
+        if isinstance(t.get("category"), dict) and t["category"].get("id")
+    }
+    if categories_error and any(c not in resolvable_categories for c in wanted_categories):
+        raise categories_error
+    # It resolves a picked type from the active listings only, so a picked
+    # inactive type is dropped from the filter.
+    active_values = {t["value"] for t in types if t.get("is_active") is not False}
+    used_types = [v for v in wanted_types if v in active_values]
+    used_categories = [c for c in wanted_categories if c in resolvable_categories]
+
     # A category a type points at always gets a group, named after the type's
     # own category record when the categories call didn't return it.
     for t in types:
@@ -142,10 +152,14 @@ async def preview_events(er_client, site_url: str, event_types: Optional[Iterabl
         if slug and slug not in categories:
             raw = t.get("category")
             categories[slug] = raw if isinstance(raw, dict) else {"value": slug}
+    if any(not _category_of(t) for t in types):
+        categories[""] = {"value": "", "display": "Uncategorized", "ordernum": float("inf")}
 
     def passes(t: dict) -> bool:
-        return ((not wanted_types or t["value"] in wanted_types)
-                and (not wanted_categories or _category_of(t) in wanted_categories))
+        # A filter with nothing resolvable left makes the pull skip, so
+        # nothing passes it.
+        return ((not wanted_types or t["value"] in used_types)
+                and (not wanted_categories or _category_of(t) in used_categories))
 
     def active(t: dict) -> bool:
         return t.get("is_active") is not False
@@ -164,27 +178,30 @@ async def preview_events(er_client, site_url: str, event_types: Optional[Iterabl
 
     groups = []
     for slug, category in categories.items():
-        items = sorted((item(t) for t in picked if _category_of(t) == slug), key=_by_label)
+        items = sorted((item(t) for t in picked if (_category_of(t) or "") == slug), key=_by_label)
         if not items:
             continue
         groups.append({
             "value": slug,
             "label": category.get("display") or slug,
             "order": category.get("ordernum") or 0,
-            "total_count": sum(1 for t in types if _category_of(t) == slug),
+            "total_count": sum(1 for t in types if (_category_of(t) or "") == slug),
             "items": items,
         })
     groups.sort(key=lambda g: (g["order"], (g["label"] or "").lower()))
 
-    known_types = {t["value"] for t in types}
-    missing = ([v for v in wanted_types if v not in known_types]
-               + [v for v in wanted_categories if v not in categories])
+    by_value = {t["value"]: t for t in types}
+    missing = ([v for v in wanted_types if v not in by_value]
+               + [v for v in wanted_categories if v not in resolvable_categories])
+    inactive = [by_value[v].get("display") or v for v in wanted_types
+                if v in by_value and v not in active_values]
     # Picked types outside the picked categories: ER applies both filters, so
     # their events are left out.
-    outside = [t.get("display") or t["value"] for t in types
-               if t["value"] in wanted_types and wanted_categories
-               and _category_of(t) not in wanted_categories]
+    outside = [by_value[v].get("display") or v for v in used_types
+               if wanted_categories and _category_of(by_value[v]) not in wanted_categories]
     warning = _warning(
+        (f"These event types are inactive, so their events won't be shared: {_names(inactive)}."
+         if inactive else None),
         (f"These event types aren't in the chosen categories, so their events won't be shared: "
          f"{_names(outside)}.") if outside else None,
         v1_failed,
@@ -277,7 +294,11 @@ async def preview_subjects(er_client, site_url: str, subject_group_ids: Optional
         missing=[v for v in wanted if v not in known],
         warning=_warning(
             ("With no subject group picked, subjects that aren't in any subject group are sent too, "
-             "and they aren't listed below.") if mode == "all" else None,
+             "and they aren't listed below.") if mode == "all" else
+            # The pull picks the devices these subjects use now and sends all
+            # their points in the time window, whoever carried them then.
+            ("Points are picked by the devices these subjects use now, so points a device recorded "
+             "earlier for another subject can be sent too."),
             INCOMPLETE if reader.incomplete else None,
         ),
         incomplete=reader.incomplete,
