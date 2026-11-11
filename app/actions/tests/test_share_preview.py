@@ -1,0 +1,184 @@
+from unittest.mock import AsyncMock, MagicMock
+
+import pytest
+from erclient import VERSION_1_0, VERSION_2_0
+
+from app.actions.configurations import (
+    PreviewEventsShareQuery,
+    PreviewSubjectsShareQuery,
+    PullEventsConfig,
+    PullObservationsConfig,
+)
+from app.actions.share_preview import ITEM_CAP, preview_events, preview_subjects
+
+SITE = "https://site.pamdas.org"
+
+V2_TYPES = [
+    {"value": "cmore_1_poacher", "display": "Evidence of Poacher", "category": "cmore_1",
+     "icon_id": "cmore_1_poacher", "default_priority": 300, "is_active": True},
+    {"value": "cmore_1_trade", "display": "Pangolin Trade", "category": "cmore_1",
+     "icon_id": None, "default_priority": 0, "is_active": True},
+    {"value": "cmore_1_old", "display": "Old Type", "category": "cmore_1", "is_active": False},
+    {"value": "wildlife_sighting_rep", "display": "Wildlife Sighting", "category": "monitoring",
+     "icon_id": "wildlife_sighting_rep", "default_priority": 100, "is_active": True},
+]
+V1_TYPES = [
+    {"value": "carcass_rep", "display": "Carcass", "is_active": True, "default_priority": 200,
+     "category": {"value": "security", "display": "Security", "id": "c-sec"}},
+]
+CATEGORIES = [
+    {"value": "cmore_1", "display": "Cmore 1", "ordernum": 2},
+    {"value": "monitoring", "display": "Monitoring", "ordernum": 1},
+]
+
+
+def _er_client(types_v2=V2_TYPES, types_v1=V1_TYPES, categories=CATEGORIES, subjectgroups=None):
+    client = MagicMock()
+
+    async def get_event_types(include_inactive=False, include_schema=False, version=None):
+        return {VERSION_2_0: types_v2, VERSION_1_0: types_v1}[version]
+
+    client.get_event_types = AsyncMock(side_effect=get_event_types)
+    client.get_event_categories = AsyncMock(return_value=categories)
+    client.get_subjectgroups = AsyncMock(return_value=subjectgroups or [])
+    return client
+
+
+@pytest.mark.asyncio
+async def test_events_preview_lists_only_types_that_pass_both_filters():
+    result = await preview_events(_er_client(), SITE, ["cmore_1_poacher", "cmore_1_trade"], ["cmore_1"])
+
+    assert result["mode"] == "selected"
+    assert result["selected_count"] == 2
+    assert [g["label"] for g in result["groups"]] == ["Cmore 1"]
+    items = result["groups"][0]["items"]
+    assert [i["label"] for i in items] == ["Evidence of Poacher", "Pangolin Trade"]
+    assert items[0]["priority"] == 300
+    assert items[0]["icon_url"] == f"{SITE}/static/sprite-src/cmore_1_poacher.svg"
+    # No icon_id: the slug names the icon, as in EarthRanger.
+    assert items[1]["icon_url"] == f"{SITE}/static/sprite-src/cmore_1_trade.svg"
+    assert result["missing_values"] == [] and result["warning"] is None
+
+
+@pytest.mark.asyncio
+async def test_events_preview_flags_missing_values_and_types_outside_the_categories():
+    result = await preview_events(
+        _er_client(), SITE, ["cmore_1_poacher", "wildlife_sighting_rep", "nope_rep"], ["cmore_1", "gone"]
+    )
+
+    assert result["selected_count"] == 1
+    assert result["missing_values"] == ["nope_rep", "gone"]
+    assert "Wildlife Sighting" in result["warning"]
+
+
+@pytest.mark.asyncio
+async def test_events_preview_category_only_lists_its_active_types():
+    result = await preview_events(_er_client(), SITE, [], ["cmore_1"])
+
+    labels = [i["label"] for g in result["groups"] for i in g["items"]]
+    assert labels == ["Evidence of Poacher", "Pangolin Trade"]
+    assert result["groups"][0]["total_count"] == 2
+
+
+@pytest.mark.asyncio
+async def test_events_preview_lists_an_inactive_type_picked_by_name():
+    result = await preview_events(_er_client(), SITE, ["cmore_1_old"], [])
+
+    item = result["groups"][0]["items"][0]
+    assert item["value"] == "cmore_1_old" and item["is_active"] is False
+
+
+@pytest.mark.asyncio
+async def test_events_preview_with_no_filter_lists_every_active_type_v1_included():
+    result = await preview_events(_er_client(), SITE, [], [])
+
+    assert result["mode"] == "all"
+    assert result["total_count"] == 4
+    # Ordered by category ordernum; v1's nested category becomes a group.
+    assert [g["label"] for g in result["groups"]] == ["Security", "Monitoring", "Cmore 1"]
+
+
+@pytest.mark.asyncio
+async def test_events_preview_survives_v1_and_category_failures():
+    client = _er_client()
+
+    async def get_event_types(include_inactive=False, include_schema=False, version=None):
+        if version == VERSION_1_0:
+            raise RuntimeError("v1 down")
+        return V2_TYPES
+
+    client.get_event_types = AsyncMock(side_effect=get_event_types)
+    client.get_event_categories = AsyncMock(side_effect=RuntimeError("down"))
+    result = await preview_events(client, SITE, [], ["cmore_1"])
+
+    assert result["groups"][0]["label"] == "cmore_1"
+    assert result["selected_count"] == 2
+
+
+SUBJECT_TREE = [
+    {"id": "g-parent", "name": "Parent", "subjects": [
+        {"id": "s1", "name": "Zebra", "image_url": "/static/zebra.svg", "last_position_date": "2026-11-09T09:41:00Z"},
+    ], "subgroups": [
+        {"id": "g-child", "name": "Child", "subjects": [
+            {"id": "s2", "name": "Lion", "image_url": "https://cdn/lion.svg"},
+            {"id": "s1", "name": "Zebra", "image_url": "/static/zebra.svg"},
+        ], "subgroups": []},
+    ]},
+    {"id": "g-empty", "name": "Empty", "subjects": [], "subgroups": []},
+]
+
+
+@pytest.mark.asyncio
+async def test_subjects_preview_includes_subgroups_of_a_picked_group():
+    client = _er_client(subjectgroups=SUBJECT_TREE)
+    result = await preview_subjects(client, SITE, ["g-parent", "missing"])
+
+    client.get_subjectgroups.assert_awaited_once_with(flat=False)
+    assert result["mode"] == "selected"
+    group = result["groups"][0]
+    assert group["label"] == "Parent" and group["total_count"] == 2
+    assert [i["label"] for i in group["items"]] == ["Lion", "Zebra"]
+    zebra = group["items"][1]
+    assert zebra["icon_url"] == f"{SITE}/static/zebra.svg"
+    assert zebra["detail"] == "2026-11-09T09:41:00Z"
+    assert group["items"][0]["icon_url"] == "https://cdn/lion.svg"
+    assert result["selected_count"] == 2
+    assert result["missing_values"] == ["missing"]
+
+
+@pytest.mark.asyncio
+async def test_subjects_preview_with_no_group_lists_every_group_with_subjects_once():
+    result = await preview_subjects(_er_client(subjectgroups=SUBJECT_TREE), SITE, [])
+
+    assert result["mode"] == "all"
+    assert [g["label"] for g in result["groups"]] == ["Child", "Parent"]
+    assert result["selected_count"] == result["total_count"] == 2
+
+
+@pytest.mark.asyncio
+async def test_subjects_preview_cuts_long_groups_and_keeps_the_exact_count():
+    subjects = [{"id": f"s{i}", "name": f"S{i:04}"} for i in range(ITEM_CAP + 5)]
+    tree = [{"id": "g", "name": "Big", "subjects": subjects, "subgroups": []}]
+    result = await preview_subjects(_er_client(subjectgroups=tree), SITE, ["g"])
+
+    assert result["truncated"] is True
+    assert len(result["groups"][0]["items"]) == ITEM_CAP
+    assert result["groups"][0]["total_count"] == ITEM_CAP + 5
+
+
+def test_pull_actions_ask_the_portal_for_the_preview():
+    assert PullEventsConfig.ui_schema()["gundi:share_preview"] == {
+        "action": "preview_events_share", "kind": "events",
+        "selection_fields": ["event_types", "event_categories"],
+    }
+    assert PullObservationsConfig.ui_schema()["gundi:share_preview"] == {
+        "action": "preview_subjects_share", "kind": "subjects",
+        "selection_fields": ["subject_group_ids"],
+    }
+
+
+def test_preview_queries_ignore_the_rest_of_the_form():
+    form = {"start_datetime": "2026-06-01T00:00:00Z", "run_on_schedule": True,
+            "event_types": ["a"], "event_categories": ["b"], "subject_group_ids": ["g"]}
+    assert PreviewEventsShareQuery.parse_obj(form).event_types == ["a"]
+    assert PreviewSubjectsShareQuery.parse_obj(form).subject_group_ids == ["g"]

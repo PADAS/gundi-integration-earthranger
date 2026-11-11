@@ -231,6 +231,16 @@ class PullObservationsConfig(PullActionConfiguration):
         order=["start_datetime", "end_datetime", "subject_group_ids", "subwindow_days", "force_run_since_start", "continue_immediately", "run_on_schedule"],
     )
 
+    @classmethod
+    def ui_schema(cls, *args, **kwargs):
+        """Ask the portal to confirm, on Save, which subjects this pull will
+        send (see _share_preview)."""
+        base = super().ui_schema(*args, **kwargs)
+        base["gundi:share_preview"] = _share_preview(
+            "preview_subjects_share", "subjects", ["subject_group_ids"]
+        )
+        return base
+
 
 class PullEventsConfig(PullActionConfiguration):
     start_datetime: str = FieldWithUIOptions(
@@ -341,6 +351,9 @@ class PullEventsConfig(PullActionConfiguration):
         base = super().ui_schema(*args, **kwargs)
         base["event_types"] = {"items": {"gundi:reference": _reference("list_event_types")}}
         base["event_categories"] = {"items": {"gundi:reference": _reference("list_event_categories")}}
+        base["gundi:share_preview"] = _share_preview(
+            "preview_events_share", "events", ["event_types", "event_categories"]
+        )
         return base
 
 
@@ -353,6 +366,30 @@ def _reference(action: str, params: Optional[dict] = None) -> dict:
         "params": params or {},
         "allow_free_text": True,
     }
+
+
+def _share_preview(action: str, kind: str, selection_fields: List[str]) -> dict:
+    """gundi:share_preview ui_schema annotation: before saving the action, the
+    portal shows what it will send, read from the preview action `action` with
+    the section's unsaved values. `kind` is "events" or "subjects";
+    `selection_fields` are the fields the user picks in (all empty means
+    everything). Spec: gundi-portal
+    docs/superpowers/specs/2026-11-09-er2er-sharing-preview-modal-design.md
+    """
+    return {"action": action, "kind": kind, "selection_fields": list(selection_fields)}
+
+
+class PreviewEventsShareQuery(ReferenceActionConfiguration):
+    """What Pull Events would send with these values. The portal sends the
+    section's whole form; only the event type and category filters are read."""
+    event_types: List[str] = Field(default_factory=list)
+    event_categories: List[str] = Field(default_factory=list)
+
+
+class PreviewSubjectsShareQuery(ReferenceActionConfiguration):
+    """What Pull Observations would send with these values. The portal sends
+    the section's whole form; only the subject group filter is read."""
+    subject_group_ids: List[str] = Field(default_factory=list)
 
 
 class ListEventTypesQuery(ReferenceActionConfiguration):

@@ -23,7 +23,9 @@ from .core import ReferenceDataResponse, ReferenceOption, action_title
 from .er_schema import er_site_root, fetch_prerendered_event_schema, parse_er_event_schema
 from .configurations import AuthenticateConfig, EventFilterDateField, PullObservationsConfig, PullEventsConfig, \
     ERAuthenticationType, ShowPermissionsConfig, ListEventTypesQuery, ListEventTypeFieldsQuery, \
-    ListEventFieldValuesQuery, ListEventCategoriesQuery, ListSubjectTypesQuery
+    ListEventFieldValuesQuery, ListEventCategoriesQuery, ListSubjectTypesQuery, PreviewEventsShareQuery, \
+    PreviewSubjectsShareQuery
+from .share_preview import preview_events, preview_subjects
 from .source_profiles import SourceProfileResolver
 from ..services.activity_logger import activity_logger, log_action_activity
 from ..services.errors import (
@@ -1854,6 +1856,28 @@ async def action_list_event_categories(integration: Integration, action_config: 
     ]
     options.sort(key=lambda o: o.label or o.value)
     return ReferenceDataResponse(options=options, truncated=False).dict()
+
+
+@action_title("Preview Pulled Events")
+async def action_preview_events_share(integration: Integration, action_config: PreviewEventsShareQuery):
+    """What Pull Events would send with the given filters, for the portal's
+    confirmation on Save (gundi:share_preview). Failures propagate, so the
+    portal can say why the preview is missing."""
+    async with _translating_er_client(integration) as earth_ranger:
+        return await preview_events(
+            earth_ranger, er_site_root(integration.base_url),
+            action_config.event_types, action_config.event_categories,
+        )
+
+
+@action_title("Preview Pulled Subjects")
+async def action_preview_subjects_share(integration: Integration, action_config: PreviewSubjectsShareQuery):
+    """What Pull Observations would send with the given subject groups, for
+    the portal's confirmation on Save (gundi:share_preview)."""
+    async with _translating_er_client(integration) as earth_ranger:
+        return await preview_subjects(
+            earth_ranger, er_site_root(integration.base_url), action_config.subject_group_ids,
+        )
 
 
 async def action_list_subject_types(integration: Integration, action_config: ListSubjectTypesQuery):
