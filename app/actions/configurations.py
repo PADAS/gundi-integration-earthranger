@@ -183,11 +183,11 @@ class PullObservationsConfig(PullActionConfiguration):
     )
     subject_group_ids: List[str] = Field(
         default_factory=list,
-        title="Subject Group UUIDs",
+        title="Subject Groups",
         description=(
-            "List of ER subject-group UUIDs whose members' observations should be included. "
+            "ER subject groups whose members' observations should be included. Pick a group "
+            "from the list, or paste its UUID. "
             "Picking a parent group includes its sub-groups' subjects (resolved recursively). "
-            "Run the 'show_permissions' action to find UUIDs available to this account. "
             "An empty list applies no group constraint."
         ),
     )
@@ -233,9 +233,13 @@ class PullObservationsConfig(PullActionConfiguration):
 
     @classmethod
     def ui_schema(cls, *args, **kwargs):
-        """Ask the portal to confirm, on Save, which subjects this pull will
-        send (see _share_preview)."""
+        """Offer the site's subject groups by name (gundi:reference), and ask
+        the portal to confirm, on Save, which subjects this pull will send
+        (see _share_preview)."""
         base = super().ui_schema(*args, **kwargs)
+        # Each list item is a dropdown of the site's subject groups by name;
+        # the stored value stays the group UUID.
+        base["subject_group_ids"] = {"items": {"gundi:reference": _reference("list_subject_groups")}}
         base["gundi:share_preview"] = _share_preview(
             "preview_subjects_share", "subjects", ["subject_group_ids"]
         )
@@ -398,6 +402,10 @@ class ListEventTypesQuery(ReferenceActionConfiguration):
 
 class ListEventCategoriesQuery(ReferenceActionConfiguration):
     """List the ER event categories visible to this integration's credentials."""
+
+
+class ListSubjectGroupsQuery(ReferenceActionConfiguration):
+    """List the ER subject groups visible to this integration's credentials."""
 
 
 class ListSubjectTypesQuery(ReferenceActionConfiguration):

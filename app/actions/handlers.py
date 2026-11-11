@@ -23,9 +23,9 @@ from .core import ReferenceDataResponse, ReferenceOption, action_title
 from .er_schema import er_site_root, fetch_prerendered_event_schema, parse_er_event_schema
 from .configurations import AuthenticateConfig, EventFilterDateField, PullObservationsConfig, PullEventsConfig, \
     ERAuthenticationType, ShowPermissionsConfig, ListEventTypesQuery, ListEventTypeFieldsQuery, \
-    ListEventFieldValuesQuery, ListEventCategoriesQuery, ListSubjectTypesQuery, PreviewEventsShareQuery, \
+    ListEventFieldValuesQuery, ListEventCategoriesQuery, ListSubjectTypesQuery, ListSubjectGroupsQuery, PreviewEventsShareQuery, \
     PreviewSubjectsShareQuery
-from .share_preview import preview_events, preview_subjects
+from .share_preview import _subjects_under, preview_events, preview_subjects
 from .source_profiles import SourceProfileResolver
 from ..services.activity_logger import activity_logger, log_action_activity
 from ..services.errors import (
@@ -1855,6 +1855,41 @@ async def action_list_event_categories(integration: Integration, action_config: 
         if isinstance(cat, dict) and cat.get("value")
     ]
     options.sort(key=lambda o: o.label or o.value)
+    return ReferenceDataResponse(options=options, truncated=False).dict()
+
+
+async def action_list_subject_groups(integration: Integration, action_config: ListSubjectGroupsQuery):
+    """Reference action: ER subject groups visible to this integration's credentials.
+
+    Feeds the Subject Groups dropdown of pull_observations: the user picks a
+    group by name and the group's UUID is stored. Reads the same subject group
+    tree pull_observations resolves the picked groups in, so every group it
+    can match is offered. A subgroup is grouped under its parent's path
+    ("Parent / Child"), since sibling groups can share a name. The fetch is
+    load-bearing: errors propagate so the portal says why the list is empty.
+    """
+    async with _translating_er_client(integration) as earth_ranger:
+        tree = await earth_ranger.get_subjectgroups(flat=False)
+
+    options = []
+
+    def walk(groups, path):
+        for group in _as_list(groups):
+            if not isinstance(group, dict) or not group.get("id"):
+                continue
+            name = group.get("name") or str(group["id"])
+            # Picking a group includes its subgroups' subjects, so count those too.
+            count = len(_subjects_under(group))
+            options.append(ReferenceOption(
+                value=str(group["id"]),
+                label=name,
+                group=" / ".join(path) or None,
+                description=f"{count} subject{'' if count == 1 else 's'}",
+            ))
+            walk(group.get("subgroups") or [], path + [name])
+
+    walk(tree, [])
+    options.sort(key=lambda o: ((o.group or "").lower(), (o.label or "").lower()))
     return ReferenceDataResponse(options=options, truncated=False).dict()
 
 

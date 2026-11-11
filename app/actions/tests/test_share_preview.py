@@ -182,3 +182,31 @@ def test_preview_queries_ignore_the_rest_of_the_form():
             "event_types": ["a"], "event_categories": ["b"], "subject_group_ids": ["g"]}
     assert PreviewEventsShareQuery.parse_obj(form).event_types == ["a"]
     assert PreviewSubjectsShareQuery.parse_obj(form).subject_group_ids == ["g"]
+
+
+@pytest.mark.asyncio
+async def test_list_subject_groups_offers_every_group_by_name_under_its_parent(mocker, er_integration_v2_provider):
+    from app.actions import handlers as handlers_module
+    from app.actions.configurations import ListSubjectGroupsQuery
+
+    client = _er_client(subjectgroups=SUBJECT_TREE)
+    client_cls = MagicMock()
+    client_cls.return_value.__aenter__ = AsyncMock(return_value=client)
+    client_cls.return_value.__aexit__ = AsyncMock(return_value=False)
+    mocker.patch.object(handlers_module, "AsyncERClient", client_cls)
+
+    result = await handlers_module.action_list_subject_groups(er_integration_v2_provider, ListSubjectGroupsQuery())
+
+    client.get_subjectgroups.assert_awaited_once_with(flat=False)
+    options = {o["value"]: o for o in result["options"]}
+    assert set(options) == {"g-parent", "g-child", "g-empty"}
+    assert options["g-child"]["label"] == "Child" and options["g-child"]["group"] == "Parent"
+    assert options["g-parent"]["group"] is None
+    # A parent counts its subgroups' subjects, as picking it includes them.
+    assert options["g-parent"]["description"] == "2 subjects"
+    assert options["g-child"]["description"] == "2 subjects"
+
+
+def test_subject_groups_field_is_a_dropdown_of_the_site_groups():
+    ui = PullObservationsConfig.ui_schema()["subject_group_ids"]
+    assert ui["items"]["gundi:reference"]["action"] == "list_subject_groups"
