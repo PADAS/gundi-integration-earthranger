@@ -10,7 +10,7 @@ from app.actions.configurations import (
     PullEventsConfig,
     PullObservationsConfig,
 )
-from app.actions.share_preview import ITEM_CAP, preview_events, preview_subjects
+from app.actions.share_preview import ITEM_CAP, preview_events, preview_subjects, subjects_in_groups
 from app.actions import handlers
 
 SITE = "https://site.pamdas.org"
@@ -332,6 +332,23 @@ async def test_preview_device_lookup_reads_chunks_at_once_and_reports_gaps():
     assert peak > 1
     assert complete is False
     assert len(found) == 1 + handlers.SUBJECT_ID_CHUNK_SIZE * 3
+
+
+
+@pytest.mark.asyncio
+async def test_the_pull_and_the_preview_resolve_picked_groups_the_same_way():
+    picked = ["g-child", "missing"]
+    shared = {s["id"] for s in subjects_in_groups(SUBJECT_TREE, picked)}
+
+    er_client = MagicMock()
+    er_client.get_subjectgroups = AsyncMock(return_value=SUBJECT_TREE)
+    er_client.get_source_assignments = AsyncMock(side_effect=lambda subject_ids: [
+        {"subject": s, "source": f"src-{s}"} for s in subject_ids])
+    pulled = await handlers._resolve_source_ids(er_client, group_ids=picked)
+    preview = await preview_subjects(_er_client(subjectgroups=SUBJECT_TREE), SITE, picked)
+
+    assert pulled == {f"src-{s}" for s in shared}
+    assert {i["value"] for g in preview["groups"] for i in g["items"]} == shared
 
 
 def test_pull_actions_ask_the_portal_for_the_preview():

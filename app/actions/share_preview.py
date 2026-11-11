@@ -31,7 +31,7 @@ def _wanted(values: Optional[Iterable]) -> List[str]:
 INCOMPLETE = "EarthRanger sent only part of this list, so some items may be missing below."
 
 
-class _Reader:
+class ListReader:
     """Reads ER list responses and remembers when one came back paginated
     with more pages: these endpoints answer with one full list on the sites
     we know, and the pull actions read the same single response, so a further
@@ -102,7 +102,7 @@ async def preview_events(er_client, site_url: str, event_types: Optional[Iterabl
     A failed categories lookup propagates only when a picked category can't be
     resolved without it, which is when the pull itself skips.
     """
-    reader = _Reader()
+    reader = ListReader()
     wanted_types = _wanted(event_types)
     wanted_categories = _wanted(event_categories)
     mode = "selected" if (wanted_types or wanted_categories) else "all"
@@ -228,20 +228,46 @@ async def preview_events(er_client, site_url: str, event_types: Optional[Iterabl
 
 def _walk(groups: List[dict]):
     """Every group in ER's subject group tree, with its descendants' subjects."""
-    for group in groups:
-        children = [g for g in (group.get("subgroups") or []) if isinstance(g, dict)]
+    for group, children in _walk_level(groups):
         yield group, children
         yield from _walk(children)
 
 
+def walk_groups(groups: List[dict]):
+    """Every group in ER's subject group tree, subgroups included."""
+    return (g for g, _ in _walk(groups))
+
+
 def subjects_under(group: dict) -> List[dict]:
     """A group's subjects and its subgroups', as pull_observations includes them."""
-    found = {}
-    for g, _ in _walk([group]):
-        for s in g.get("subjects") or []:
-            if isinstance(s, dict) and s.get("id"):
-                found.setdefault(str(s["id"]), s)
+    return subjects_in_groups([group], [group.get("id")])
+
+
+def subjects_in_groups(tree: List[dict], group_ids: Iterable) -> List[dict]:
+    """The distinct subjects pull_observations sends for the picked groups:
+    each picked group's subjects and its subgroups'. The pull and the share
+    preview both resolve picked groups here, so they can't disagree."""
+    wanted = {str(g) for g in group_ids}
+    found: Dict[str, dict] = {}
+
+    def visit(groups: List[dict], inherited: bool):
+        for group, children in _walk_level(groups):
+            matched = inherited or str(group.get("id")) in wanted
+            if matched:
+                for s in group.get("subjects") or []:
+                    if isinstance(s, dict) and s.get("id"):
+                        found.setdefault(str(s["id"]), s)
+            visit(children, matched)
+
+    visit(tree, False)
     return list(found.values())
+
+
+def _walk_level(groups: List[dict]):
+    """One level of the tree: each group with its subgroups."""
+    for group in groups:
+        if isinstance(group, dict):
+            yield group, [g for g in (group.get("subgroups") or []) if isinstance(g, dict)]
 
 
 async def preview_subjects(
@@ -263,7 +289,7 @@ async def preview_subjects(
     groups leave no subject with a device, the pull skips, and the warning
     says so.
     """
-    reader = _Reader()
+    reader = ListReader()
     wanted = _wanted(subject_group_ids)
     mode = "selected" if wanted else "all"
     # The same call pull_observations makes to resolve the picked groups.

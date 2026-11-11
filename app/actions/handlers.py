@@ -27,7 +27,7 @@ from .configurations import AuthenticateConfig, EventFilterDateField, PullObserv
     ERAuthenticationType, ShowPermissionsConfig, ListEventTypesQuery, ListEventTypeFieldsQuery, \
     ListEventFieldValuesQuery, ListEventCategoriesQuery, ListSubjectTypesQuery, ListSubjectGroupsQuery, PreviewEventsShareQuery, \
     PreviewSubjectsShareQuery
-from .share_preview import preview_events, preview_subjects
+from .share_preview import ListReader, preview_events, preview_subjects, subjects_in_groups, walk_groups
 from .source_profiles import SourceProfileResolver
 from ..services.activity_logger import activity_logger, log_action_activity
 from ..services.errors import (
@@ -379,17 +379,7 @@ def _collect_group_uuids(er_subject_groups):
     only reachable by walking. Operators may legitimately want to filter by a
     sub-group UUID, so we expose all of them.
     """
-    uuids = set()
-
-    def walk(group):
-        if group.get("id"):
-            uuids.add(group["id"])
-        for sub in group.get("subgroups", []):
-            walk(sub)
-
-    for group in er_subject_groups:
-        walk(group)
-    return uuids
+    return {g["id"] for g in walk_groups(er_subject_groups) if g.get("id")}
 
 
 async def action_show_permissions(integration: Integration, action_config: ShowPermissionsConfig):
@@ -1027,20 +1017,9 @@ async def _resolve_source_ids(er_client, group_ids, *, integration_id=None):
     if not group_ids:
         return set()
 
-    wanted = set(group_ids)
-    groups = await er_client.get_subjectgroups(flat=False)
-    subject_ids = set()
-
-    def walk(group, inherited=False):
-        matched = inherited or group.get("id") in wanted
-        if matched:
-            for subject in group.get("subjects", []):
-                subject_ids.add(subject["id"])
-        for sub in group.get("subgroups", []):
-            walk(sub, inherited=matched)
-
-    for group in groups:
-        walk(group)
+    groups = _as_list(await er_client.get_subjectgroups(flat=False))
+    # The share preview resolves picked groups with the same function.
+    subject_ids = {str(s["id"]) for s in subjects_in_groups(groups, group_ids)}
 
     if not subject_ids:
         return set()
@@ -1894,12 +1873,11 @@ async def action_list_subject_groups(integration: Integration, action_config: Li
     portal keeps the answer for cache_ttl_seconds. The fetch is load-bearing:
     errors propagate so the portal says why the list is empty.
     """
+    reader = ListReader()
     async with _translating_er_client(integration) as earth_ranger:
-        tree = await earth_ranger.get_subjectgroups(flat=False)
+        tree = reader.records(await earth_ranger.get_subjectgroups(flat=False))
 
     options = []
-    # A paginated answer with more pages means the list is cut short.
-    truncated = isinstance(tree, dict) and bool(tree.get("next"))
 
     def walk(groups, path):
         for group in _as_list(groups):
@@ -1915,7 +1893,8 @@ async def action_list_subject_groups(integration: Integration, action_config: Li
 
     walk(tree, [])
     options.sort(key=lambda o: ((o.group or "").lower(), (o.label or "").lower()))
-    return ReferenceDataResponse(options=options, truncated=truncated).dict()
+    # A paginated answer with more pages means the list is cut short.
+    return ReferenceDataResponse(options=options, truncated=reader.incomplete).dict()
 
 
 @action_title("Preview Pulled Events")
