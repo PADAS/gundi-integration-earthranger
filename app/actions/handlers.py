@@ -27,7 +27,7 @@ from .configurations import AuthenticateConfig, EventFilterDateField, PullObserv
     ERAuthenticationType, ShowPermissionsConfig, ListEventTypesQuery, ListEventTypeFieldsQuery, \
     ListEventFieldValuesQuery, ListEventCategoriesQuery, ListSubjectTypesQuery, ListSubjectGroupsQuery, PreviewEventsShareQuery, \
     PreviewSubjectsShareQuery
-from .share_preview import preview_events, preview_subjects, subjects_under
+from .share_preview import preview_events, preview_subjects
 from .source_profiles import SourceProfileResolver
 from ..services.activity_logger import activity_logger, log_action_activity
 from ..services.errors import (
@@ -1888,8 +1888,11 @@ async def action_list_subject_groups(integration: Integration, action_config: Li
     group by name and the group's UUID is stored. Reads the same subject group
     tree pull_observations resolves the picked groups in, so every group it
     can match is offered. A subgroup is grouped under its parent's path
-    ("Parent / Child"), since sibling groups can share a name. The fetch is
-    load-bearing: errors propagate so the portal says why the list is empty.
+    ("Parent / Child"), since sibling groups can share a name, the way
+    list_event_types groups types by category. Like list_event_types, it
+    offers names only: ER has no lighter call for the group names, and the
+    portal keeps the answer for cache_ttl_seconds. The fetch is load-bearing:
+    errors propagate so the portal says why the list is empty.
     """
     async with _translating_er_client(integration) as earth_ranger:
         tree = await earth_ranger.get_subjectgroups(flat=False)
@@ -1903,13 +1906,10 @@ async def action_list_subject_groups(integration: Integration, action_config: Li
             if not isinstance(group, dict) or not group.get("id"):
                 continue
             name = group.get("name") or str(group["id"])
-            # Picking a group includes its subgroups' subjects, so count those too.
-            count = len(subjects_under(group))
             options.append(ReferenceOption(
                 value=str(group["id"]),
                 label=name,
                 group=" / ".join(path) or None,
-                description=f"{count} subject{'' if count == 1 else 's'}",
             ))
             walk(group.get("subgroups") or [], path + [name])
 

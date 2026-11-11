@@ -370,9 +370,8 @@ async def test_list_subject_groups_offers_every_group_by_name_under_its_parent(m
     assert set(options) == {"g-parent", "g-child", "g-empty"}
     assert options["g-child"]["label"] == "Child" and options["g-child"]["group"] == "Parent"
     assert options["g-parent"]["group"] is None
-    # A parent counts its subgroups' subjects, as picking it includes them.
-    assert options["g-parent"]["description"] == "2 subjects"
-    assert options["g-child"]["description"] == "2 subjects"
+    # Names only, like the event types dropdown: no subject counts.
+    assert all(o.get("description") is None for o in options.values())
     assert result["truncated"] is False
 
     client.get_subjectgroups = AsyncMock(return_value={"results": SUBJECT_TREE, "next": "https://site/api?page=2"})
