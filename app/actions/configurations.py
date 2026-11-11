@@ -186,7 +186,7 @@ class PullObservationsConfig(PullActionConfiguration):
         title="Subject Groups",
         description=(
             "ER subject groups whose members' observations should be included. Pick a group "
-            "from the list, or paste its UUID. "
+            "from the list, or paste its UUID (the Show Permissions action lists every group's UUID). "
             "Picking a parent group includes its sub-groups' subjects (resolved recursively). "
             "An empty list applies no group constraint."
         ),
