@@ -25,7 +25,7 @@ from .configurations import AuthenticateConfig, EventFilterDateField, PullObserv
     ERAuthenticationType, ShowPermissionsConfig, ListEventTypesQuery, ListEventTypeFieldsQuery, \
     ListEventFieldValuesQuery, ListEventCategoriesQuery, ListSubjectTypesQuery, ListSubjectGroupsQuery, PreviewEventsShareQuery, \
     PreviewSubjectsShareQuery
-from .share_preview import _subjects_under, preview_events, preview_subjects
+from .share_preview import preview_events, preview_subjects, subjects_under
 from .source_profiles import SourceProfileResolver
 from ..services.activity_logger import activity_logger, log_action_activity
 from ..services.errors import (
@@ -1881,7 +1881,7 @@ async def action_list_subject_groups(integration: Integration, action_config: Li
                 continue
             name = group.get("name") or str(group["id"])
             # Picking a group includes its subgroups' subjects, so count those too.
-            count = len(_subjects_under(group))
+            count = len(subjects_under(group))
             options.append(ReferenceOption(
                 value=str(group["id"]),
                 label=name,
@@ -1914,6 +1914,8 @@ async def action_preview_subjects_share(integration: Integration, action_config:
     async with _translating_er_client(integration) as earth_ranger:
         return await preview_subjects(
             earth_ranger, er_site_root(integration.base_url), action_config.subject_group_ids,
+            # The pull's own device lookup: a subject without a device sends nothing.
+            source_assignments=lambda subject_ids: _fetch_source_assignments(earth_ranger, subject_ids),
         )
 
 

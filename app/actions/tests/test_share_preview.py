@@ -1,3 +1,4 @@
+import json
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -110,6 +111,25 @@ async def test_events_preview_lists_types_without_a_category_as_uncategorized():
     assert [(g["label"], [i["value"] for i in g["items"]]) for g in result["groups"]] == [
         ("Uncategorized", ["loose_rep"])
     ]
+    # The runner answers with JSON that refuses NaN/Infinity.
+    json.dumps(result, allow_nan=False)
+
+    everything = await preview_events(_er_client(types_v2=types), SITE, [], [])
+    assert everything["groups"][-1]["label"] == "Uncategorized"
+    json.dumps(everything, allow_nan=False)
+
+
+@pytest.mark.asyncio
+async def test_events_preview_resolves_categories_only_through_active_v1_types():
+    # Categories call down: pull_events resolves a category only from the
+    # active v1 listing, so a category reachable only through an inactive v1
+    # type makes it skip.
+    v1 = [{"value": "old_rep", "display": "Old", "is_active": False,
+           "category": {"value": "legacy", "display": "Legacy", "id": "c-legacy"}}]
+    client = _er_client(types_v1=v1)
+    client.get_event_categories = AsyncMock(side_effect=RuntimeError("down"))
+    with pytest.raises(RuntimeError):
+        await preview_events(client, SITE, [], ["legacy"])
 
 
 @pytest.mark.asyncio
@@ -194,6 +214,20 @@ async def test_subjects_preview_includes_subgroups_of_a_picked_group():
     assert result["selected_count"] == 2
     assert result["missing_values"] == ["missing"]
     assert "devices these subjects use now" in result["warning"]
+
+
+@pytest.mark.asyncio
+async def test_subjects_preview_leaves_out_subjects_without_a_device():
+    async def assignments(subject_ids):
+        assert subject_ids == ["s1", "s2"]
+        return [{"subject": "s2", "source": "src-2"}]
+
+    result = await preview_subjects(_er_client(subjectgroups=SUBJECT_TREE), SITE, ["g-parent"], assignments)
+
+    assert [i["label"] for g in result["groups"] for i in g["items"]] == ["Lion"]
+    assert result["selected_count"] == 1
+    assert "1 subject in these groups has no device" in result["warning"]
+    json.dumps(result, allow_nan=False)
 
 
 @pytest.mark.asyncio

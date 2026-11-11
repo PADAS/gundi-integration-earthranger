@@ -11,7 +11,7 @@ they already read (event types, event categories, the subject group tree), so
 they need no new token permissions.
 """
 import logging
-from typing import Dict, Iterable, List, Optional
+from typing import Awaitable, Callable, Dict, Iterable, List, Optional
 
 from erclient import VERSION_1_0, VERSION_2_0
 
@@ -133,9 +133,11 @@ async def preview_events(er_client, site_url: str, event_types: Optional[Iterabl
     # pull_events resolves a picked category to its UUID from v1's nested
     # category records or from the categories call, drops the ones it can't
     # resolve, and skips when the categories call failed for one of them.
+    # The pull reads the active listings, so only active types lend their
+    # nested category UUID.
     resolvable_categories = {slug for slug, c in categories.items() if c.get("id")} | {
         t["category"].get("value") for t in types
-        if isinstance(t.get("category"), dict) and t["category"].get("id")
+        if isinstance(t.get("category"), dict) and t["category"].get("id") and t.get("is_active") is not False
     }
     if categories_error and any(c not in resolvable_categories for c in wanted_categories):
         raise categories_error
@@ -153,7 +155,7 @@ async def preview_events(er_client, site_url: str, event_types: Optional[Iterabl
             raw = t.get("category")
             categories[slug] = raw if isinstance(raw, dict) else {"value": slug}
     if any(not _category_of(t) for t in types):
-        categories[""] = {"value": "", "display": "Uncategorized", "ordernum": float("inf")}
+        categories[""] = {"value": "", "display": "Uncategorized"}
 
     def passes(t: dict) -> bool:
         # A filter with nothing resolvable left makes the pull skip, so
@@ -188,17 +190,18 @@ async def preview_events(er_client, site_url: str, event_types: Optional[Iterabl
             "total_count": sum(1 for t in types if (_category_of(t) or "") == slug),
             "items": items,
         })
-    groups.sort(key=lambda g: (g["order"], (g["label"] or "").lower()))
+    # Uncategorized last; the order stays a finite number so the answer is valid JSON.
+    groups.sort(key=lambda g: (g["value"] == "", g["order"], (g["label"] or "").lower()))
 
     by_value = {t["value"]: t for t in types}
     missing = ([v for v in wanted_types if v not in by_value]
                + [v for v in wanted_categories if v not in resolvable_categories])
     inactive = [by_value[v].get("display") or v for v in wanted_types
                 if v in by_value and v not in active_values]
-    # Picked types outside the picked categories: ER applies both filters, so
-    # their events are left out.
+    # Picked types outside the picked categories (that resolve): ER applies
+    # both filters, so their events are left out.
     outside = [by_value[v].get("display") or v for v in used_types
-               if wanted_categories and _category_of(by_value[v]) not in wanted_categories]
+               if wanted_categories and _category_of(by_value[v]) not in used_categories]
     warning = _warning(
         (f"These event types are inactive, so their events won't be shared: {_names(inactive)}."
          if inactive else None),
@@ -227,7 +230,7 @@ def _walk(groups: List[dict]):
         yield from _walk(children)
 
 
-def _subjects_under(group: dict) -> List[dict]:
+def subjects_under(group: dict) -> List[dict]:
     """A group's subjects and its subgroups', as pull_observations includes them."""
     found = {}
     for g, _ in _walk([group]):
@@ -237,7 +240,10 @@ def _subjects_under(group: dict) -> List[dict]:
     return list(found.values())
 
 
-async def preview_subjects(er_client, site_url: str, subject_group_ids: Optional[Iterable]) -> dict:
+async def preview_subjects(
+        er_client, site_url: str, subject_group_ids: Optional[Iterable],
+        source_assignments: Optional[Callable[[List[str]], Awaitable[List[dict]]]] = None,
+) -> dict:
     """Subjects grouped by subject group, each with its icon and last point.
 
     pull_observations includes a picked group's subgroups, so each picked group
@@ -245,6 +251,10 @@ async def preview_subjects(er_client, site_url: str, subject_group_ids: Optional
     token reads is pulled, so every group with subjects is listed, and a
     warning says that subjects outside every group are sent too. Counts are
     distinct subjects: a subject in two groups is pulled once.
+
+    With groups picked, the pull sends points by the devices assigned to the
+    subjects (``source_assignments``, the pull's own lookup), so a subject
+    with no device is left out and counted in a warning.
     """
     reader = _Reader()
     wanted = _wanted(subject_group_ids)
@@ -256,7 +266,15 @@ async def preview_subjects(er_client, site_url: str, subject_group_ids: Optional
         picked = [(g, [s for s in (g.get("subjects") or []) if isinstance(s, dict)]) for g in every]
         picked = [(g, subjects) for g, subjects in picked if subjects]
     else:
-        picked = [(g, _subjects_under(g)) for g in every if str(g.get("id")) in wanted]
+        picked = [(g, subjects_under(g)) for g in every if str(g.get("id")) in wanted]
+
+    no_device = 0
+    if mode == "selected" and source_assignments is not None:
+        subject_ids = sorted({str(s["id"]) for _, subjects in picked for s in subjects if s.get("id")})
+        with_device = ({str(a.get("subject")) for a in await source_assignments(subject_ids)}
+                       if subject_ids else set())
+        no_device = len(set(subject_ids) - with_device)
+        picked = [(g, [s for s in subjects if str(s.get("id")) in with_device]) for g, subjects in picked]
 
     def icon(url: Optional[str]) -> Optional[str]:
         if not url:
@@ -289,7 +307,7 @@ async def preview_subjects(er_client, site_url: str, subject_group_ids: Optional
     return _response(
         site_url, mode,
         selected_count=distinct(subjects for _, subjects in picked),
-        total_count=distinct(_subjects_under(g) for g in tree),
+        total_count=distinct(subjects_under(g) for g in tree),
         groups=groups,
         missing=[v for v in wanted if v not in known],
         warning=_warning(
@@ -299,6 +317,9 @@ async def preview_subjects(er_client, site_url: str, subject_group_ids: Optional
             # their points in the time window, whoever carried them then.
             ("Points are picked by the devices these subjects use now, so points a device recorded "
              "earlier for another subject can be sent too."),
+            (f"{no_device} subject{'' if no_device == 1 else 's'} in these groups "
+             f"{'has' if no_device == 1 else 'have'} no device, so nothing is sent for "
+             f"{'it' if no_device == 1 else 'them'}.") if no_device else None,
             INCOMPLETE if reader.incomplete else None,
         ),
         incomplete=reader.incomplete,
