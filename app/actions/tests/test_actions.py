@@ -3209,6 +3209,7 @@ async def test_auth_action_reads_one_item_and_recent_observations_by_cursor(mock
     assert set(calls) == {"activity/events", "subjects", "observations"}
     assert all(params["page_size"] == 1 for params in calls.values())
     assert calls["observations"]["use_cursor"] == "true"
+    assert calls["activity/events"]["use_cursor"] == "true"  # a numbered page counts every event
     age = dt.datetime.now(dt.timezone.utc) - dt.datetime.fromisoformat(calls["observations"]["since"])
     assert dt.timedelta(hours=23) < age < dt.timedelta(hours=25)
 

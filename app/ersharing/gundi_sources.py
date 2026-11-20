@@ -14,7 +14,7 @@ from typing import Awaitable, Callable, Dict, Iterable, List, Optional
 
 import httpx
 from gundi_client_v2 import GundiClient
-from gundi_client_v2.errors import AuthenticationError, GundiAPIError
+from gundi_client_v2.errors import GundiClientError as _GundiClientError
 from redis.exceptions import RedisError
 
 from app.services.errors import IntegrationError
@@ -22,7 +22,9 @@ from .state import OBSERVATIONS_ACTION, ShareState
 
 logger = logging.getLogger(__name__)
 
-GundiClientError = (AuthenticationError, GundiAPIError)
+# Every Gundi client error (sign-in, API answer, token cache setup), and a Redis
+# error from a shared token cache: none of them may stop the share.
+GundiClientError = (_GundiClientError, RedisError)
 
 # Gundi answers 409 when the connection already has a source with this id.
 REGISTERED_STATUSES = {200, 201, 409}

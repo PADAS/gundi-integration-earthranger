@@ -190,3 +190,14 @@ async def test_an_area_filter_is_noted(site):
     tracks = await preview_subjects(site, [], ["fg1", ""])
     assert tracks["warning"] == "Only track points inside the chosen areas are shared."
     assert (await preview_subjects(site, [], [""]))["warning"] is None
+
+
+@pytest.mark.asyncio
+async def test_types_without_a_category_get_their_own_group_last(site):
+    site.event_types["loose"] = {"value": "loose", "display": "Loose report", "category": None, "is_active": True}
+    site.event_types["blank"] = {"value": "blank", "display": "Blank report", "category": "", "is_active": True}
+    result = await preview_events(site, [])
+    assert [(g["label"], [i["value"] for i in g["items"]]) for g in result["groups"]] == [
+        ("Security", ["poaching"]), ("Monitoring", ["fire"]), ("Uncategorized", ["blank", "loose"])]
+    assert (result["selected_count"], result["total_count"]) == (4, 4)
+    assert result["groups"][-1]["total_count"] == 2

@@ -123,21 +123,24 @@ async def preview_events(site, event_types: Optional[Iterable], area_feature_gro
         if slug and slug not in known_categories:
             raw = t.get("category")
             known_categories[slug] = raw if isinstance(raw, dict) else {"value": slug}
+    # Types without a category are shared too, so they get a group of their own.
+    if any(not category_value(t) for t in types):
+        known_categories[""] = {"value": "", "display": "Uncategorized"}
 
     groups = []
-    for category in known_categories.values():
-        slug = category.get("value")
-        items = sorted((item(t) for t in picked if category_value(t) == slug), key=_by_label)
+    for slug, category in known_categories.items():
+        items = sorted((item(t) for t in picked if (category_value(t) or "") == slug), key=_by_label)
         if not items:
             continue
         groups.append({
             "value": slug,
             "label": category.get("display") or slug,
             "order": category.get("ordernum") or 0,
-            "total_count": sum(1 for t in types if category_value(t) == slug),
+            "total_count": sum(1 for t in types if (category_value(t) or "") == slug),
             "items": items,
         })
-    groups.sort(key=lambda g: (g["order"], (g["label"] or "").lower()))
+    # Uncategorized last.
+    groups.sort(key=lambda g: (g["value"] == "", g["order"], (g["label"] or "").lower()))
     return _response(
         site_url, mode,
         selected_count=sum(len(g["items"]) for g in groups),

@@ -166,7 +166,14 @@ class ERSite:
                     **extra,
                 )]
 
-            page = await self._call(read_page)
+            try:
+                page = await self._call(read_page)
+            except Exception as e:
+                # ER answers 404 for a page number past the last page: a full page that all
+                # changed at the same time was the end of the listing.
+                if page_number > 1 and status_of(e) == 404:
+                    return
+                raise
             if page:
                 yield page
             if len(page) < page_size:

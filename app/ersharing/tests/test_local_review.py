@@ -57,24 +57,6 @@ async def test_a_catch_up_cut_short_by_time_resumes_after_the_events_it_handled(
 
 
 @pytest.mark.asyncio
-async def test_the_removal_check_gets_past_more_copies_than_a_chunk_changed_at_the_same_moment(monkeypatch):
-    monkeypatch.setattr(sync_events, "RECONCILE_CHUNK", 2)
-    source, dest = FakeSite("https://sitea.pamdas.org", role="source"), FakeSite()
-    same = (utcnow() - timedelta(days=2)).isoformat()
-    for n in range(3):  # still at the source, so the check keeps them
-        source.events[f"kept{n}"] = make_event(f"kept{n}", same)
-        dest.events[f"kept{n}"] = make_event(f"kept{n}", same, event_details=provenance(f"kept{n}"))
-    dest.events["later"] = make_event("later", (utcnow() - timedelta(days=1)).isoformat(),
-                                      event_details=provenance("later"))
-    listing = dest.iter_events_updated_since
-    dest.iter_events_updated_since = lambda since, **kw: listing(since, **{**kw, "page_size": 1})
-    report = DestinationReport("Site B", "Events")
-
-    assert await reconcile_destination(reconcile_run(source), destination(1), dest, report) is True
-    assert set(dest.events) == {"kept0", "kept1", "kept2"} and report.deleted == 1
-
-
-@pytest.mark.asyncio
 async def test_share_events_finishes_when_the_follow_up_run_cant_be_started(world, monkeypatch):
     monkeypatch.setattr(sync_events, "BUDGET_FRACTION", -1)  # out of time immediately
     monkeypatch.setattr(sync_events, "trigger_action", AsyncMock(side_effect=RuntimeError("publish failed")))
@@ -117,3 +99,20 @@ async def test_a_refused_preview_read_stops_the_other_reads():
 
     assert stopped == [True, True]
     assert result["total_count"] == 0 and result.get("warning")
+
+
+@pytest.mark.asyncio
+async def test_the_removal_check_counts_a_copy_listed_twice_once():
+    source, dest = FakeSite("https://sitea.pamdas.org", role="source"), FakeSite()
+    gone = make_event("gone", (utcnow() - timedelta(days=1)).isoformat(), event_details=provenance("gone"))
+    dest.events["gone"] = gone
+
+    async def listing(since, **kw):  # the listing repeats the copy at the time it restarts from
+        yield [dict(gone)]
+        yield [dict(gone)]
+
+    dest.iter_events_updated_since = listing
+    report = DestinationReport("Site B", "Events")
+
+    assert await reconcile_destination(reconcile_run(source), destination(1), dest, report) is True
+    assert dest.events == {} and report.deleted == 1

@@ -415,3 +415,36 @@ async def test_reading_observations_follows_the_cursor_decoded():
     assert "cursor" not in first and retried == first  # the failed page is read again
     # Decoded, so httpx encodes it once. erclient passed "%3D" through, sent it as "%253D", and ER refused it.
     assert second["cursor"] == "cD0yMDI2KzA4="
+
+
+@pytest.mark.asyncio
+async def test_a_page_past_the_last_one_ends_the_listing():
+    a = {"id": "a", "updated_at": "2026-01-02T00:00:00+00:00"}
+    b = {"id": "b", "updated_at": "2026-01-02T00:00:00+00:00"}
+    requests = []
+
+    async def get_events(**kwargs):
+        requests.append(kwargs["page"])
+        if kwargs["page"] > 1:  # ER answers "Invalid page" past the last page
+            raise ERClientNotFound("Invalid page.", status_code=404)
+        for event in (a, b):
+            yield event
+
+    client = MagicMock()
+    client.get_events = get_events
+    since = datetime(2026, 1, 2, tzinfo=timezone.utc)
+    pages = [page async for page in site(client).iter_events_updated_since(since, page_size=2)]
+    assert pages == [[a, b]] and requests == [1, 2]
+
+
+@pytest.mark.asyncio
+async def test_a_404_on_the_first_page_still_fails_the_listing():
+    async def get_events(**kwargs):
+        raise ERClientNotFound("missing", status_code=404)
+        yield  # pragma: no cover
+
+    client = MagicMock()
+    client.get_events = get_events
+    with pytest.raises(IntegrationBadResponseError):
+        async for _ in site(client).iter_events_updated_since(datetime(2026, 1, 2, tzinfo=timezone.utc)):
+            pass

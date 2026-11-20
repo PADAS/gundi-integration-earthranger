@@ -122,7 +122,8 @@ async def _read_capabilities(er_client) -> dict:
     }
     subjects = await _can_read(er_client, "subjects")
     return {
-        "events": await _can_read(er_client, "activity/events"),
+        # By cursor too: a numbered page makes ER count every event on the site.
+        "events": await _can_read(er_client, "activity/events", {"use_cursor": "true"}),
         "subject_tracks": subjects if subjects is not True else await _can_read(er_client, "observations", recent),
     }
 

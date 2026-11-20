@@ -418,6 +418,8 @@ async def reconcile_destination(run: EventsRun, destination: Destination, dest, 
     cursor = await run.state.get_marker(EVENTS_ACTION, key)
     checked = cursor.since if cursor else utcnow() - RECONCILE_WINDOW
     finished = False
+    # The listing repeats copies at the time it restarts from, so each is checked once per run.
+    seen: Set[str] = set()
     try:
         # Copies are listed a chunk at a time and checked before the next chunk is listed,
         # starting again from the last one checked: deleting while paging by number would
@@ -427,16 +429,16 @@ async def reconcile_destination(run: EventsRun, destination: Destination, dest, 
             copies, listed_all = [], True
             async for page in dest.iter_events_updated_since(checked, with_notes_and_files=False):
                 copies.extend(page)
-                # A chunk ends only past a newer time than where it started: a chunk that all
-                # changed at the same moment would otherwise be listed again every run.
-                if run.out_of_time() or (len(copies) >= RECONCILE_CHUNK and _newest(copies, checked) > checked):
+                if len(copies) >= RECONCILE_CHUNK or run.out_of_time():
                     listed_all = False
                     break
             before = checked
             for copy in copies:
                 if run.out_of_time():
                     return False
-                await _reconcile_copy(run, destination, dest, copy, report)
+                if str(copy.get("id")) not in seen:
+                    seen.add(str(copy.get("id")))
+                    await _reconcile_copy(run, destination, dest, copy, report)
                 if copy.get("updated_at"):
                     checked = max(checked, parse_dt(copy["updated_at"]))
             if listed_all:
@@ -449,10 +451,6 @@ async def reconcile_destination(run: EventsRun, destination: Destination, dest, 
             await run.state.delete_marker(EVENTS_ACTION, key)
         else:
             await run.state.set_marker(EVENTS_ACTION, key, Marker(since=checked, advanced_at=utcnow()))
-
-
-def _newest(events, default: datetime) -> datetime:
-    return max((parse_dt(e["updated_at"]) for e in events if e.get("updated_at")), default=default)
 
 
 async def _reconcile_copy(run: EventsRun, destination: Destination, dest, copy: dict, report: DestinationReport):

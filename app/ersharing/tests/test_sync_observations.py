@@ -4,6 +4,8 @@ from unittest.mock import AsyncMock
 
 import httpx
 import pytest
+from gundi_client_v2.errors import AuthenticationError, TokenCacheConfigError
+from redis.exceptions import RedisError
 
 from app.actions.configurations import AuthenticateConfig, SyncObservationsConfig
 from app.ersharing import reporting, sync_observations
@@ -419,3 +421,24 @@ async def test_a_subject_with_nothing_shared_is_not_added(world, gundi):
     world.source.observations = {"s1": [], "s2": []}
     await run_sync_observations(INTEGRATION, CONFIG)
     assert gundi.posts == []
+
+
+@pytest.mark.parametrize("failure", [TokenCacheConfigError("bad cache URL"), RedisError("cache down")])
+@pytest.mark.asyncio
+async def test_a_gundi_client_that_cant_start_never_stops_the_share(world, monkeypatch, failure):
+    from app.ersharing import gundi_sources
+
+    def broken():
+        raise failure
+
+    monkeypatch.setattr(gundi_sources, "GundiClient", broken)
+    await run_sync_observations(INTEGRATION, CONFIG)
+    assert len(points(world.sites["https://site1.pamdas.org"])) == 3  # the points still went out
+
+
+@pytest.mark.parametrize("failure", [RedisError("token cache down"), AuthenticationError("no token")])
+@pytest.mark.asyncio
+async def test_a_gundi_sign_in_failure_on_a_post_never_stops_the_share(world, gundi, failure):
+    gundi.status_code = failure
+    await run_sync_observations(INTEGRATION, CONFIG)
+    assert len(points(world.sites["https://site1.pamdas.org"])) == 3
