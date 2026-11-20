@@ -67,8 +67,11 @@ async def publish_report(integration_id: str, action_id: str, report: Destinatio
     await log_action_activity(integration_id=integration_id, action_id=action_id,
                               title=report.summary_title(), level=level, data=report.as_dict())
     for group in report.errors.values():
+        # The portal shows a line of an error-level log in red only when its text
+        # mentions an error, so error groups say so up front.
+        prefix = "Error: " if group.level == LogLevel.ERROR else ""
         await log_action_activity(integration_id=integration_id, action_id=action_id,
-                                  title=f"{report.kind} → {report.destination}: {group.title}",
+                                  title=f"{prefix}{report.kind} → {report.destination}: {group.title}",
                                   level=group.level, data={"count": group.count, "examples": group.examples})
 
 

@@ -67,9 +67,21 @@ async def test_publish_report_logs_summary_then_one_entry_per_error_group(monkey
     await publish_report("i1", EVENTS_ACTION, report)
     titles = [call.kwargs["title"] for call in log.await_args_list]
     levels = [call.kwargs["level"] for call in log.await_args_list]
-    assert titles[1] == "Events → Site B: Type X couldn't be set up"
+    assert titles[1] == "Error: Events → Site B: Type X couldn't be set up"
     assert levels == [LogLevel.WARNING, LogLevel.ERROR]
     assert log.await_args_list[1].kwargs["data"] == {"count": 2, "examples": ["#1", "#2"]}
+
+
+@pytest.mark.asyncio
+async def test_publish_report_says_error_only_for_error_groups(monkeypatch):
+    log = AsyncMock()
+    monkeypatch.setattr(reporting, "log_action_activity", log)
+    report = DestinationReport(destination="Site B", kind="Events")
+    report.error("Some events were skipped", item="#1", level=LogLevel.WARNING)
+    await publish_report("i1", EVENTS_ACTION, report)
+    titles = [call.kwargs["title"] for call in log.await_args_list]
+    assert titles[1] == "Events → Site B: Some events were skipped"
+    assert not titles[0].startswith("Error: ")
 
 
 def test_stall_detection():
