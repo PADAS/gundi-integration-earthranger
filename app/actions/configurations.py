@@ -460,7 +460,6 @@ EVENTS_V1_KEYS = {
 OBSERVATIONS_V1_KEYS = {
     "subject_group": "destination_subject_group",
     "feature_groups": "area_feature_groups",
-    "provider_key": "compatibility.provider_key",
     "subject_additional": "compatibility.subject_additional",
     "src_user": "compatibility.src_user",
 }
@@ -514,7 +513,6 @@ class EventsCompatibility(BaseModel):
 
 
 class ObservationsCompatibility(BaseModel):
-    provider_key: Optional[str] = Field(None, title="Destination provider key")
     subject_additional: Optional[bool] = Field(None, title="Copy subject and source 'additional' data")
     src_user: Optional[str] = Field(None, title="Sharing user recorded in the lineage")
 

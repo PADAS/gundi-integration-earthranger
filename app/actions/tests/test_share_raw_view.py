@@ -39,7 +39,6 @@ def test_observations_raw_view_maps_v1_keys():
     assert raw_map == {
         "subject_group": "destination_subject_group",
         "feature_groups": "area_feature_groups",
-        "provider_key": "compatibility.provider_key",
         "subject_additional": "compatibility.subject_additional",
         "src_user": "compatibility.src_user",
     }

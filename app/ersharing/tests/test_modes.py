@@ -107,3 +107,12 @@ def test_destination_auth_config_parses():
     # The shape the earth_ranger integration type stores for its auth action.
     auth = AuthenticateConfig.parse_obj({"authentication_type": "token", "token": "abc", "username": "", "password": ""})
     assert auth.token.get_secret_value() == "abc"
+
+
+def test_the_share_form_has_no_provider_key_and_a_saved_one_is_ignored():
+    # The provider key is set per destination on the route (a provider_key field mapping);
+    # otherwise points go to das_provider. A key left in an old saved config is ignored.
+    assert "provider_key" not in SyncObservationsConfig.schema()["definitions"]["ObservationsCompatibility"]["properties"]
+    config = SyncObservationsConfig.parse_obj({"compatibility": {"provider_key": "old_key"}})
+    assert observation_settings(SOURCE, config).provider_key == "das_provider"
+    assert compatibility_overrides(config, SOURCE) == []

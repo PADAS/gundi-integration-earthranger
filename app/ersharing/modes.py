@@ -15,7 +15,6 @@ _SIMPLE_DEFAULTS = {
     "prepend_system_to_event_titles": True,
     "update_schema": True,
     "delete_unmatched_events": True,
-    "provider_key": SIMPLE_PROVIDER_KEY,
     "subject_additional": True,
     "src_user": None,
 }
@@ -85,7 +84,8 @@ def observation_settings(source_url: str, config: SyncObservationsConfig) -> Obs
         # site's name, so subjects never land in a destination's default group.
         destination_subject_group=(group or "").strip() or source.name,
         area_feature_groups=_filled(config.area_feature_groups),
-        provider_key=_pick(c.provider_key, SIMPLE_PROVIDER_KEY),
+        # Per destination, the route's provider_key field mapping wins (see destinations.py).
+        provider_key=SIMPLE_PROVIDER_KEY,
         subject_additional=_pick(c.subject_additional, True),
         src_user=c.src_user,
         start_from=_aware(config.start_from),
