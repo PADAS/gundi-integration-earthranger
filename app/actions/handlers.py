@@ -103,7 +103,7 @@ async def action_auth(integration: Integration, action_config: AuthenticateConfi
             result["connected_as"] = connected_as
         if capabilities is not None:
             result["capabilities"] = capabilities
-            if missing := [name for name, ok in capabilities.items() if not ok]:
+            if missing := [name for name, ok in capabilities.items() if ok is False]:
                 result["warning"] = (f"This token can't read: {', '.join(missing)}. "
                                      "Fetching or sharing those will fail until the token's permissions are updated.")
         return result
@@ -120,20 +120,23 @@ async def _read_capabilities(er_client) -> dict:
         "since": (datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(hours=24)).isoformat(),
         "use_cursor": "true",
     }
+    subjects = await _can_read(er_client, "subjects")
     return {
         "events": await _can_read(er_client, "activity/events"),
-        "subject_tracks": await _can_read(er_client, "subjects")
-        and await _can_read(er_client, "observations", recent),
+        "subject_tracks": subjects if subjects is not True else await _can_read(er_client, "observations", recent),
     }
 
 
-async def _can_read(er_client, path: str, params: Optional[dict] = None) -> bool:
+async def _can_read(er_client, path: str, params: Optional[dict] = None) -> Optional[bool]:
+    """True or False when ER answers; None when the check couldn't finish (a
+    timeout or a server error), which says nothing about the credentials."""
     try:
         await er_client._get(path, params={"page_size": 1, **(params or {})})
-    except ERClientException as e:
+    except _ER_CALL_FAILURES as e:
         if _status_of(e) == 403:
             return False
-        raise
+        logger.warning("auth: couldn't check read access to %s: %s", path, _failure_summary(e))
+        return None
     return True
 
 
@@ -493,39 +496,51 @@ async def action_show_permissions(integration: Integration, action_config: ShowP
     return response
 
 
-SHARE_ACTIONS = {"sync_events": "Share Events", "sync_observations": "Share Subjects"}
+# Each Pull action and the Share action that sends the same kind of data.
+SHARE_ACTION_FOR_PULL = {
+    "pull_events": ("sync_events", "Share Events"),
+    "pull_observations": ("sync_observations", "Share Subjects"),
+}
 
 
-def _scheduled_share_actions(integration) -> list:
-    """Titles of the Share actions that run on schedule for this integration.
+def _share_is_on(integration, pull_action_id: str) -> Optional[str]:
+    """The title of the Share action that sends what this Pull action sends,
+    when it runs on schedule for this integration.
 
     A connection that shares (EarthRanger to EarthRanger) has only EarthRanger
-    destinations, and Share writes to them directly. If Pull also sent to
-    Gundi, routing would deliver every event and observation to those sites a
-    second time, so Pull stays quiet while Share is on."""
-    titles = []
-    for action_id, title in SHARE_ACTIONS.items():
-        config = find_config_for_action(integration.configurations or [], action_id)
-        if config and (config.data or {}).get("run_on_schedule"):
-            titles.append(title)
-    return titles
+    destinations, and Share writes to them directly. If Pull also sent the same
+    kind of data to Gundi, routing would deliver it to those sites a second
+    time, so Pull stays quiet for that kind while its Share action is on."""
+    share_action_id, title = SHARE_ACTION_FOR_PULL[pull_action_id]
+    config = find_config_for_action(integration.configurations or [], share_action_id)
+    return title if config and (config.data or {}).get("run_on_schedule") else None
 
 
 async def _skip_because_sharing(integration, action_id: str, pull_title: str) -> Optional[dict]:
-    """Skip a Pull run when Share is on, with a plain activity log saying why."""
-    sharing = _scheduled_share_actions(integration)
-    if not sharing:
+    """Skip a Pull run while its Share action is on, with a plain activity log saying why.
+
+    The Pull watermark moves to now, so turning Share off later doesn't make
+    Pull send everything Share already copied. An unfinished Pull Observations
+    backfill is kept as it is, so it carries on if Share is turned off again."""
+    share_title = _share_is_on(integration, action_id)
+    if not share_title:
         return None
+    integration_id = str(integration.id)
+    state = await state_manager.get_state(integration_id=integration_id, action_id=action_id)
+    if not state.get("backfill"):
+        await state_manager.set_state(
+            integration_id=integration_id, action_id=action_id,
+            state={"last_execution": datetime.datetime.now(tz=datetime.timezone.utc).isoformat()},
+        )
     await log_action_activity(
-        integration_id=str(integration.id),
+        integration_id=integration_id,
         action_id=action_id,
         level=LogLevel.INFO,
         title=(
-            f"{pull_title} didn't send anything to Gundi because {' and '.join(sharing)} "
-            f"{'is' if len(sharing) == 1 else 'are'} on for this connection. "
-            "Share sends this site's data straight to the EarthRanger destinations."
+            f"{pull_title} didn't send anything to Gundi because {share_title} is on for this connection. "
+            f"{share_title} sends this site's data straight to the EarthRanger destinations."
         ),
-        config_data={"share_actions_on": sharing},
+        config_data={"share_action_on": share_title},
     )
     return {"skipped": True, "reason": "share_enabled"}
 
@@ -1029,7 +1044,16 @@ async def _fetch_source_assignments(er_client, subject_ids, *, integration_id=No
         async with gate:
             return await er_client.get_source_assignments(subject_ids=chunk)
 
-    responses = await asyncio.gather(*(fetch(chunk) for chunk in chunks))
+    tasks = [asyncio.ensure_future(fetch(chunk)) for chunk in chunks]
+    try:
+        responses = await asyncio.gather(*tasks)
+    except BaseException:
+        # gather doesn't cancel the rest when one read fails; stop them here so
+        # a failed run doesn't keep calling subjectsources in the background.
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        raise
 
     def incomplete():
         if report is not None:

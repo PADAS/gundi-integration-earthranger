@@ -3241,17 +3241,31 @@ async def test_auth_action_warns_when_the_token_cannot_read_events_or_tracks(
                                    "until the token's permissions are updated.")
 
 
+@pytest.mark.parametrize("exc", [
+    httpx.ConnectError("[Errno -3] Temporary failure in name resolution"),
+    ERClientException("Request to ER failed: timed out"),
+])
 @pytest.mark.asyncio
-async def test_auth_action_reports_a_failed_read_check_with_fixed_text(mocker, er_integration_v2_provider):
+async def test_auth_action_keeps_valid_credentials_when_a_read_check_cannot_finish(
+        mocker, er_integration_v2_provider, exc):
+    """A timeout or server error on a read check says nothing about the
+    credentials: they stay valid, the check is unknown (None), and no warning
+    claims the token can't read it."""
     from app.actions.handlers import action_auth
     from app.actions.configurations import AuthenticateConfig
 
     instance = _auth_client_returning_me(mocker, {"username": "u", "is_active": True})
-    instance._get.side_effect = httpx.ConnectError("[Errno -3] Temporary failure in name resolution")
+
+    async def get(path, params=None):
+        if path == "observations":
+            raise exc
+        return {"results": []}
+
+    instance._get.side_effect = get
     response = await action_auth(er_integration_v2_provider, AuthenticateConfig(token="abc123"))
 
-    assert response["valid_credentials"] is False
-    assert response["error"].startswith("EarthRanger could not be reached")
+    assert response == {"valid_credentials": True, "connected_as": "u",
+                        "capabilities": {"events": True, "subject_tracks": None}}
 
 
 _ACTION_DISPLAY_NAMES = {
@@ -3284,3 +3298,33 @@ async def test_registration_uses_the_action_display_names():
     names = {action["value"]: action["name"] for action in registered["actions"]}
     for action_id, expected_title in _ACTION_DISPLAY_NAMES.items():
         assert names[action_id] == expected_title
+
+
+@pytest.mark.asyncio
+async def test_device_lookup_stops_the_other_reads_when_one_fails():
+    """gather doesn't cancel the rest on a failure; the lookup does, so a
+    failed run doesn't keep calling subjectsources in the background."""
+    import asyncio
+    from unittest.mock import MagicMock
+    from app.actions import handlers as handlers_module
+
+    started = []
+
+    async def get_source_assignments(subject_ids):
+        started.append(subject_ids)
+        if len(started) == 1:
+            raise ERClientPermissionDenied("forbidden", status_code=403)
+        await asyncio.sleep(10)
+        return []
+
+    client = MagicMock()
+    client.get_source_assignments = get_source_assignments
+    ids = [f"s{i}" for i in range(handlers_module.SUBJECT_ID_CHUNK_SIZE * 3)]
+    before = asyncio.all_tasks()
+    with pytest.raises(ERClientPermissionDenied):
+        await asyncio.wait_for(handlers_module._fetch_source_assignments(client, ids, concurrency=1), timeout=2)
+    await asyncio.sleep(0.05)
+    # The read already waiting for the slot may have started; the last one never does,
+    # and nothing is left running.
+    assert len(started) < 3
+    assert asyncio.all_tasks() - before - {asyncio.current_task()} == set()
