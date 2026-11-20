@@ -62,6 +62,14 @@ class DestinationReport:
         return data
 
 
+def _group_data(group: ErrorGroup) -> dict:
+    """Like the runner's other error logs, the data names what it holds: an error
+    group lists its errors, a warning group the items it is about."""
+    if group.level == LogLevel.ERROR:
+        return {"error_count": group.count, "errors": group.examples}
+    return {"count": group.count, "examples": group.examples}
+
+
 async def publish_report(integration_id: str, action_id: str, report: DestinationReport):
     level = LogLevel.WARNING if report.failed or report.errors else LogLevel.INFO
     await log_action_activity(integration_id=integration_id, action_id=action_id,
@@ -72,7 +80,7 @@ async def publish_report(integration_id: str, action_id: str, report: Destinatio
         prefix = "Error: " if group.level == LogLevel.ERROR else ""
         await log_action_activity(integration_id=integration_id, action_id=action_id,
                                   title=f"{prefix}{report.kind} → {report.destination}: {group.title}",
-                                  level=group.level, data={"count": group.count, "examples": group.examples})
+                                  level=group.level, data=_group_data(group))
 
 
 async def log_skipped_destinations(integration_id: str, action_id: str, state, skipped) -> None:
