@@ -304,7 +304,25 @@ async def test_subjects_preview_marks_an_incomplete_device_lookup():
 
     result = await preview_subjects(_er_client(subjectgroups=SUBJECT_TREE), SITE, ["g-parent"], assignments)
     assert result["truncated"] is True
-    assert "sent only part of this list" in result["warning"]
+    # Missing from a partial answer isn't proof of no device: nobody is left
+    # out or counted as having none.
+    assert sorted(i["label"] for g in result["groups"] for i in g["items"]) == ["Lion", "Zebra"]
+    assert result["selected_count"] == 2
+    assert "no device, so nothing is sent" not in result["warning"]
+    assert "skips every run" not in result["warning"]
+    assert "sent only part of the device list" in result["warning"]
+
+
+@pytest.mark.asyncio
+async def test_subjects_preview_makes_no_skip_claim_when_the_device_lookup_is_incomplete():
+    async def assignments(subject_ids):
+        return [], False
+
+    for picked in (["g-parent"], []):
+        result = await preview_subjects(_er_client(subjectgroups=SUBJECT_TREE), SITE, picked, assignments)
+        assert result["selected_count"] == 2
+        assert "skips every run" not in result["warning"]
+        assert "no device, so nothing is sent" not in result["warning"]
 
 
 @pytest.mark.asyncio

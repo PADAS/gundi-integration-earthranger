@@ -302,16 +302,21 @@ async def preview_subjects(
         picked = [(g, subjects_under(g)) for g in every if str(g.get("id")) in wanted]
 
     no_device = 0
+    devices_unknown = False
     if source_assignments is not None:
         subject_ids = sorted({str(s["id"]) for _, subjects in picked for s in subjects if s.get("id")})
         assignments, complete = await source_assignments(subject_ids) if subject_ids else ([], True)
-        if not complete:
+        if complete:
+            with_device = {str(a.get("subject")) for a in assignments}
+            no_device = len(set(subject_ids) - with_device)
+            picked = [(g, [s for s in subjects if str(s.get("id")) in with_device]) for g, subjects in picked]
+            if mode == "all":
+                picked = [(g, subjects) for g, subjects in picked if subjects]
+        else:
+            # A subject missing from a partial answer may still have a device,
+            # so nobody is left out or counted as having none.
             reader.incomplete = True
-        with_device = {str(a.get("subject")) for a in assignments}
-        no_device = len(set(subject_ids) - with_device)
-        picked = [(g, [s for s in subjects if str(s.get("id")) in with_device]) for g, subjects in picked]
-        if mode == "all":
-            picked = [(g, subjects) for g, subjects in picked if subjects]
+            devices_unknown = True
 
     def icon(url: Optional[str]) -> Optional[str]:
         if not url:
@@ -361,7 +366,9 @@ async def preview_subjects(
              f"{'in these groups ' if mode == 'selected' else ''}"
              f"{'has' if no_device == 1 else 'have'} no device, so nothing is sent for "
              f"{'it' if no_device == 1 else 'them'}.") if no_device else None,
-            INCOMPLETE if reader.incomplete else None,
+            ("EarthRanger sent only part of the device list, so some subjects below may have no "
+             "device and send nothing.") if devices_unknown else None,
+            INCOMPLETE if reader.incomplete and not devices_unknown else None,
         ),
         incomplete=reader.incomplete,
     )
