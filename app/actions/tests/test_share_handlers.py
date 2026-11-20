@@ -34,8 +34,11 @@ def test_sharing_actions_have_portal_names_and_descriptions():
     assert handlers.action_sync_events.action_title == "ER2ER Event Sharing"
     assert handlers.action_sync_observations.action_title == "ER2ER Observation Sharing"
     # The portal shows the config's description under the section's title.
-    assert SyncEventsConfig.schema()["description"].startswith("Shares this site's events")
-    assert SyncObservationsConfig.schema()["description"].startswith("Shares this site's subjects")
+    assert SyncEventsConfig.schema()["description"] == "Shares events with another EarthRanger site."
+    assert SyncObservationsConfig.schema()["description"] == "Shares observations with another EarthRanger site."
+    from app.actions.configurations import PullEventsConfig, PullObservationsConfig
+    assert PullEventsConfig.schema()["description"] == "Shares events with other platforms through Gundi."
+    assert PullObservationsConfig.schema()["description"] == "Shares observations with other platforms through Gundi."
 
 
 @pytest.mark.asyncio

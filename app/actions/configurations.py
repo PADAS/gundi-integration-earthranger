@@ -148,6 +148,8 @@ class ShowPermissionsConfig(GenericActionConfiguration, ExecutableActionMixin):
 
 
 class PullObservationsConfig(PullActionConfiguration):
+    """Shares observations with other platforms through Gundi."""
+
     start_datetime: str = FieldWithUIOptions(
         ...,
         title="Start Datetime",
@@ -247,6 +249,8 @@ class PullObservationsConfig(PullActionConfiguration):
 
 
 class PullEventsConfig(PullActionConfiguration):
+    """Shares events with other platforms through Gundi."""
+
     start_datetime: str = FieldWithUIOptions(
         ...,
         title="Start Datetime",
@@ -502,7 +506,7 @@ class ObservationsCompatibility(BaseModel):
 
 
 class SyncEventsConfig(PullActionConfiguration):
-    """Shares this site's events with every destination EarthRanger site. Choose which event types and areas to share."""
+    """Shares events with another EarthRanger site."""
 
     run_on_schedule: bool = Field(
         False, title="Share events", description="Copy new and changed events to every destination."
@@ -538,7 +542,7 @@ class SyncEventsConfig(PullActionConfiguration):
 
 
 class SyncObservationsConfig(PullActionConfiguration):
-    """Shares this site's subjects and their tracks with every destination EarthRanger site. Choose which subject groups and areas to share."""
+    """Shares observations with another EarthRanger site."""
 
     run_on_schedule: bool = Field(
         False, title="Share subject tracks", description="Copy new track points to every destination."
