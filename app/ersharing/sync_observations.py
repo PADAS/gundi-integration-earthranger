@@ -16,6 +16,7 @@ from app.services.errors import IntegrationError
 from .clients import auth_config_of, halts_site, open_site, source_url_of
 from .destinations import resolve_destinations
 from .geo import load_area
+from .gundi_sources import GundiSources
 from .modes import observation_settings
 from .naming import site_host
 from .observations import (
@@ -125,6 +126,7 @@ async def _run(integration, config, state: ShareState):
                 except IntegrationError as e:
                     reports[d.id].error(e.message)
             area = await load_area(source, share.area_feature_groups, polygons_only=True)
+            gundi_sources = GundiSources(integration_id, state, stack)
             subjects = await select_subjects(source, share.subject_groups)
             assignments, unread = await _load_assignments(source, [str(s["id"]) for s in subjects])
             src_user = share.src_user or (await source.get_me()).get("username", "")
@@ -144,7 +146,7 @@ async def _run(integration, config, state: ShareState):
                     continue
                 finished = time.monotonic() <= deadline and await _share_subject(
                     source, sites, reports, freshest, state, share, area, assignments, subject, prefix, now,
-                    deadline, provider_keys)
+                    deadline, provider_keys, gundi_sources)
                 if not finished:
                     # Out of time: the next run starts again at this subject; its sent batches
                     # already moved its markers, so nothing is sent twice.
@@ -193,7 +195,8 @@ async def _progress_marker(state: ShareState, destination_id: str, freshest, rep
 
 
 async def _share_subject(source, sites, reports, freshest, state, share, area, assignments, subject, prefix, now,
-                         deadline: float = float("inf"), provider_keys: Optional[Dict[str, str]] = None) -> bool:
+                         deadline: float = float("inf"), provider_keys: Optional[Dict[str, str]] = None,
+                         gundi_sources: Optional[GundiSources] = None) -> bool:
     """Share one subject's new points with every destination. False when the run ran out
     of time part-way, so the caller resumes at this subject next time."""
     subject_id = str(subject["id"])
@@ -233,6 +236,7 @@ async def _share_subject(source, sites, reports, freshest, state, share, area, a
 
     fingerprint = f"{prefix}#subject:{subject_id}#rts:{now:%Y%m%d%H%M%S}"
     finished = True
+    shared_devices = set()  # devices whose points reached a destination this run
     for d_id, dest in list(sites.items()):
         key = subject_marker_key(d_id, subject_id)
         marker = markers[d_id]
@@ -252,6 +256,7 @@ async def _share_subject(source, sites, reports, freshest, state, share, area, a
                 complete = False
             if not complete:
                 break
+            shared_devices.update(str(o["source"]) for o in batch if o.get("source"))
             marker = advance(marker, batch, now, keep_created=True)
             await state.set_marker(OBSERVATIONS_ACTION, key, marker)
         if complete and observations:
@@ -275,6 +280,9 @@ async def _share_subject(source, sites, reports, freshest, state, share, area, a
             reports[d_id].marker = marker.since if current is None else max(current, marker.since)
             if d_id not in freshest or marker.advanced_at > freshest[d_id].advanced_at:
                 freshest[d_id] = marker
+    if gundi_sources is not None and shared_devices:
+        # Share bypasses Gundi's routing, so Gundi only lists these devices if told.
+        await gundi_sources.note_shared(subject, shared_devices, lambda: source.get_subject_sources(subject_id))
     return finished
 
 

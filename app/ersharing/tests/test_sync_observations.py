@@ -2,6 +2,7 @@ from datetime import timedelta
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
+import httpx
 import pytest
 
 from app.actions.configurations import AuthenticateConfig, SyncObservationsConfig
@@ -372,3 +373,49 @@ async def test_a_single_bad_first_point_is_skipped_and_the_rest_are_sent(world):
     assert bad not in {p[1] for p in points(site1)} and len(points(site1)) == 199
     assert sync_observations.ALL_REJECTED not in report.errors
     assert (await marker_of(world, "d1", "s1")).since == parse_dt(obs[-1]["recorded_at"])
+
+
+@pytest.mark.asyncio
+async def test_shared_devices_are_added_to_gundi_sources_once(world, gundi):
+    world.source.subject_sources = {"s1": [{"id": "src-s1", "manufacturer_id": "collar-001"}],
+                                    "s2": [{"id": "src-s2"}]}
+    await run_sync_observations(INTEGRATION, CONFIG)
+    # Pull Observations' ids: the manufacturer id, or er-src-<uuid> without one.
+    assert [data for _, data in gundi.posts] == [
+        {"provider": "i1", "external_id": "collar-001", "name": "Lion 1"},
+        {"provider": "i1", "external_id": "er-src-src-s2", "name": "Zebra 1"},
+    ]
+    assert all(url == "https://gundi.test/v2/sources/" for url, _ in gundi.posts)
+
+    world.source.observations["s1"].append(observed("src-s1", "2026-10-01T03:00:00Z"))
+    await run_sync_observations(INTEGRATION, CONFIG)
+    assert len(gundi.posts) == 2  # already added: not posted again
+
+
+@pytest.mark.asyncio
+async def test_a_device_gundi_already_lists_is_not_posted_again(world, gundi):
+    gundi.status_code = 409  # Gundi already has a source with this id on the connection
+    await run_sync_observations(INTEGRATION, CONFIG)
+    world.source.observations["s1"].append(observed("src-s1", "2026-10-01T03:00:00Z"))
+    await run_sync_observations(INTEGRATION, CONFIG)
+    assert len(gundi.posts) == 2
+
+
+@pytest.mark.parametrize("failure", [500, httpx.ConnectError("Gundi unreachable")])
+@pytest.mark.asyncio
+async def test_a_failed_gundi_source_update_never_stops_the_share_and_is_retried(world, gundi, failure):
+    gundi.status_code = failure
+    await run_sync_observations(INTEGRATION, CONFIG)
+    assert len(points(world.sites["https://site1.pamdas.org"])) == 3  # the points still went out
+    gundi.status_code = 201
+    world.source.observations["s1"].append(observed("src-s1", "2026-10-01T03:00:00Z"))
+    world.source.observations["s2"].append(observed("src-s2", "2026-10-01T03:00:00Z"))
+    await run_sync_observations(INTEGRATION, CONFIG)
+    assert [data["external_id"] for _, data in gundi.posts[-2:]] == ["er-src-src-s1", "er-src-src-s2"]
+
+
+@pytest.mark.asyncio
+async def test_a_subject_with_nothing_shared_is_not_added(world, gundi):
+    world.source.observations = {"s1": [], "s2": []}
+    await run_sync_observations(INTEGRATION, CONFIG)
+    assert gundi.posts == []
