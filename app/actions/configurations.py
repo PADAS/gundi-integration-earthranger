@@ -495,8 +495,22 @@ class EventsCompatibility(BaseModel):
     delete_unmatched_events: Optional[bool] = Field(
         None, title="Remove destination copies when the source event is deleted"
     )
-    source_system_value: Optional[str] = Field(None, title="Source system code")
-    source_system_name: Optional[str] = Field(None, title="Source system display name")
+    source_system_value: Optional[str] = Field(
+        None,
+        title="Source system code",
+        description=(
+            "Added in front of shared category and event type values, like 'sndbx_wildlife_sighting'. "
+            "Changing it on an existing share copies its events again. Leave empty to use the site's name."
+        ),
+    )
+    source_system_name: Optional[str] = Field(
+        None,
+        title="Source system display name",
+        description=(
+            "Added in front of shared event titles and type names, like 'Sndbx-Wildlife sighting'. "
+            "Leave empty to use the site's name."
+        ),
+    )
 
 
 class ObservationsCompatibility(BaseModel):
