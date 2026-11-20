@@ -4,7 +4,7 @@ import pytest
 
 from app.actions import action_handlers, handlers
 from app.actions.configurations import (
-    AuthenticateConfig, ListShareEventTypesQuery, ListFeatureGroupsQuery, ListSubjectGroupsQuery,
+    AuthenticateConfig, ListShareEventTypesQuery, ListFeatureGroupsQuery,
     PreviewEventsShareQuery, PreviewSubjectsShareQuery, SyncEventsConfig, SyncObservationsConfig,
 )
 from app.ersharing import clients
@@ -42,13 +42,10 @@ def test_sharing_actions_have_portal_names_and_descriptions():
 async def test_reference_actions_list_source_options(source):
     source.event_types = {"b": {"value": "b", "display": "Bravo", "category": {"display": "Security"}},
                           "a": {"value": "a", "display": "Alpha", "category": "monitoring"}}
-    source.subject_groups = [{"id": "g1", "name": "Lions"}]
     source.feature_groups = {"fg1": {"id": "fg1", "name": "Park"}}
     event_types = await handlers.action_list_share_event_types(INTEGRATION, ListShareEventTypesQuery())
     assert [(o["value"], o["label"], o["group"]) for o in event_types["options"]] == [
         ("a", "Alpha", "monitoring"), ("b", "Bravo", "Security")]
-    groups = await handlers.action_list_subject_groups(INTEGRATION, ListSubjectGroupsQuery())
-    assert [(o["value"], o["label"]) for o in groups["options"]] == [("g1", "Lions")]
     areas = await handlers.action_list_feature_groups(INTEGRATION, ListFeatureGroupsQuery())
     assert [(o["value"], o["label"]) for o in areas["options"]] == [("fg1", "Park")]
 
