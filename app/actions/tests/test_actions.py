@@ -3237,8 +3237,8 @@ async def test_auth_action_warns_when_the_token_cannot_read_events_or_tracks(
 
     assert response["valid_credentials"] is True
     assert response["capabilities"] == capabilities
-    assert response["warning"] == (f"This token can't read: {missing}. Fetching or sharing those will fail "
-                                   "until the token's permissions are updated.")
+    assert response["warning"] == (f"This token can't read: {missing}, so fetching or sharing that data "
+                                   "doesn't work with its current permissions.")
 
 
 @pytest.mark.parametrize("exc", [

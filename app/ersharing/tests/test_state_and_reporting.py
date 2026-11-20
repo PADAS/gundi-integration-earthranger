@@ -54,7 +54,7 @@ def test_summary_titles():
         "Events → Site B: 2 created, 1 updated, 0 deleted, 0 skipped, 0 failed; synced up to 2026-10-01 00:00 UTC"
     )
     tracks = DestinationReport(destination="Site B", kind="Tracks", created=40, timed_out=True)
-    assert tracks.summary_title() == "Tracks → Site B: 40 points shared, 0 failed; continuing in a follow-up run"
+    assert tracks.summary_title() == "Tracks → Site B: 40 points shared, 0 failed; stopped at the time limit before finishing"
 
 
 @pytest.mark.asyncio

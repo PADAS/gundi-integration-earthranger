@@ -104,8 +104,8 @@ async def action_auth(integration: Integration, action_config: AuthenticateConfi
         if capabilities is not None:
             result["capabilities"] = capabilities
             if missing := [name for name, ok in capabilities.items() if ok is False]:
-                result["warning"] = (f"This token can't read: {', '.join(missing)}. "
-                                     "Fetching or sharing those will fail until the token's permissions are updated.")
+                result["warning"] = (f"This token can't read: {', '.join(missing)}, "
+                                     "so fetching or sharing that data doesn't work with its current permissions.")
         return result
 
 

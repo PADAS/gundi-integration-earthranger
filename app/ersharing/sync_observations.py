@@ -94,7 +94,11 @@ async def run_sync_observations(integration, config) -> dict:
     finally:
         await state.release_lease(OBSERVATIONS_ACTION)
     if needs_more_time:
-        await trigger_action(integration_id, OBSERVATIONS_ACTION)
+        try:
+            await trigger_action(integration_id, OBSERVATIONS_ACTION)
+        except Exception as e:
+            # The points sent and their markers are saved; the next scheduled run carries on from there.
+            logger.warning("sync_observations: couldn't start a follow-up run (%s)", type(e).__name__)
     return result
 
 

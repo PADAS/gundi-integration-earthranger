@@ -77,19 +77,26 @@ async def preview_events(site, event_types: Optional[Iterable], area_feature_gro
     site_url = site.url
     selected = _wanted(event_types)
     mode = "selected" if selected else "all"
+    # Read together; the schemas aren't needed for a list. Events of v1
+    # types are shared too (copied into a type the destination already
+    # has), and ER's v2 list leaves those types out.
+    reads = [asyncio.ensure_future(read) for read in (
+        site.get_event_categories(),
+        # Inactive ones too: a picked type that was deactivated is still
+        # listed (as inactive) rather than reported as missing.
+        site.list_event_types_v2(include_schema=False, include_inactive=True),
+        site.list_event_types_v1(),
+    )]
     try:
-        # Read together; the schemas aren't needed for a list. Events of v1
-        # types are shared too (copied into a type the destination already
-        # has), and ER's v2 list leaves those types out.
-        categories, types, v1_types = await asyncio.gather(
-            site.get_event_categories(),
-            # Inactive ones too: a picked type that was deactivated is still
-            # listed (as inactive) rather than reported as missing.
-            site.list_event_types_v2(include_schema=False, include_inactive=True),
-            site.list_event_types_v1(),
-        )
-    except IntegrationAuthError as e:
-        return _response(site_url, mode, 0, 0, [], [], _cant_read("event types", site_url, e))
+        categories, types, v1_types = await asyncio.gather(*reads)
+    except BaseException as e:
+        # gather leaves the other reads running; stop them before the site's client closes.
+        for read in reads:
+            read.cancel()
+        await asyncio.gather(*reads, return_exceptions=True)
+        if isinstance(e, IntegrationAuthError):
+            return _response(site_url, mode, 0, 0, [], [], _cant_read("event types", site_url, e))
+        raise
     v2_values = {t.get("value") for t in types}
     types = types + [t for t in v1_types if t.get("value") not in v2_values]
 

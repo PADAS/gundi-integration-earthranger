@@ -52,7 +52,7 @@ class DestinationReport:
         if self.marker:
             title += f"; synced up to {self.marker:%Y-%m-%d %H:%M} UTC"
         if self.timed_out:
-            title += "; continuing in a follow-up run"
+            title += "; stopped at the time limit before finishing"
         return title
 
     def as_dict(self) -> dict:

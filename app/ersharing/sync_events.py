@@ -120,13 +120,23 @@ async def catch_up_waiting_types(run: EventsRun, destination: Destination, dest,
     if oldest < start:
         report.error(CATCH_UP_CUT, item=f"{', '.join(sorted(ready))}: from {start:%Y-%m-%d %H:%M} UTC",
                      level=LogLevel.WARNING)
+    last_handled = None
     async for page in run.source.iter_events_updated_since(start):
         for event in page:
             if run.out_of_time():
                 report.timed_out = True
-                return  # still waiting: the next run reads them again
+                # Still waiting, from the events not read yet rather than from the oldest again,
+                # so a long catch-up moves forward across runs. A type that failed again keeps
+                # the time of the event it failed on.
+                if last_handled is not None:
+                    for value in ready:
+                        if value in types.waiting and value not in types.failures:
+                            types.waiting[value] = max(types.waiting[value], last_handled)
+                return
             if event.get("event_type") in ready:
                 await _sync_event(run, destination, dest, types, event, report)
+            if event.get("updated_at"):
+                last_handled = parse_dt(event["updated_at"])
     for value in ready:
         types.waiting.pop(value, None)
 
@@ -291,6 +301,8 @@ async def _set_aside_after_repeated_halts(run, destination, event_id: str, error
 
 async def _copy_event(run, destination, dest, types, event, report):
     if not wanted(event, run.settings, run.area) or is_echo(event, dest.url):
+        # An unfinished copy of an event that is no longer shared isn't read again every run.
+        run.pending.get(destination.id, set()).discard(str(event["id"]))
         report.skipped += 1
         return
     record = await run.state.get_event_record(destination.id, event["id"])
@@ -415,7 +427,9 @@ async def reconcile_destination(run: EventsRun, destination: Destination, dest, 
             copies, listed_all = [], True
             async for page in dest.iter_events_updated_since(checked, with_notes_and_files=False):
                 copies.extend(page)
-                if len(copies) >= RECONCILE_CHUNK or run.out_of_time():
+                # A chunk ends only past a newer time than where it started: a chunk that all
+                # changed at the same moment would otherwise be listed again every run.
+                if run.out_of_time() or (len(copies) >= RECONCILE_CHUNK and _newest(copies, checked) > checked):
                     listed_all = False
                     break
             before = checked
@@ -435,6 +449,10 @@ async def reconcile_destination(run: EventsRun, destination: Destination, dest, 
             await run.state.delete_marker(EVENTS_ACTION, key)
         else:
             await run.state.set_marker(EVENTS_ACTION, key, Marker(since=checked, advanced_at=utcnow()))
+
+
+def _newest(events, default: datetime) -> datetime:
+    return max((parse_dt(e["updated_at"]) for e in events if e.get("updated_at")), default=default)
 
 
 async def _reconcile_copy(run: EventsRun, destination: Destination, dest, copy: dict, report: DestinationReport):
@@ -484,7 +502,11 @@ async def run_sync_events(integration, config) -> dict:
     finally:
         await state.release_lease(EVENTS_ACTION)
     if needs_more_time:
-        await trigger_action(integration_id, EVENTS_ACTION)
+        try:
+            await trigger_action(integration_id, EVENTS_ACTION)
+        except Exception as e:
+            # The work and its progress are saved; the next scheduled run carries on from there.
+            logger.warning("sync_events: couldn't start a follow-up run (%s)", type(e).__name__)
     return result
 
 
