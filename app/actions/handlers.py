@@ -87,6 +87,7 @@ async def action_auth(integration: Integration, action_config: AuthenticateConfi
                 valid_credentials = await er_client.login()
             else:
                 return {"valid_credentials": False, "error": "Please select an valid authentication method."}
+            capabilities = await _read_capabilities(er_client) if valid_credentials else None
         except _ER_CALL_FAILURES as e:
             # Same fixed messages the reference actions use. str(e) carries
             # ER's response body or our request (for login(), the password),
@@ -94,9 +95,43 @@ async def action_auth(integration: Integration, action_config: AuthenticateConfi
             # raw httpx errors (it runs outside erclient's _call), so the
             # translation handles both shapes.
             return {"valid_credentials": False, "error": _as_integration_error(e).message}
+        result = {"valid_credentials": valid_credentials}
         if connected_as:
-            return {"valid_credentials": valid_credentials, "connected_as": connected_as}
-        return {"valid_credentials": valid_credentials}
+            result["connected_as"] = connected_as
+        if capabilities is not None:
+            result["capabilities"] = capabilities
+            if missing := [name for name, ok in capabilities.items() if not ok]:
+                result["warning"] = (f"This token can't read: {', '.join(missing)}. "
+                                     "Fetching or sharing those will fail until the token's permissions are updated.")
+        return result
+
+
+async def _read_capabilities(er_client) -> dict:
+    """What the credentials can read: events, and subjects with their tracks.
+
+    ER grants subject and track access through subject-group permission sets,
+    so user/me can't answer this; reading one item from each list can, and
+    only a 403 means the token can't read it. Without a recent `since` and a
+    cursor, ER counts the whole observations table and big sites time out."""
+    recent = {
+        "since": (datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(hours=24)).isoformat(),
+        "use_cursor": "true",
+    }
+    return {
+        "events": await _can_read(er_client, "activity/events"),
+        "subject_tracks": await _can_read(er_client, "subjects")
+        and await _can_read(er_client, "observations", recent),
+    }
+
+
+async def _can_read(er_client, path: str, params: Optional[dict] = None) -> bool:
+    try:
+        await er_client._get(path, params={"page_size": 1, **(params or {})})
+    except ERClientException as e:
+        if _status_of(e) == 403:
+            return False
+        raise
+    return True
 
 
 def _connected_as(er_user_details):

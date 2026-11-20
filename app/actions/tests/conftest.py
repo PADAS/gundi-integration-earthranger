@@ -297,6 +297,8 @@ def mock_erclient_class(
         get_me_response
     )
     erclient_mock.get_event_types.return_value = async_return(get_event_types_response)
+    # The auth action reads one item from events, subjects and observations.
+    erclient_mock._get = mocker.AsyncMock(return_value={"results": []})
 
     async def mock_get_subjectgroups(flat=False):
         return get_subjectgroups_flat_response if flat else get_subjectgroups_response
