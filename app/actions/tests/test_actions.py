@@ -3270,8 +3270,8 @@ async def test_auth_action_keeps_valid_credentials_when_a_read_check_cannot_fini
 
 _ACTION_DISPLAY_NAMES = {
     "auth": "Authentication",
-    "pull_events": "Fetch Events from EarthRanger",
-    "pull_observations": "Fetch Observations from EarthRanger",
+    "pull_events": "Share Events from EarthRanger",
+    "pull_observations": "Share Observations from EarthRanger",
 }
 
 

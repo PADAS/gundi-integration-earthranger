@@ -498,8 +498,8 @@ async def action_show_permissions(integration: Integration, action_config: ShowP
 
 # Each Pull action and the Share action that sends the same kind of data.
 SHARE_ACTION_FOR_PULL = {
-    "pull_events": ("sync_events", "Share Events"),
-    "pull_observations": ("sync_observations", "Share Subjects"),
+    "pull_events": ("sync_events", "ER2ER Event Sharing"),
+    "pull_observations": ("sync_observations", "ER2ER Observation Sharing"),
 }
 
 
@@ -545,10 +545,10 @@ async def _skip_because_sharing(integration, action_id: str, pull_title: str) ->
     return {"skipped": True, "reason": "share_enabled"}
 
 
-@action_title("Fetch Events from EarthRanger")
+@action_title("Share Events from EarthRanger")
 @activity_logger()
 async def action_pull_events(integration: Integration, action_config: PullEventsConfig):
-    if skipped := await _skip_because_sharing(integration, "pull_events", "Pull Events"):
+    if skipped := await _skip_because_sharing(integration, "pull_events", "Share Events from EarthRanger"):
         return skipped
     integration_id = str(integration.id)
     logger.info(
@@ -822,10 +822,10 @@ async def action_pull_events(integration: Integration, action_config: PullEvents
     }
 
 
-@action_title("Fetch Observations from EarthRanger")
+@action_title("Share Observations from EarthRanger")
 @activity_logger()
 async def action_pull_observations(integration: Integration, action_config: PullObservationsConfig):
-    if skipped := await _skip_because_sharing(integration, "pull_observations", "Pull Observations"):
+    if skipped := await _skip_because_sharing(integration, "pull_observations", "Share Observations from EarthRanger"):
         return skipped
     integration_id = str(integration.id)
     logger.info(
@@ -2312,7 +2312,7 @@ async def _forward_event_files(er_client, er_event, gundi_object_id, integration
 # import would be circular. Share reads this integration's own `auth` config.
 
 
-@action_title("Share Events")
+@action_title("ER2ER Event Sharing")
 @crontab_schedule("*/5 * * * *")
 @activity_logger()
 async def action_sync_events(integration: Integration, action_config: SyncEventsConfig):
@@ -2320,7 +2320,7 @@ async def action_sync_events(integration: Integration, action_config: SyncEvents
     return await run_sync_events(integration, action_config)
 
 
-@action_title("Share Subjects")
+@action_title("ER2ER Observation Sharing")
 @crontab_schedule("*/5 * * * *")
 @activity_logger()
 async def action_sync_observations(integration: Integration, action_config: SyncObservationsConfig):

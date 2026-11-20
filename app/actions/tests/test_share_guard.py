@@ -51,9 +51,9 @@ def test_share_actions_are_off_by_default():
 @pytest.mark.parametrize("share_on, pull_action_id, expected", [
     ({}, "pull_events", None),
     ({"sync_events": False}, "pull_events", None),
-    ({"sync_events": True}, "pull_events", "Share Events"),
+    ({"sync_events": True}, "pull_events", "ER2ER Event Sharing"),
     ({"sync_observations": True}, "pull_events", None),
-    ({"sync_observations": True}, "pull_observations", "Share Subjects"),
+    ({"sync_observations": True}, "pull_observations", "ER2ER Observation Sharing"),
     ({"sync_events": True}, "pull_observations", None),
 ])
 def test_each_pull_follows_the_share_action_for_the_same_data(share_on, pull_action_id, expected):
@@ -62,10 +62,10 @@ def test_each_pull_follows_the_share_action_for_the_same_data(share_on, pull_act
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("action, action_id, config, title, share_action_id, share_title", [
-    (handlers.action_pull_events, "pull_events", PullEventsConfig.construct, "Pull Events",
-     "sync_events", "Share Events"),
-    (handlers.action_pull_observations, "pull_observations", PullObservationsConfig.construct, "Pull Observations",
-     "sync_observations", "Share Subjects"),
+    (handlers.action_pull_events, "pull_events", PullEventsConfig.construct, "Share Events from EarthRanger",
+     "sync_events", "ER2ER Event Sharing"),
+    (handlers.action_pull_observations, "pull_observations", PullObservationsConfig.construct, "Share Observations from EarthRanger",
+     "sync_observations", "ER2ER Observation Sharing"),
 ])
 async def test_pull_skips_and_says_why_when_its_share_action_is_on(
         activity, pull_state, pull_internals, action, action_id, config, title, share_action_id, share_title):
