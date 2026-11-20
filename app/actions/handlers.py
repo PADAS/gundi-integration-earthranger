@@ -23,7 +23,9 @@ from .core import ReferenceDataResponse, ReferenceOption, action_title
 from .er_schema import er_site_root, fetch_prerendered_event_schema, parse_er_event_schema
 from .configurations import AuthenticateConfig, EventFilterDateField, PullObservationsConfig, PullEventsConfig, \
     ERAuthenticationType, ShowPermissionsConfig, ListEventTypesQuery, ListEventTypeFieldsQuery, \
-    ListEventFieldValuesQuery, ListEventCategoriesQuery, ListSubjectTypesQuery
+    ListEventFieldValuesQuery, ListEventCategoriesQuery, ListSubjectTypesQuery, ListShareEventTypesQuery, \
+    ListSubjectGroupsQuery, ListFeatureGroupsQuery, PreviewEventsShareQuery, PreviewSubjectsShareQuery, \
+    SyncEventsConfig, SyncObservationsConfig
 from .source_profiles import SourceProfileResolver
 from ..services.activity_logger import activity_logger, log_action_activity
 from ..services.errors import (
@@ -35,7 +37,7 @@ from ..services.errors import (
     IntegrationRateLimitError,
 )
 from ..services.gundi import send_events_to_gundi, send_observations_to_gundi, update_event_in_gundi, send_event_attachments_to_gundi
-from ..services.action_scheduler import trigger_action
+from ..services.action_scheduler import crontab_schedule, trigger_action
 
 logger = logging.getLogger(__name__)
 
@@ -463,9 +465,48 @@ async def action_show_permissions(integration: Integration, action_config: ShowP
     return response
 
 
+SHARE_ACTIONS = {"sync_events": "Share Events", "sync_observations": "Share Subjects"}
+
+
+def _scheduled_share_actions(integration) -> list:
+    """Titles of the Share actions that run on schedule for this integration.
+
+    A connection that shares (EarthRanger to EarthRanger) has only EarthRanger
+    destinations, and Share writes to them directly. If Pull also sent to
+    Gundi, routing would deliver every event and observation to those sites a
+    second time, so Pull stays quiet while Share is on."""
+    titles = []
+    for action_id, title in SHARE_ACTIONS.items():
+        config = find_config_for_action(integration.configurations or [], action_id)
+        if config and (config.data or {}).get("run_on_schedule"):
+            titles.append(title)
+    return titles
+
+
+async def _skip_because_sharing(integration, action_id: str, pull_title: str) -> Optional[dict]:
+    """Skip a Pull run when Share is on, with a plain activity log saying why."""
+    sharing = _scheduled_share_actions(integration)
+    if not sharing:
+        return None
+    await log_action_activity(
+        integration_id=str(integration.id),
+        action_id=action_id,
+        level=LogLevel.INFO,
+        title=(
+            f"{pull_title} didn't send anything to Gundi because {' and '.join(sharing)} "
+            f"{'is' if len(sharing) == 1 else 'are'} on for this connection. "
+            "Share sends this site's data straight to the EarthRanger destinations."
+        ),
+        config_data={"share_actions_on": sharing},
+    )
+    return {"skipped": True, "reason": "share_enabled"}
+
+
 @action_title("Fetch Events from EarthRanger")
 @activity_logger()
 async def action_pull_events(integration: Integration, action_config: PullEventsConfig):
+    if skipped := await _skip_because_sharing(integration, "pull_events", "Pull Events"):
+        return skipped
     integration_id = str(integration.id)
     logger.info(
         f"Extracting events for integration {integration_id}, with config {action_config}",
@@ -741,6 +782,8 @@ async def action_pull_events(integration: Integration, action_config: PullEvents
 @action_title("Fetch Observations from EarthRanger")
 @activity_logger()
 async def action_pull_observations(integration: Integration, action_config: PullObservationsConfig):
+    if skipped := await _skip_because_sharing(integration, "pull_observations", "Pull Observations"):
+        return skipped
     integration_id = str(integration.id)
     logger.info(
         f"Extracting observations for integration {integration_id}, with config {action_config}",
@@ -2113,3 +2156,82 @@ async def _forward_event_files(er_client, er_event, gundi_object_id, integration
         forwarded += 1
     return forwarded, seen
 
+
+
+# --- Share Events / Share Subjects (EarthRanger to EarthRanger) ---------------
+# The work lives in app/ersharing. app/actions/__init__.py imports this module
+# at import time, so app.ersharing is imported inside each handler; a top-level
+# import would be circular. Share reads this integration's own `auth` config.
+
+
+@action_title("Share Events")
+@crontab_schedule("*/5 * * * *")
+@activity_logger()
+async def action_sync_events(integration: Integration, action_config: SyncEventsConfig):
+    from app.ersharing.sync_events import run_sync_events
+    return await run_sync_events(integration, action_config)
+
+
+@action_title("Share Subjects")
+@crontab_schedule("*/5 * * * *")
+@activity_logger()
+async def action_sync_observations(integration: Integration, action_config: SyncObservationsConfig):
+    from app.ersharing.sync_observations import run_sync_observations
+    return await run_sync_observations(integration, action_config)
+
+
+async def _source_site(integration):
+    from app.ersharing import clients
+    auth = clients.auth_config_of(integration.configurations)
+    return clients.open_site(clients.source_url_of(integration, auth), auth, role="source")
+
+
+async def action_list_share_event_types(integration: Integration, action_config: ListShareEventTypesQuery):
+    """Reference action for Share Events: the site's active event types, v2 and v1.
+
+    list_event_types offers v2 types only (it feeds the event type field
+    picker); Share copies v1 types too, so they belong in its picker. A v2 type
+    wins on the same value."""
+    async with await _source_site(integration) as site:
+        event_types = await site.list_event_types_v2()
+        known = {t["value"] for t in event_types}
+        event_types += [t for t in await site.list_event_types_v1()
+                        if t.get("is_active", True) and t.get("value") not in known]
+
+    def group(event_type):
+        category = event_type.get("category")
+        return category.get("display") if isinstance(category, dict) else category
+
+    options = [ReferenceOption(value=t["value"], label=t.get("display") or t["value"], group=group(t))
+               for t in event_types]
+    return ReferenceDataResponse(options=sorted(options, key=lambda o: (o.label or "").lower())).dict()
+
+
+async def action_list_subject_groups(integration: Integration, action_config: ListSubjectGroupsQuery):
+    """Reference action: the site's subject groups (value = group id)."""
+    async with await _source_site(integration) as site:
+        groups = await site.list_subject_groups()
+    options = [ReferenceOption(value=str(g["id"]), label=g.get("name")) for g in groups]
+    return ReferenceDataResponse(options=sorted(options, key=lambda o: (o.label or "").lower())).dict()
+
+
+async def action_list_feature_groups(integration: Integration, action_config: ListFeatureGroupsQuery):
+    """Reference action: the site's spatial feature groups, for the Share area filters."""
+    async with await _source_site(integration) as site:
+        feature_groups = await site.list_feature_groups()
+    options = [ReferenceOption(value=str(f["id"]), label=f.get("name")) for f in feature_groups]
+    return ReferenceDataResponse(options=sorted(options, key=lambda o: (o.label or "").lower())).dict()
+
+
+async def action_preview_events_share(integration: Integration, action_config: PreviewEventsShareQuery):
+    """What the events form would send with its unsaved values (gundi:share_preview)."""
+    from app.ersharing.preview import preview_events
+    async with await _source_site(integration) as site:
+        return await preview_events(site, action_config.event_types, action_config.area_feature_groups)
+
+
+async def action_preview_subjects_share(integration: Integration, action_config: PreviewSubjectsShareQuery):
+    """What the subjects form would send with its unsaved values (gundi:share_preview)."""
+    from app.ersharing.preview import preview_subjects
+    async with await _source_site(integration) as site:
+        return await preview_subjects(site, action_config.subject_groups, action_config.area_feature_groups)

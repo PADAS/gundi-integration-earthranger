@@ -1,5 +1,8 @@
 # Add your integration-specific dependencies here
 earthranger-client>=1.15.0,<2.0.0
+# Share Events / Share Subjects: area filters and ER timestamps
+shapely~=2.0
+python-dateutil~=2.9
 # backports.zoneinfo dropped — repo is permanently on Python 3.10+ (see
 # Dockerfile + .python-version), so the zoneinfo stdlib module is always
 # available. Keeping the entry caused Docker builds to fail because the
