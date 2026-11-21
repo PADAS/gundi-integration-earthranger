@@ -613,6 +613,17 @@ async def _execute_action_impl(
             status_code=status.HTTP_404_NOT_FOUND
         )
 
+    if skippable_pull and action_config and not action_config.data and not config_overrides:
+        # A pull saved with nothing filled in (for example on a route that only
+        # uses another action) was never set up: skip it like a missing one,
+        # without the "missing or invalid" warning on every tick.
+        return _skip_quietly(
+            integration_id, action_id,
+            reason="no_configuration",
+            message=f"Skipping '{action_id}': its configuration is empty.",
+            log_level=logging.DEBUG,
+        )
+
     try:  # Parse the action configuration
         config_data = action_config.data if action_config else {}
         if config_overrides:

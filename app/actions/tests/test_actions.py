@@ -3107,6 +3107,9 @@ async def test_translated_er_failures_keep_their_traceback_in_the_local_log(mock
     assert records and records[-1].exc_info and records[-1].exc_info[0] is ValueError
 
 
+READABLE = {"events": True, "subject_tracks": True}
+
+
 def _auth_client_returning_me(mocker, me):
     """Patch AsyncERClient in handlers with a client whose get_me returns me."""
     from unittest.mock import AsyncMock, MagicMock
@@ -3115,6 +3118,7 @@ def _auth_client_returning_me(mocker, me):
     instance = MagicMock()
     instance.get_me = AsyncMock(return_value=me)
     instance.login = AsyncMock(return_value=True)
+    instance._get = AsyncMock(return_value={"results": []})
     client_cls = MagicMock()
     client_cls.return_value.__aenter__ = AsyncMock(return_value=instance)
     client_cls.return_value.__aexit__ = AsyncMock(return_value=False)
@@ -3152,7 +3156,7 @@ async def test_auth_action_with_token_reports_who_it_is_connected_as(mocker, er_
 
     response = await action_auth(er_integration_v2_provider, AuthenticateConfig(token="abc123"))
 
-    assert response == {"valid_credentials": True, "connected_as": expected}
+    assert response == {"valid_credentials": True, "connected_as": expected, "capabilities": READABLE}
 
 
 @pytest.mark.parametrize(
@@ -3172,7 +3176,8 @@ async def test_auth_action_with_token_omits_connected_as_when_inactive_or_unname
 
     response = await action_auth(er_integration_v2_provider, AuthenticateConfig(token="abc123"))
 
-    assert response == {"valid_credentials": expected}
+    assert response == ({"valid_credentials": True, "capabilities": READABLE} if expected
+                        else {"valid_credentials": False})
 
 
 @pytest.mark.asyncio
@@ -3187,14 +3192,87 @@ async def test_auth_action_with_username_password_does_not_report_connected_as(m
         AuthenticateConfig(authentication_type=ERAuthenticationType.USERNAME_PASSWORD, username="u", password="p"),
     )
 
-    assert response == {"valid_credentials": True}
+    assert response == {"valid_credentials": True, "capabilities": READABLE}
     assert not instance.get_me.called
+
+
+@pytest.mark.asyncio
+async def test_auth_action_reads_one_item_and_recent_observations_by_cursor(mocker, er_integration_v2_provider):
+    import datetime as dt
+    from app.actions.handlers import action_auth
+    from app.actions.configurations import AuthenticateConfig
+
+    instance = _auth_client_returning_me(mocker, {"username": "u", "is_active": True})
+    await action_auth(er_integration_v2_provider, AuthenticateConfig(token="abc123"))
+
+    calls = {c.args[0]: c.kwargs["params"] for c in instance._get.await_args_list}
+    assert set(calls) == {"activity/events", "subjects", "observations"}
+    assert all(params["page_size"] == 1 for params in calls.values())
+    assert calls["observations"]["use_cursor"] == "true"
+    assert calls["activity/events"]["use_cursor"] == "true"  # a numbered page counts every event
+    age = dt.datetime.now(dt.timezone.utc) - dt.datetime.fromisoformat(calls["observations"]["since"])
+    assert dt.timedelta(hours=23) < age < dt.timedelta(hours=25)
+
+
+@pytest.mark.parametrize("forbidden, capabilities, missing", [
+    ({"activity/events"}, {"events": False, "subject_tracks": True}, "events"),
+    ({"observations"}, {"events": True, "subject_tracks": False}, "subject_tracks"),
+    ({"activity/events", "subjects"}, {"events": False, "subject_tracks": False}, "events, subject_tracks"),
+])
+@pytest.mark.asyncio
+async def test_auth_action_warns_when_the_token_cannot_read_events_or_tracks(
+        mocker, er_integration_v2_provider, forbidden, capabilities, missing):
+    from erclient.er_errors import ERClientPermissionDenied
+    from app.actions.handlers import action_auth
+    from app.actions.configurations import AuthenticateConfig
+
+    instance = _auth_client_returning_me(mocker, {"username": "u", "is_active": True})
+
+    async def get(path, params=None):
+        if path in forbidden:
+            raise ERClientPermissionDenied("forbidden", status_code=403)
+        return {"results": []}
+
+    instance._get.side_effect = get
+    response = await action_auth(er_integration_v2_provider, AuthenticateConfig(token="abc123"))
+
+    assert response["valid_credentials"] is True
+    assert response["capabilities"] == capabilities
+    assert response["warning"] == (f"This token can't read: {missing}, so fetching or sharing that data "
+                                   "doesn't work with its current permissions.")
+
+
+@pytest.mark.parametrize("exc", [
+    httpx.ConnectError("[Errno -3] Temporary failure in name resolution"),
+    ERClientException("Request to ER failed: timed out"),
+])
+@pytest.mark.asyncio
+async def test_auth_action_keeps_valid_credentials_when_a_read_check_cannot_finish(
+        mocker, er_integration_v2_provider, exc):
+    """A timeout or server error on a read check says nothing about the
+    credentials: they stay valid, the check is unknown (None), and no warning
+    claims the token can't read it."""
+    from app.actions.handlers import action_auth
+    from app.actions.configurations import AuthenticateConfig
+
+    instance = _auth_client_returning_me(mocker, {"username": "u", "is_active": True})
+
+    async def get(path, params=None):
+        if path == "observations":
+            raise exc
+        return {"results": []}
+
+    instance._get.side_effect = get
+    response = await action_auth(er_integration_v2_provider, AuthenticateConfig(token="abc123"))
+
+    assert response == {"valid_credentials": True, "connected_as": "u",
+                        "capabilities": {"events": True, "subject_tracks": None}}
 
 
 _ACTION_DISPLAY_NAMES = {
     "auth": "Authentication",
-    "pull_events": "Fetch Events from EarthRanger",
-    "pull_observations": "Fetch Observations from EarthRanger",
+    "pull_events": "Share Events from EarthRanger",
+    "pull_observations": "Share Observations from EarthRanger",
 }
 
 
@@ -3221,3 +3299,33 @@ async def test_registration_uses_the_action_display_names():
     names = {action["value"]: action["name"] for action in registered["actions"]}
     for action_id, expected_title in _ACTION_DISPLAY_NAMES.items():
         assert names[action_id] == expected_title
+
+
+@pytest.mark.asyncio
+async def test_device_lookup_stops_the_other_reads_when_one_fails():
+    """gather doesn't cancel the rest on a failure; the lookup does, so a
+    failed run doesn't keep calling subjectsources in the background."""
+    import asyncio
+    from unittest.mock import MagicMock
+    from app.actions import handlers as handlers_module
+
+    started = []
+
+    async def get_source_assignments(subject_ids):
+        started.append(subject_ids)
+        if len(started) == 1:
+            raise ERClientPermissionDenied("forbidden", status_code=403)
+        await asyncio.sleep(10)
+        return []
+
+    client = MagicMock()
+    client.get_source_assignments = get_source_assignments
+    ids = [f"s{i}" for i in range(handlers_module.SUBJECT_ID_CHUNK_SIZE * 3)]
+    before = asyncio.all_tasks()
+    with pytest.raises(ERClientPermissionDenied):
+        await asyncio.wait_for(handlers_module._fetch_source_assignments(client, ids, concurrency=1), timeout=2)
+    await asyncio.sleep(0.05)
+    # The read already waiting for the slot may have started; the last one never does,
+    # and nothing is left running.
+    assert len(started) < 3
+    assert asyncio.all_tasks() - before - {asyncio.current_task()} == set()

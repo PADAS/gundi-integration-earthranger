@@ -1,8 +1,8 @@
 from datetime import datetime
 from enum import Enum
-from typing import List, Optional
+from typing import List, Optional, Sequence
 
-from pydantic import Field, SecretStr
+from pydantic import BaseModel, Field, SecretStr
 
 from app.services.utils import FieldWithUIOptions, GlobalUISchemaOptions, UIOptions
 from .core import AuthActionConfiguration, GenericActionConfiguration, PullActionConfiguration, ExecutableActionMixin, ReferenceActionConfiguration
@@ -148,6 +148,8 @@ class ShowPermissionsConfig(GenericActionConfiguration, ExecutableActionMixin):
 
 
 class PullObservationsConfig(PullActionConfiguration):
+    """Shares observations with other platforms through Gundi."""
+
     start_datetime: str = FieldWithUIOptions(
         ...,
         title="Start Datetime",
@@ -183,11 +185,11 @@ class PullObservationsConfig(PullActionConfiguration):
     )
     subject_group_ids: List[str] = Field(
         default_factory=list,
-        title="Subject Group UUIDs",
+        title="Subject Groups",
         description=(
-            "List of ER subject-group UUIDs whose members' observations should be included. "
+            "ER subject groups whose members' observations should be included. Pick a group "
+            "from the list, or paste its UUID (the Show Permissions action lists every group's UUID). "
             "Picking a parent group includes its sub-groups' subjects (resolved recursively). "
-            "Run the 'show_permissions' action to find UUIDs available to this account. "
             "An empty list applies no group constraint."
         ),
     )
@@ -231,8 +233,24 @@ class PullObservationsConfig(PullActionConfiguration):
         order=["start_datetime", "end_datetime", "subject_group_ids", "subwindow_days", "force_run_since_start", "continue_immediately", "run_on_schedule"],
     )
 
+    @classmethod
+    def ui_schema(cls, *args, **kwargs):
+        """Offer the site's subject groups by name (gundi:reference), and ask
+        the portal to confirm, on Save, which subjects this pull will send
+        (see _share_preview)."""
+        base = super().ui_schema(*args, **kwargs)
+        # Each list item is a dropdown of the site's subject groups by name;
+        # the stored value stays the group UUID.
+        base["subject_group_ids"] = {"items": {"gundi:reference": _reference("list_subject_groups")}}
+        base["gundi:share_preview"] = _share_preview(
+            "preview_subjects_share", "subjects", ["subject_group_ids"]
+        )
+        return base
+
 
 class PullEventsConfig(PullActionConfiguration):
+    """Shares events with other platforms through Gundi."""
+
     start_datetime: str = FieldWithUIOptions(
         ...,
         title="Start Datetime",
@@ -341,6 +359,9 @@ class PullEventsConfig(PullActionConfiguration):
         base = super().ui_schema(*args, **kwargs)
         base["event_types"] = {"items": {"gundi:reference": _reference("list_event_types")}}
         base["event_categories"] = {"items": {"gundi:reference": _reference("list_event_categories")}}
+        base["gundi:share_preview"] = _share_preview(
+            "preview_events_share", "events", ["event_types", "event_categories"]
+        )
         return base
 
 
@@ -355,12 +376,57 @@ def _reference(action: str, params: Optional[dict] = None) -> dict:
     }
 
 
+def _share_preview(action: str, kind: str, selection_fields: List[str]) -> dict:
+    """gundi:share_preview ui_schema annotation: before saving the action, the
+    portal shows what it will send, read from the preview action `action` with
+    the section's unsaved values. `kind` is "events" or "subjects";
+    `selection_fields` are the fields the user picks in (all empty means
+    everything). Spec: gundi-portal
+    docs/superpowers/specs/2026-11-09-er2er-sharing-preview-modal-design.md
+    """
+    return {"action": action, "kind": kind, "selection_fields": list(selection_fields)}
+
+
+class PreviewEventsShareQuery(ReferenceActionConfiguration):
+    """What the events form would send with these values, for Pull Events and
+    Share Events alike. The portal sends the section's whole form: Pull Events'
+    form carries `start_datetime` and the category filter, Share Events' form
+    the area filter. The event type selection is read for both."""
+    event_types: List[str] = Field(default_factory=list)
+    event_categories: List[str] = Field(default_factory=list)
+    area_feature_groups: List[str] = Field(default_factory=list)
+    start_datetime: Optional[str] = None
+
+    @property
+    def from_pull_form(self) -> bool:
+        return bool(self.__fields_set__ & {"start_datetime", "event_categories"})
+
+
+class PreviewSubjectsShareQuery(ReferenceActionConfiguration):
+    """What the subjects form would send with these values, for Pull
+    Observations and Share Subjects alike. Pull Observations' form carries
+    `start_datetime` and `subject_group_ids`; Share Subjects' form
+    `subject_groups` and the area filter."""
+    subject_group_ids: List[str] = Field(default_factory=list)
+    subject_groups: List[str] = Field(default_factory=list)
+    area_feature_groups: List[str] = Field(default_factory=list)
+    start_datetime: Optional[str] = None
+
+    @property
+    def from_pull_form(self) -> bool:
+        return bool(self.__fields_set__ & {"start_datetime", "subject_group_ids"})
+
+
 class ListEventTypesQuery(ReferenceActionConfiguration):
     """List the ER event types visible to this integration's credentials."""
 
 
 class ListEventCategoriesQuery(ReferenceActionConfiguration):
     """List the ER event categories visible to this integration's credentials."""
+
+
+class ListSubjectGroupsQuery(ReferenceActionConfiguration):
+    """List the ER subject groups visible to this integration's credentials."""
 
 
 class ListSubjectTypesQuery(ReferenceActionConfiguration):
@@ -376,3 +442,165 @@ class ListEventFieldValuesQuery(ReferenceActionConfiguration):
     event_type: str
     field_key: str
 
+
+RAW_VIEW_TITLE = "Legacy View"
+
+# v1 er2er state key -> form field path ("a.b" is a nested field). The portal's
+# raw view translates a pasted v1 state into the form, and the form back, with these.
+EVENTS_V1_KEYS = {
+    "prepend_system_to_categories": "compatibility.prepend_system_to_categories",
+    "prepend_system_to_event_types": "compatibility.prepend_system_to_event_types",
+    "prepend_system_to_event_titles": "compatibility.prepend_system_to_event_titles",
+    "update_schema": "compatibility.update_schema",
+    "delete_unmatched_events": "compatibility.delete_unmatched_events",
+    "source_system_value": "compatibility.source_system_value",
+    "source_system_name": "compatibility.source_system_name",
+    "within_featuregroups": "area_feature_groups",
+}
+OBSERVATIONS_V1_KEYS = {
+    "subject_group": "destination_subject_group",
+    "feature_groups": "area_feature_groups",
+    "subject_additional": "compatibility.subject_additional",
+    "src_user": "compatibility.src_user",
+}
+# v1 state keys with no form field are kept in the config as they are, except
+# these. Dropped: v1's own run status and sync window, which v2 doesn't read.
+# Masked: kept, but saved as "*******" so the secret never reaches the config.
+# dest_endpoint is dropped: destinations come from the connection, not from the share's settings.
+EVENTS_V1_DROP = ["days_to_sync", "dest_endpoint", "error", "last_run", "last_successful_run", "warning"]
+OBSERVATIONS_V1_DROP = ["batch_size", "error", "last_run", "last_successful_run", "look_back_window_hours",
+                        "schedule_interval_minutes"]
+V1_MASK = ["dest_token"]
+# Unwrapped: v1 stores these lists as [{"id": ...}]; the portal reads the named field of each item.
+OBSERVATIONS_V1_UNWRAP = {"feature_groups": "id"}
+
+
+def raw_view(v1_keys: dict, drop: Sequence[str] = (), mask: Sequence[str] = (), unwrap: Optional[dict] = None) -> dict:
+    """gundi:raw_view annotation: the portal shows a "Legacy View" of this
+    action and translates between it and the form with this key map."""
+    annotation = {"title": RAW_VIEW_TITLE, "map": dict(v1_keys), "drop": list(drop), "mask": list(mask)}
+    if unwrap:
+        annotation["unwrap"] = dict(unwrap)
+    return annotation
+
+
+class EventsCompatibility(BaseModel):
+    """v1 settings kept for migrated shares. None means "use the simple-mode default"."""
+
+    prepend_system_to_categories: Optional[bool] = Field(None, title="Prefix categories with the source name")
+    prepend_system_to_event_types: Optional[bool] = Field(None, title="Prefix event types with the source name")
+    prepend_system_to_event_titles: Optional[bool] = Field(None, title="Prefix event titles with the source name")
+    update_schema: Optional[bool] = Field(None, title="Allow updates to destination event types")
+    delete_unmatched_events: Optional[bool] = Field(
+        None, title="Remove destination copies when the source event is deleted"
+    )
+    source_system_value: Optional[str] = Field(
+        None,
+        title="Source system code",
+        description=(
+            "Added in front of shared category and event type values, like 'sndbx_wildlife_sighting'. "
+            "Changing it on an existing share copies its events again. Leave empty to use the site's name."
+        ),
+    )
+    source_system_name: Optional[str] = Field(
+        None,
+        title="Source system display name",
+        description=(
+            "Added in front of shared event titles and type names, like 'Sndbx-Wildlife sighting'. "
+            "Leave empty to use the site's name."
+        ),
+    )
+
+
+class ObservationsCompatibility(BaseModel):
+    subject_additional: Optional[bool] = Field(None, title="Copy subject and source 'additional' data")
+    src_user: Optional[str] = Field(None, title="Sharing user recorded in the lineage")
+
+
+class SyncEventsConfig(PullActionConfiguration):
+    """Shares events with another EarthRanger site."""
+
+    run_on_schedule: bool = Field(
+        False, title="Share events", description="Copy new and changed events to every destination."
+    )
+    event_types: List[str] = Field(
+        default_factory=list, title="Event types to share", description="Leave empty to share all event types."
+    )
+    area_feature_groups: List[str] = Field(
+        default_factory=list,
+        title="Events area filter",
+        description="Only share events inside these feature groups. Leave empty to share events anywhere.",
+    )
+    start_from: Optional[datetime] = Field(
+        None, title="Start from", description="Where the first sync starts when no progress is recorded yet."
+    )
+    compatibility: EventsCompatibility = Field(
+        default_factory=EventsCompatibility, title="Advanced (v1 compatibility)"
+    )
+
+    ui_global_options: GlobalUISchemaOptions = GlobalUISchemaOptions(
+        order=["run_on_schedule", "event_types", "area_feature_groups", "compatibility", "start_from"],
+    )
+
+    @classmethod
+    def ui_schema(cls, *args, **kwargs):
+        base = super().ui_schema(*args, **kwargs)
+        base["event_types"] = {"items": {"gundi:reference": _reference("list_share_event_types")}}
+        base["area_feature_groups"] = {"items": {"gundi:reference": _reference("list_feature_groups")}}
+        base["start_from"] = {"ui:widget": "hidden"}
+        base["gundi:raw_view"] = raw_view(EVENTS_V1_KEYS, drop=EVENTS_V1_DROP, mask=V1_MASK)
+        base["gundi:share_preview"] = _share_preview("preview_events_share", "events", ["event_types"])
+        return base
+
+
+class SyncObservationsConfig(PullActionConfiguration):
+    """Shares observations with another EarthRanger site."""
+
+    run_on_schedule: bool = Field(
+        False, title="Share subject tracks", description="Copy new track points to every destination."
+    )
+    subject_groups: List[str] = Field(
+        default_factory=list, title="Subject groups to share", description="Leave empty to share all subject groups."
+    )
+    destination_subject_group: Optional[str] = Field(
+        None,
+        title="Destination subject group name",
+        description="Shared subjects are added to this group at each destination. "
+                    "Leave it empty to use the source site's name.",
+    )
+    area_feature_groups: List[str] = Field(
+        default_factory=list,
+        title="Tracks area filter",
+        description="Only share points inside these feature groups. Leave empty to share points anywhere.",
+    )
+    start_from: Optional[datetime] = Field(
+        None, title="Start from",
+        description="For a subject's first sync only: shares points recorded after this time, "
+                    "within the last 12 hours. An earlier time has no effect.",
+    )
+    compatibility: ObservationsCompatibility = Field(
+        default_factory=ObservationsCompatibility, title="Advanced (v1 compatibility)"
+    )
+
+    ui_global_options: GlobalUISchemaOptions = GlobalUISchemaOptions(
+        order=["run_on_schedule", "subject_groups", "destination_subject_group", "area_feature_groups",
+               "compatibility", "start_from"],
+    )
+
+    @classmethod
+    def ui_schema(cls, *args, **kwargs):
+        base = super().ui_schema(*args, **kwargs)
+        base["subject_groups"] = {"items": {"gundi:reference": _reference("list_subject_groups")}}
+        base["area_feature_groups"] = {"items": {"gundi:reference": _reference("list_feature_groups")}}
+        base["start_from"] = {"ui:widget": "hidden"}
+        base["gundi:raw_view"] = raw_view(OBSERVATIONS_V1_KEYS, drop=OBSERVATIONS_V1_DROP, mask=V1_MASK,
+                                           unwrap=OBSERVATIONS_V1_UNWRAP)
+        base["gundi:share_preview"] = _share_preview("preview_subjects_share", "subjects", ["subject_groups"])
+        return base
+
+class ListShareEventTypesQuery(ReferenceActionConfiguration):
+    """The site's active event types, v2 and v1, for Share Events (v1 types are shared too)."""
+
+
+class ListFeatureGroupsQuery(ReferenceActionConfiguration):
+    """The site's spatial feature groups."""

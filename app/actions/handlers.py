@@ -1,3 +1,5 @@
+import asyncio
+import functools
 import json
 import datetime
 import logging
@@ -23,7 +25,10 @@ from .core import ReferenceDataResponse, ReferenceOption, action_title
 from .er_schema import er_site_root, fetch_prerendered_event_schema, parse_er_event_schema
 from .configurations import AuthenticateConfig, EventFilterDateField, PullObservationsConfig, PullEventsConfig, \
     ERAuthenticationType, ShowPermissionsConfig, ListEventTypesQuery, ListEventTypeFieldsQuery, \
-    ListEventFieldValuesQuery, ListEventCategoriesQuery, ListSubjectTypesQuery
+    ListEventFieldValuesQuery, ListEventCategoriesQuery, ListSubjectTypesQuery, ListShareEventTypesQuery, \
+    ListSubjectGroupsQuery, ListFeatureGroupsQuery, PreviewEventsShareQuery, PreviewSubjectsShareQuery, \
+    SyncEventsConfig, SyncObservationsConfig
+from .share_preview import ListReader, preview_events, preview_subjects, subjects_in_groups, walk_groups
 from .source_profiles import SourceProfileResolver
 from ..services.activity_logger import activity_logger, log_action_activity
 from ..services.errors import (
@@ -35,7 +40,7 @@ from ..services.errors import (
     IntegrationRateLimitError,
 )
 from ..services.gundi import send_events_to_gundi, send_observations_to_gundi, update_event_in_gundi, send_event_attachments_to_gundi
-from ..services.action_scheduler import trigger_action
+from ..services.action_scheduler import crontab_schedule, trigger_action
 
 logger = logging.getLogger(__name__)
 
@@ -85,6 +90,7 @@ async def action_auth(integration: Integration, action_config: AuthenticateConfi
                 valid_credentials = await er_client.login()
             else:
                 return {"valid_credentials": False, "error": "Please select an valid authentication method."}
+            capabilities = await _read_capabilities(er_client) if valid_credentials else None
         except _ER_CALL_FAILURES as e:
             # Same fixed messages the reference actions use. str(e) carries
             # ER's response body or our request (for login(), the password),
@@ -92,9 +98,47 @@ async def action_auth(integration: Integration, action_config: AuthenticateConfi
             # raw httpx errors (it runs outside erclient's _call), so the
             # translation handles both shapes.
             return {"valid_credentials": False, "error": _as_integration_error(e).message}
+        result = {"valid_credentials": valid_credentials}
         if connected_as:
-            return {"valid_credentials": valid_credentials, "connected_as": connected_as}
-        return {"valid_credentials": valid_credentials}
+            result["connected_as"] = connected_as
+        if capabilities is not None:
+            result["capabilities"] = capabilities
+            if missing := [name for name, ok in capabilities.items() if ok is False]:
+                result["warning"] = (f"This token can't read: {', '.join(missing)}, "
+                                     "so fetching or sharing that data doesn't work with its current permissions.")
+        return result
+
+
+async def _read_capabilities(er_client) -> dict:
+    """What the credentials can read: events, and subjects with their tracks.
+
+    ER grants subject and track access through subject-group permission sets,
+    so user/me can't answer this; reading one item from each list can, and
+    only a 403 means the token can't read it. Without a recent `since` and a
+    cursor, ER counts the whole observations table and big sites time out."""
+    recent = {
+        "since": (datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(hours=24)).isoformat(),
+        "use_cursor": "true",
+    }
+    subjects = await _can_read(er_client, "subjects")
+    return {
+        # By cursor too: a numbered page makes ER count every event on the site.
+        "events": await _can_read(er_client, "activity/events", {"use_cursor": "true"}),
+        "subject_tracks": subjects if subjects is not True else await _can_read(er_client, "observations", recent),
+    }
+
+
+async def _can_read(er_client, path: str, params: Optional[dict] = None) -> Optional[bool]:
+    """True or False when ER answers; None when the check couldn't finish (a
+    timeout or a server error), which says nothing about the credentials."""
+    try:
+        await er_client._get(path, params={"page_size": 1, **(params or {})})
+    except _ER_CALL_FAILURES as e:
+        if _status_of(e) == 403:
+            return False
+        logger.warning("auth: couldn't check read access to %s: %s", path, _failure_summary(e))
+        return None
+    return True
 
 
 def _connected_as(er_user_details):
@@ -375,17 +419,7 @@ def _collect_group_uuids(er_subject_groups):
     only reachable by walking. Operators may legitimately want to filter by a
     sub-group UUID, so we expose all of them.
     """
-    uuids = set()
-
-    def walk(group):
-        if group.get("id"):
-            uuids.add(group["id"])
-        for sub in group.get("subgroups", []):
-            walk(sub)
-
-    for group in er_subject_groups:
-        walk(group)
-    return uuids
+    return {g["id"] for g in walk_groups(er_subject_groups) if g.get("id")}
 
 
 async def action_show_permissions(integration: Integration, action_config: ShowPermissionsConfig):
@@ -463,9 +497,60 @@ async def action_show_permissions(integration: Integration, action_config: ShowP
     return response
 
 
-@action_title("Fetch Events from EarthRanger")
+# Each Pull action and the Share action that sends the same kind of data.
+SHARE_ACTION_FOR_PULL = {
+    "pull_events": ("sync_events", "ER2ER Event Sharing"),
+    "pull_observations": ("sync_observations", "ER2ER Observation Sharing"),
+}
+
+
+def _share_is_on(integration, pull_action_id: str) -> Optional[str]:
+    """The title of the Share action that sends what this Pull action sends,
+    when it runs on schedule for this integration.
+
+    A connection that shares (EarthRanger to EarthRanger) has only EarthRanger
+    destinations, and Share writes to them directly. If Pull also sent the same
+    kind of data to Gundi, routing would deliver it to those sites a second
+    time, so Pull stays quiet for that kind while its Share action is on."""
+    share_action_id, title = SHARE_ACTION_FOR_PULL[pull_action_id]
+    config = find_config_for_action(integration.configurations or [], share_action_id)
+    return title if config and (config.data or {}).get("run_on_schedule") else None
+
+
+async def _skip_because_sharing(integration, action_id: str, pull_title: str) -> Optional[dict]:
+    """Skip a Pull run while its Share action is on, with a plain activity log saying why.
+
+    The Pull watermark moves to now, so turning Share off later doesn't make
+    Pull send everything Share already copied. An unfinished Pull Observations
+    backfill is kept as it is, so it carries on if Share is turned off again."""
+    share_title = _share_is_on(integration, action_id)
+    if not share_title:
+        return None
+    integration_id = str(integration.id)
+    state = await state_manager.get_state(integration_id=integration_id, action_id=action_id)
+    if not state.get("backfill"):
+        await state_manager.set_state(
+            integration_id=integration_id, action_id=action_id,
+            state={"last_execution": datetime.datetime.now(tz=datetime.timezone.utc).isoformat()},
+        )
+    await log_action_activity(
+        integration_id=integration_id,
+        action_id=action_id,
+        level=LogLevel.INFO,
+        title=(
+            f"{pull_title} didn't send anything to Gundi because {share_title} is on for this connection. "
+            f"{share_title} sends this site's data straight to the EarthRanger destinations."
+        ),
+        config_data={"share_action_on": share_title},
+    )
+    return {"skipped": True, "reason": "share_enabled"}
+
+
+@action_title("Share Events from EarthRanger")
 @activity_logger()
 async def action_pull_events(integration: Integration, action_config: PullEventsConfig):
+    if skipped := await _skip_because_sharing(integration, "pull_events", "Share Events from EarthRanger"):
+        return skipped
     integration_id = str(integration.id)
     logger.info(
         f"Extracting events for integration {integration_id}, with config {action_config}",
@@ -738,9 +823,11 @@ async def action_pull_events(integration: Integration, action_config: PullEvents
     }
 
 
-@action_title("Fetch Observations from EarthRanger")
+@action_title("Share Observations from EarthRanger")
 @activity_logger()
 async def action_pull_observations(integration: Integration, action_config: PullObservationsConfig):
+    if skipped := await _skip_because_sharing(integration, "pull_observations", "Share Observations from EarthRanger"):
+        return skipped
     integration_id = str(integration.id)
     logger.info(
         f"Extracting observations for integration {integration_id}, with config {action_config}",
@@ -932,7 +1019,8 @@ async def action_pull_observations(integration: Integration, action_config: Pull
             await _release_backfill_lease(integration_id)
 
 
-async def _fetch_source_assignments(er_client, subject_ids, *, integration_id=None):
+async def _fetch_source_assignments(er_client, subject_ids, *, integration_id=None,
+                                    concurrency=1, report=None):
     """Fetch subjectsources for many subjects, chunked to keep URLs short and
     each response within a single page.
 
@@ -942,13 +1030,40 @@ async def _fetch_source_assignments(er_client, subject_ids, *, integration_id=No
     sidesteps both. As a safety net we WARN if any chunk response still carries a
     ``next`` (the single-page assumption breaking), and we capture diagnostics on
     unexpected/malformed shapes (problem (b)).
+
+    ``concurrency`` chunks are requested at a time (the pull reads them one by
+    one; the share preview runs inside Save, so it reads a few at once). When
+    ``report`` is given, ``report["incomplete"]`` is set if any chunk may have
+    left assignments out (a further page, an unexpected shape, a malformed record).
     """
     assignments = []
     malformed = 0
-    for chunk in _chunked(subject_ids, SUBJECT_ID_CHUNK_SIZE):
-        raw = await er_client.get_source_assignments(subject_ids=chunk)
+    chunks = list(_chunked(subject_ids, SUBJECT_ID_CHUNK_SIZE))
+    gate = asyncio.Semaphore(max(1, concurrency))
+
+    async def fetch(chunk):
+        async with gate:
+            return await er_client.get_source_assignments(subject_ids=chunk)
+
+    tasks = [asyncio.ensure_future(fetch(chunk)) for chunk in chunks]
+    try:
+        responses = await asyncio.gather(*tasks)
+    except BaseException:
+        # gather doesn't cancel the rest when one read fails; stop them here so
+        # a failed run doesn't keep calling subjectsources in the background.
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        raise
+
+    def incomplete():
+        if report is not None:
+            report["incomplete"] = True
+
+    for chunk, raw in zip(chunks, responses):
         if isinstance(raw, dict):
             if raw.get("next"):
+                incomplete()
                 logger.warning(
                     "subjectsources chunk returned a paginated 'next' "
                     "(count=%s, chunk_size=%d) — sources may be dropped; "
@@ -960,6 +1075,7 @@ async def _fetch_source_assignments(er_client, subject_ids, *, integration_id=No
         elif isinstance(raw, list):
             records = raw
         else:
+            incomplete()
             logger.warning(
                 "Unexpected subjectsources response type %s: %.200r",
                 type(raw).__name__, raw,
@@ -976,6 +1092,7 @@ async def _fetch_source_assignments(er_client, subject_ids, *, integration_id=No
                 assignments.append(rec)
             else:
                 malformed += 1
+                incomplete()
                 logger.warning(
                     "Skipping malformed subjectsource record: %r", rec,
                     extra={"attention_needed": True},
@@ -1002,20 +1119,9 @@ async def _resolve_source_ids(er_client, group_ids, *, integration_id=None):
     if not group_ids:
         return set()
 
-    wanted = set(group_ids)
-    groups = await er_client.get_subjectgroups(flat=False)
-    subject_ids = set()
-
-    def walk(group, inherited=False):
-        matched = inherited or group.get("id") in wanted
-        if matched:
-            for subject in group.get("subjects", []):
-                subject_ids.add(subject["id"])
-        for sub in group.get("subgroups", []):
-            walk(sub, inherited=matched)
-
-    for group in groups:
-        walk(group)
+    groups = _as_list(await er_client.get_subjectgroups(flat=False))
+    # The share preview resolves picked groups with the same function.
+    subject_ids = {str(s["id"]) for s in subjects_in_groups(groups, group_ids)}
 
     if not subject_ids:
         return set()
@@ -1856,6 +1962,92 @@ async def action_list_event_categories(integration: Integration, action_config: 
     return ReferenceDataResponse(options=options, truncated=False).dict()
 
 
+async def action_list_subject_groups(integration: Integration, action_config: ListSubjectGroupsQuery):
+    """Reference action: ER subject groups visible to this integration's credentials.
+
+    Feeds the Subject Groups dropdown of pull_observations: the user picks a
+    group by name and the group's UUID is stored. Reads the same subject group
+    tree pull_observations resolves the picked groups in, so every group it
+    can match is offered. A subgroup is grouped under its parent's path
+    ("Parent / Child"), since sibling groups can share a name, the way
+    list_event_types groups types by category. Like list_event_types, it
+    offers names only: ER has no lighter call for the group names, and the
+    portal keeps the answer for cache_ttl_seconds. The fetch is load-bearing:
+    errors propagate so the portal says why the list is empty.
+    """
+    reader = ListReader()
+    async with _translating_er_client(integration) as earth_ranger:
+        tree = reader.records(await earth_ranger.get_subjectgroups(flat=False))
+
+    options = []
+
+    def walk(groups, path):
+        for group in _as_list(groups):
+            if not isinstance(group, dict) or not group.get("id"):
+                continue
+            name = group.get("name") or str(group["id"])
+            options.append(ReferenceOption(
+                value=str(group["id"]),
+                label=name,
+                group=" / ".join(path) or None,
+            ))
+            walk(group.get("subgroups") or [], path + [name])
+
+    walk(tree, [])
+    options.sort(key=lambda o: ((o.group or "").lower(), (o.label or "").lower()))
+    # A paginated answer with more pages means the list is cut short.
+    return ReferenceDataResponse(options=options, truncated=reader.incomplete).dict()
+
+
+@action_title("Preview Events")
+async def action_preview_events_share(integration: Integration, action_config: PreviewEventsShareQuery):
+    """What the events form would send with its unsaved values, for the
+    portal's confirmation on Save (gundi:share_preview): Pull Events' filters
+    as pull_events applies them, or Share Events' selection as sync_events
+    shares it. Failures propagate, so the portal can say why the preview is missing."""
+    if not action_config.from_pull_form:
+        from app.ersharing.preview import preview_events as preview_shared_events
+        async with await _source_site(integration) as site:
+            return await preview_shared_events(site, action_config.event_types, action_config.area_feature_groups)
+    async with _translating_er_client(integration) as earth_ranger:
+        return await preview_events(
+            earth_ranger, er_site_root(integration.base_url),
+            action_config.event_types, action_config.event_categories,
+        )
+
+
+@action_title("Preview Subjects")
+async def action_preview_subjects_share(integration: Integration, action_config: PreviewSubjectsShareQuery):
+    """What the subjects form would send with its unsaved values: Pull
+    Observations' subject groups (a subject without a device sends nothing), or
+    Share Subjects' selection as sync_observations shares it."""
+    if not action_config.from_pull_form:
+        from app.ersharing.preview import preview_subjects as preview_shared_subjects
+        async with await _source_site(integration) as site:
+            return await preview_shared_subjects(site, action_config.subject_groups,
+                                                 action_config.area_feature_groups)
+    async with _translating_er_client(integration) as earth_ranger:
+        return await preview_subjects(
+            earth_ranger, er_site_root(integration.base_url), action_config.subject_group_ids,
+            # The pull's own device lookup: a subject without a device sends nothing.
+            source_assignments=functools.partial(_preview_source_assignments, earth_ranger),
+        )
+
+
+# subjectsources chunks the share preview reads at once, so a large group
+# answers within the portal's preview timeout.
+PREVIEW_ASSIGNMENT_CONCURRENCY = 8
+
+
+async def _preview_source_assignments(er_client, subject_ids):
+    """The pull's device lookup, a few chunks at a time, and whether it read
+    every assignment."""
+    report = {}
+    found = await _fetch_source_assignments(
+        er_client, subject_ids, concurrency=PREVIEW_ASSIGNMENT_CONCURRENCY, report=report)
+    return found, not report.get("incomplete")
+
+
 async def action_list_subject_types(integration: Integration, action_config: ListSubjectTypesQuery):
     """Reference action: subject subtypes observed on this ER site.
 
@@ -2113,3 +2305,60 @@ async def _forward_event_files(er_client, er_event, gundi_object_id, integration
         forwarded += 1
     return forwarded, seen
 
+
+
+# --- Share Events / Share Subjects (EarthRanger to EarthRanger) ---------------
+# The work lives in app/ersharing. app/actions/__init__.py imports this module
+# at import time, so app.ersharing is imported inside each handler; a top-level
+# import would be circular. Share reads this integration's own `auth` config.
+
+
+@action_title("ER2ER Event Sharing")
+@crontab_schedule("*/5 * * * *")
+@activity_logger()
+async def action_sync_events(integration: Integration, action_config: SyncEventsConfig):
+    from app.ersharing.sync_events import run_sync_events
+    return await run_sync_events(integration, action_config)
+
+
+@action_title("ER2ER Observation Sharing")
+@crontab_schedule("*/5 * * * *")
+@activity_logger()
+async def action_sync_observations(integration: Integration, action_config: SyncObservationsConfig):
+    from app.ersharing.sync_observations import run_sync_observations
+    return await run_sync_observations(integration, action_config)
+
+
+async def _source_site(integration):
+    from app.ersharing import clients
+    auth = clients.auth_config_of(integration.configurations)
+    return clients.open_site(clients.source_url_of(integration, auth), auth, role="source")
+
+
+async def action_list_share_event_types(integration: Integration, action_config: ListShareEventTypesQuery):
+    """Reference action for Share Events: the site's active event types, v2 and v1.
+
+    list_event_types offers v2 types only (it feeds the event type field
+    picker); Share copies v1 types too, so they belong in its picker. A v2 type
+    wins on the same value."""
+    async with await _source_site(integration) as site:
+        event_types = await site.list_event_types_v2()
+        known = {t["value"] for t in event_types}
+        event_types += [t for t in await site.list_event_types_v1()
+                        if t.get("is_active", True) and t.get("value") not in known]
+
+    def group(event_type):
+        category = event_type.get("category")
+        return category.get("display") if isinstance(category, dict) else category
+
+    options = [ReferenceOption(value=t["value"], label=t.get("display") or t["value"], group=group(t))
+               for t in event_types]
+    return ReferenceDataResponse(options=sorted(options, key=lambda o: (o.label or "").lower())).dict()
+
+
+async def action_list_feature_groups(integration: Integration, action_config: ListFeatureGroupsQuery):
+    """Reference action: the site's spatial feature groups, for the Share area filters."""
+    async with await _source_site(integration) as site:
+        feature_groups = await site.list_feature_groups()
+    options = [ReferenceOption(value=str(f["id"]), label=f.get("name")) for f in feature_groups]
+    return ReferenceDataResponse(options=sorted(options, key=lambda o: (o.label or "").lower())).dict()
