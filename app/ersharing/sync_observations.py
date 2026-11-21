@@ -23,7 +23,7 @@ from .observations import (
     add_lineage, advance, build_payload, has_valid_location, in_assignment, is_new, note_read, parse_assignments,
     passed_through, point_batches, read_start, OVERLAP, SHORT_OVERLAP,
 )
-from .reporting import DestinationReport, is_stalled, log_skipped_destinations, names, publish_report, say
+from .reporting import DestinationReport, is_stalled, log_overlap, log_skipped_destinations, names, publish_report, say
 from .state import OBSERVATIONS_ACTION, Marker, ShareState
 from .timeutil import parse_dt, utcnow
 
@@ -130,6 +130,7 @@ async def run_sync_observations(integration, config) -> dict:
     integration_id = str(integration.id)
     state = ShareState(integration_id)
     if not await state.try_lease(OBSERVATIONS_ACTION, settings.MAX_ACTION_EXECUTION_TIME + LEASE_MARGIN_SECONDS):
+        await log_overlap(integration_id, OBSERVATIONS_ACTION, "ER2ER Observation Sharing")
         return {"status": "skipped", "reason": "Another sync_observations run is still in progress."}
     try:
         result, needs_more_time = await _run(integration, config, state)
@@ -160,6 +161,7 @@ async def _run(integration, config, state: ShareState):
 
     reports = {d.id: DestinationReport(destination=d.name, kind="Tracks") for d in destinations}
     gundi_sources = None
+    dest_group = share.destination_subject_group or ""
     provider_keys = {d.id: d.provider_key for d in destinations if d.provider_key}
     freshest: Dict[str, Marker] = {}  # per destination, the subject marker that moved most recently
     try:
@@ -223,12 +225,13 @@ async def _run(integration, config, state: ShareState):
         for d in destinations:
             report = reports[d.id]
             try:
-                await publish_report(integration_id, OBSERVATIONS_ACTION, report)
+                _fold_subjects(report, dest_group)
+                await publish_report(integration_id, OBSERVATIONS_ACTION, report, state=state, destination_id=d.id)
                 marker = await _progress_marker(state, d.id, freshest.get(d.id), report)
                 if report.errors and is_stalled(marker, utcnow()):
                     await log_action_activity(
                         integration_id=integration_id, action_id=OBSERVATIONS_ACTION, level=LogLevel.WARNING,
-                        title=f"Tracks → {d.name}: no progress since {marker.advanced_at:%Y-%m-%d %H:%M} UTC. "
+                        title=f"{report.heading}: no progress since {marker.advanced_at:%Y-%m-%d %H:%M} UTC. "
                               f"Check the errors above.",
                     )
             except Exception:
@@ -387,6 +390,21 @@ def _note_left_out(report: DestinationReport, label: str, observations: List[dic
             report.detail(key, titles[key], item=label, count=n)
     if not shared and not any(left_out.values()):
         report.detail("no-new-points", NO_NEW_POINTS, item=label)
+
+
+def _fold_subjects(report: DestinationReport, dest_group: str) -> None:
+    """The summary says how many subjects were shared and where. One detail line then
+    names them: the points per subject when those differ, otherwise just the subjects."""
+    subjects = _items(report, "subjects")
+    if not subjects:
+        return
+    where = f" to subject group {dest_group}" if dest_group else ""
+    report.summary_extra = f" from {len(subjects):,} subject{'s' if len(subjects) != 1 else ''}{where}"
+    points = _items(report, "points")
+    if len(set(points.values())) <= 1:
+        report.details.pop("points", None)
+    else:
+        report.details.pop("subjects", None)
 
 
 def _items(report: DestinationReport, key: str) -> Dict[str, int]:

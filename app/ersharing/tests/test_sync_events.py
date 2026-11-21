@@ -66,7 +66,7 @@ async def test_rerun_does_not_rewrite_unchanged_events():
     await sync(run, dest)
     calls_before = len(dest.calls)
     report = await sync(run, dest)  # re-reads e1 at the marker boundary (update_date >= marker)
-    assert report.skipped == 1 and report.created == report.updated == 0
+    assert report.skipped == 0 and report.created == report.updated == 0  # already shared as it is
     assert not [c for c in dest.calls[calls_before:] if c[0] in ("post_event", "patch_event")]
 
 
@@ -227,8 +227,8 @@ async def test_incidents_that_were_not_copied_are_left_alone(incidents_window_no
                                                        is_collection=True), config=config)
     report = await sync(run, dest)
     assert "inc" not in dest.events and dest_incidents(dest, "e1") == []
-    assert len(dest.calls_to("add_to_incident")) == 1  # only the event's own attempt, reported as a warning
-    assert report.errors
+    assert len(dest.calls_to("add_to_incident")) == 1  # only the event's own attempt
+    assert report.unlinked  # reported as a warning when the run's report is published
 
 
 @pytest.mark.asyncio

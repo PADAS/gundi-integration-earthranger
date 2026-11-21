@@ -51,10 +51,10 @@ def test_errors_are_grouped_by_title_with_a_few_examples():
 def test_summary_titles():
     report = DestinationReport(destination="Site B", kind="Events", created=2, updated=1, marker=T0)
     assert report.summary_title() == (
-        "Events → Site B: 2 created, 1 updated, 0 deleted, 0 skipped, 0 failed; synced up to 2026-10-01 00:00 UTC"
+        "ER2ER Event Sharing → Site B: 2 created, 1 updated, 0 deleted, 0 skipped, 0 failed; synced up to 2026-10-01 00:00 UTC"
     )
     tracks = DestinationReport(destination="Site B", kind="Tracks", created=40, timed_out=True)
-    assert tracks.summary_title() == "Tracks → Site B: 40 points shared, 0 failed; stopped at the time limit before finishing"
+    assert tracks.summary_title() == "ER2ER Observation Sharing → Site B: 40 points shared, 0 failed; stopped at the time limit before finishing"
 
 
 @pytest.mark.asyncio
@@ -67,7 +67,7 @@ async def test_publish_report_logs_summary_then_one_entry_per_error_group(monkey
     await publish_report("i1", EVENTS_ACTION, report)
     titles = [call.kwargs["title"] for call in log.await_args_list]
     levels = [call.kwargs["level"] for call in log.await_args_list]
-    assert titles[1] == "Error: Events → Site B: Type X couldn't be set up"
+    assert titles[1] == "Error: ER2ER Event Sharing → Site B: Type X couldn't be set up"
     assert levels == [LogLevel.WARNING, LogLevel.ERROR]
     assert log.await_args_list[1].kwargs["data"] == {"error_count": 2, "errors": ["#1", "#2"]}
 
@@ -80,7 +80,7 @@ async def test_publish_report_says_error_only_for_error_groups(monkeypatch):
     report.error("Some events were skipped", item="#1", level=LogLevel.WARNING)
     await publish_report("i1", EVENTS_ACTION, report)
     titles = [call.kwargs["title"] for call in log.await_args_list]
-    assert titles[1] == "Events → Site B: Some events were skipped"
+    assert titles[1] == "ER2ER Event Sharing → Site B: Some events were skipped"
     assert log.await_args_list[1].kwargs["data"] == {"count": 1, "examples": ["#1"]}
     assert not titles[0].startswith("Error: ")
 

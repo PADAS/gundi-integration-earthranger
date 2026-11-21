@@ -51,7 +51,7 @@ def world(monkeypatch):
     monkeypatch.setattr(sync_events, "ShareState", lambda integration_id: ShareState(integration_id, manager=manager))
     monkeypatch.setattr(sync_events, "resolve_destinations",
                         AsyncMock(return_value=([destination(1), destination(2)], [])))
-    monkeypatch.setattr(sync_events, "publish_report", AsyncMock(side_effect=lambda i, a, r: published.append(r)))
+    monkeypatch.setattr(sync_events, "publish_report", AsyncMock(side_effect=lambda i, a, r, **kw: published.append(r)))
     monkeypatch.setattr(sync_events, "log_action_activity", logs)
     monkeypatch.setattr(reporting, "log_action_activity", logs)
     monkeypatch.setattr(sync_events, "trigger_action", AsyncMock())
@@ -241,7 +241,7 @@ async def test_a_source_failure_mid_destination_still_publishes_that_destination
 async def test_a_failing_publish_does_not_hide_the_original_error_or_skip_other_reports(world, monkeypatch):
     published = []
 
-    async def publish(i, a, report):
+    async def publish(i, a, report, **kw):
         if report.destination == "Site 1":
             raise RuntimeError("redis down")
         published.append(report)

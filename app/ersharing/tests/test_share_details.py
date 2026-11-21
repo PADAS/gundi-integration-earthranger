@@ -43,7 +43,7 @@ async def test_details_are_published_as_info_lines_after_the_summary(monkeypatch
     report.detail("deleted", say("Event {name} deleted", "{count} events deleted: {names}"), item="#7")
     await publish_report("i1", EVENTS_ACTION, report)
     detail = log.await_args_list[1].kwargs
-    assert detail["title"] == "Events → Site B: Event #7 deleted"
+    assert detail["title"] == "ER2ER Event Sharing → Site B: Event #7 deleted"
     assert detail["level"] == LogLevel.INFO
     assert detail["data"] == {"count": 1, "items": {"#7": 1}}
     assert report.as_dict()["details"] == {"deleted": {"count": 1, "items": {"#7": 1}}}
@@ -81,7 +81,9 @@ async def test_tracks_run_logs_subjects_points_and_what_it_left_out(tracks_world
     await run_sync_observations(observations_run.INTEGRATION, config)
     lines = titles(tracks_world.published[0])
     assert "First share for subject Lion 1: tracks from 2026-09-30 18:00 UTC (the last 12 hours)" in lines
-    assert "2 points shared: Lion 1 2" in lines
+    assert tracks_world.published[0].summary_title().startswith(
+        "ER2ER Observation Sharing → Site 1: 2 points shared from 1 subject to subject group Sitea, 0 failed")
+    assert not any(t.startswith("2 points shared") for t in lines)  # one subject: the subjects line names it
     assert "Subject Lion 1 from subject group Lions shared to subject group Sitea" in lines
     assert "1 point not shared because it has no valid location: Lion 1" in lines
 
@@ -99,3 +101,40 @@ async def test_subject_with_nothing_new_is_logged_on_the_next_run(tracks_world):
     tracks_world.published.clear()
     await run_sync_observations(observations_run.INTEGRATION, observations_run.CONFIG)
     assert any(t.startswith("2 subjects had no new points to share") for t in titles(tracks_world.published[0]))
+
+
+@pytest.mark.asyncio
+async def test_points_per_subject_are_listed_when_they_differ(tracks_world):
+    await run_sync_observations(observations_run.INTEGRATION, observations_run.CONFIG)
+    lines = titles(tracks_world.published[0])
+    points = [t for t in lines if "points shared:" in t]
+    subjects = [t for t in lines if "subjects from" in t]
+    assert len(points) + len(subjects) == 1
+
+
+def test_a_quiet_run_says_nothing_new():
+    report = DestinationReport(destination="Site B", kind="Events")
+    assert report.is_quiet()
+    assert report.summary_title() == "ER2ER Event Sharing → Site B: nothing new to share"
+
+
+@pytest.mark.asyncio
+async def test_a_quiet_summary_is_logged_at_most_once_a_day(monkeypatch):
+    from app.ersharing.state import ShareState
+    from app.ersharing.tests.fakes import InMemoryStateManager
+    log = AsyncMock()
+    monkeypatch.setattr(reporting, "log_action_activity", log)
+    state = ShareState("i1", manager=InMemoryStateManager())
+    for _ in range(3):
+        await publish_report("i1", EVENTS_ACTION, DestinationReport("Site B", "Events"), state=state,
+                             destination_id="d1")
+    assert log.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_an_overlapping_run_says_why_it_stopped(events_world):
+    from app.ersharing.state import ShareState
+    await ShareState("i1", manager=events_world.manager).try_lease(EVENTS_ACTION, 60)
+    await run_sync_events(events_run.INTEGRATION, events_run.CONFIG)
+    titles_logged = [c.kwargs["title"] for c in events_world.logs.await_args_list]
+    assert titles_logged == ["ER2ER Event Sharing didn't run this time because its previous run was still going."]

@@ -57,7 +57,7 @@ def world(monkeypatch):
     monkeypatch.setattr(sync_observations, "resolve_destinations",
                         AsyncMock(return_value=([destination(1), destination(2)], [])))
     monkeypatch.setattr(sync_observations, "publish_report",
-                        AsyncMock(side_effect=lambda i, a, r: published.append(r)))
+                        AsyncMock(side_effect=lambda i, a, r, **kw: published.append(r)))
     monkeypatch.setattr(sync_observations, "log_action_activity", AsyncMock())
     monkeypatch.setattr(reporting, "log_action_activity", AsyncMock())
     monkeypatch.setattr(sync_observations, "trigger_action", AsyncMock())
@@ -200,7 +200,7 @@ async def test_stall_warning_when_errors_persist(world, monkeypatch):
     monkeypatch.setattr(sync_observations, "is_stalled", lambda marker, now: marker is not None)
     await run_sync_observations(INTEGRATION, CONFIG)
     titles = [c.kwargs["title"] for c in sync_observations.log_action_activity.await_args_list]
-    assert "Tracks → Site 1: no progress since 2026-10-01 06:00 UTC. Check the errors above." in titles
+    assert "ER2ER Observation Sharing → Site 1: no progress since 2026-10-01 06:00 UTC. Check the errors above." in titles
 
 
 @pytest.mark.asyncio
@@ -261,8 +261,8 @@ async def test_stall_warning_for_a_destination_that_never_took_a_point(world, mo
     later = NOW + timedelta(hours=7)
     monkeypatch.setattr(sync_observations, "utcnow", lambda: later)
     await run_sync_observations(INTEGRATION, CONFIG)
-    assert "Tracks → Site 1: no progress since 2026-10-01 06:00 UTC. Check the errors above." in titles()
-    assert not any(t.startswith("Tracks → Site 2: no progress") for t in titles())
+    assert "ER2ER Observation Sharing → Site 1: no progress since 2026-10-01 06:00 UTC. Check the errors above." in titles()
+    assert not any(t.startswith("ER2ER Observation Sharing → Site 2: no progress") for t in titles())
     del world.sites["https://site1.pamdas.org"].failures["post_sharing_status"]
     await run_sync_observations(INTEGRATION, CONFIG)
     state = ShareState("i1", manager=world.manager)
@@ -352,7 +352,7 @@ async def test_points_rejected_before_the_destination_goes_down_are_still_report
 async def test_a_failing_publish_for_one_destination_does_not_skip_the_others(world, monkeypatch):
     published = []
 
-    async def publish(i, a, report):
+    async def publish(i, a, report, **kw):
         if report.destination == "Site 1":
             raise RuntimeError("redis down")
         published.append(report)

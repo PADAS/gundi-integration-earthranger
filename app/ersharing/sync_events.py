@@ -21,8 +21,11 @@ from .events import (
 )
 from .geo import Area, load_area
 from .modes import EventSettings, event_settings
-from .notes_files import EPOCH, adopt_record, adopt_unrecorded, apply_files, apply_incidents, apply_notes, plan_files, plan_notes
-from .reporting import DestinationReport, is_stalled, log_skipped_destinations, publish_report, say
+from .notes_files import (
+    EPOCH, adopt_record, adopt_unrecorded, apply_files, apply_incidents, apply_notes, plan_files, plan_notes,
+    report_missing_links,
+)
+from .reporting import DestinationReport, is_stalled, log_overlap, log_skipped_destinations, publish_report, say
 from .state import EVENTS_ACTION, EventRecord, Marker, ShareState
 from .timeutil import parse_dt, utcnow
 
@@ -384,8 +387,7 @@ async def _copy_event(run, destination, dest, types, event, report):
         return
     record = await run.state.get_event_record(destination.id, event["id"])
     if not is_newer(event, record):
-        report.skipped += 1
-        return
+        return  # already shared as it is (read again at the edge of the bookmark)
     dest_type = await types.ensure(event["event_type"])
     if dest_type is None:
         updated = parse_dt(event["updated_at"])
@@ -578,6 +580,7 @@ async def run_sync_events(integration, config) -> dict:
     integration_id = str(integration.id)
     state = ShareState(integration_id)
     if not await state.try_lease(EVENTS_ACTION, settings.MAX_ACTION_EXECUTION_TIME + LEASE_MARGIN_SECONDS):
+        await log_overlap(integration_id, EVENTS_ACTION, "ER2ER Event Sharing")
         return {"status": "skipped", "reason": "Another sync_events run is still in progress."}
     try:
         result, needs_more_time = await _run(integration, config, state)
@@ -647,11 +650,12 @@ async def _on_destination(destination: Destination, report: DestinationReport, s
 
 
 async def _publish(integration_id: str, state: ShareState, destination: Destination, report: DestinationReport):
-    await publish_report(integration_id, EVENTS_ACTION, report)
+    report_missing_links(report)
+    await publish_report(integration_id, EVENTS_ACTION, report, state=state, destination_id=destination.id)
     marker = await state.get_marker(EVENTS_ACTION, marker_key(destination.id))
     if report.errors and is_stalled(marker, utcnow()):
         await log_action_activity(
             integration_id=integration_id, action_id=EVENTS_ACTION, level=LogLevel.WARNING,
-            title=f"Events → {destination.name}: no progress since "
+            title=f"{report.heading}: no progress since "
                   f"{marker.advanced_at:%Y-%m-%d %H:%M} UTC. Check the errors above.",
         )

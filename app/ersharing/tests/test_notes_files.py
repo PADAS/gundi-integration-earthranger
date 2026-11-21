@@ -4,7 +4,7 @@ import pytest
 from gundi_core.events import LogLevel
 
 from app.ersharing.notes_files import (
-    MAX_FILE_BYTES, TOO_BIG, adopt_record, apply_files, apply_incidents, apply_notes, note_digest, plan_files, plan_notes,
+    MAX_FILE_BYTES, TOO_BIG, adopt_record, apply_files, apply_incidents, report_missing_links, apply_notes, note_digest, plan_files, plan_notes,
 )
 from app.ersharing.reporting import DestinationReport
 from app.ersharing.state import EventRecord, NoteRecord
@@ -146,6 +146,8 @@ async def test_apply_incidents_links_unlinks_and_warns_on_unshared_incident():
     record, report = EventRecord(dest_event_id="e1", updated_at=T0), DestinationReport("Site B", "Events")
     await apply_incidents(dest, "e1", ["inc1", "missing"], record, report)
     assert record.incidents == ["inc1"]
+    assert not report.errors and report.unlinked == {("e1", "missing"): "e1"}  # it may still be copied later
+    report_missing_links(report)
     assert report.errors and list(report.errors.values())[0].level == LogLevel.WARNING
     await apply_incidents(dest, "e1", [], record, report)
     assert record.incidents == [] and dest.events["e1"]["is_contained_in"] == []
