@@ -226,6 +226,7 @@ async def _run(integration, config, state: ShareState):
             report = reports[d.id]
             try:
                 _fold_subjects(report, dest_group)
+                await _drop_known_subjects(state, d.id, report)
                 await publish_report(integration_id, OBSERVATIONS_ACTION, report, state=state, destination_id=d.id)
                 marker = await _progress_marker(state, d.id, freshest.get(d.id), report)
                 if report.errors and is_stalled(marker, utcnow()):
@@ -405,6 +406,19 @@ def _fold_subjects(report: DestinationReport, dest_group: str) -> None:
         report.details.pop("points", None)
     else:
         report.details.pop("subjects", None)
+
+
+async def _drop_known_subjects(state: ShareState, destination_id: str, report: DestinationReport) -> None:
+    """The line naming the shared subjects appears only when a subject joins the list,
+    not on every run that shares the same subjects again."""
+    subjects = _items(report, "subjects")
+    if not subjects:
+        return
+    logged = set(await state.get_logged_subjects(destination_id))
+    if set(subjects) <= logged:
+        report.details.pop("subjects", None)
+        return
+    await state.set_logged_subjects(destination_id, list(logged | set(subjects)))
 
 
 def _items(report: DestinationReport, key: str) -> Dict[str, int]:

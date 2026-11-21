@@ -147,6 +147,16 @@ class ShareState:
         else:
             await self._manager.delete_state(self.integration_id, EVENTS_ACTION, source_id=key)
 
+    async def get_logged_subjects(self, destination_id: str) -> List[str]:
+        """Subjects the activity log has already named as shared to this destination."""
+        data = await self._manager.get_state(self.integration_id, OBSERVATIONS_ACTION,
+                                             source_id=f"{destination_id}:logged-subjects")
+        return list((data or {}).get("names") or [])
+
+    async def set_logged_subjects(self, destination_id: str, names: List[str]):
+        await self._manager.set_state(self.integration_id, OBSERVATIONS_ACTION, {"names": sorted(names)},
+                                      source_id=f"{destination_id}:logged-subjects")
+
     async def get_rejected_events(self, destination_id: str) -> Dict[str, datetime]:
         """Source events the destination turned down or kept failing on, each with when that
         first happened, so they are tried again later."""

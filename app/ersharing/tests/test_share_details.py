@@ -138,3 +138,26 @@ async def test_an_overlapping_run_says_why_it_stopped(events_world):
     await run_sync_events(events_run.INTEGRATION, events_run.CONFIG)
     titles_logged = [c.kwargs["title"] for c in events_world.logs.await_args_list]
     assert titles_logged == ["ER2ER Event Sharing didn't run this time because its previous run was still going."]
+
+
+
+@pytest.mark.asyncio
+async def test_subjects_line_appears_only_when_a_subject_joins():
+    from app.ersharing.state import ShareState
+    from app.ersharing.sync_observations import _drop_known_subjects
+    from app.ersharing.tests.fakes import InMemoryStateManager
+    state = ShareState("i1", manager=InMemoryStateManager())
+    title = say("Subject {name} shared", "{count} subjects shared: {names}")
+
+    async def subjects_line(*subjects):
+        report = DestinationReport(destination="Site 1", kind="Tracks")
+        for name in subjects:
+            report.detail("subjects", title, item=name)
+        await _drop_known_subjects(state, "d1", report)
+        return "subjects" in report.details
+
+    assert await subjects_line("Lion 1", "Zebra 1")
+    assert not await subjects_line("Lion 1", "Zebra 1")
+    assert not await subjects_line("Lion 1")
+    assert await subjects_line("Lion 1", "Rhino 1")
+    assert not await subjects_line("Zebra 1", "Rhino 1")
