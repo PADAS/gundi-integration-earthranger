@@ -22,7 +22,7 @@ from .events import (
 from .geo import Area, load_area
 from .modes import EventSettings, event_settings
 from .notes_files import EPOCH, adopt_record, adopt_unrecorded, apply_files, apply_incidents, apply_notes, plan_files, plan_notes
-from .reporting import DestinationReport, is_stalled, log_skipped_destinations, publish_report
+from .reporting import DestinationReport, is_stalled, log_skipped_destinations, publish_report, say
 from .state import EVENTS_ACTION, EventRecord, Marker, ShareState
 from .timeutil import parse_dt, utcnow
 
@@ -64,6 +64,8 @@ async def sync_destination(run: EventsRun, destination: Destination, dest, repor
     now = utcnow()
     marker = await run.state.get_marker(EVENTS_ACTION, marker_key(destination.id))
     since = marker.since if marker else (run.settings.start_from or now - BACKFILL)
+    if marker is None:
+        report.detail("first-run", first_run(since, default=run.settings.start_from is None))
     types = EventTypeSync(run.source, dest, run.settings)
     types.waiting = await run.state.get_waiting_types(destination.id)
     waiting_before = dict(types.waiting)
@@ -84,6 +86,7 @@ async def sync_destination(run: EventsRun, destination: Destination, dest, repor
         await finish_pending_copies(run, destination, dest, types, report, pending_before)
         await retry_rejected_events(run, destination, dest, types, report, rejected_before)
     finally:
+        note_type_changes(types, report)
         # The lists of events to revisit are saved before the bookmark moves past them, so a
         # failed write can't leave the bookmark ahead of what they record.
         if types.waiting != waiting_before:
@@ -134,7 +137,10 @@ async def catch_up_waiting_types(run: EventsRun, destination: Destination, dest,
                             types.waiting[value] = max(types.waiting[value], last_handled)
                 return
             if event.get("event_type") in ready:
+                written = report.created + report.updated
                 await _sync_event(run, destination, dest, types, event, report)
+                if report.created + report.updated > written:
+                    report.detail("caught-up", CAUGHT_UP, item=_type_name(types, event["event_type"]))
             if event.get("updated_at"):
                 last_handled = parse_dt(event["updated_at"])
     for value in ready:
@@ -236,6 +242,63 @@ async def sync_incident_links(run: EventsRun, destination: Destination, dest, re
     await run.state.delete_marker(EVENTS_ACTION, key)
 
 
+# Detail lines: what a run did at a destination, or left out and why (INFO).
+CATEGORY_CREATED = say("Event category {name} created", "{count} event categories created: {names}")
+CATEGORY_RENAMED = say("Event category {name} renamed to match the source",
+                       "{count} event categories renamed to match the source: {names}")
+TYPE_UPDATED = say("Event type {name}'s form updated to match the source",
+                   "{count} event types' forms updated to match the source: {names}")
+TYPE_GIVEN_FIELDS = say("Event type {name} got the fields that record where shared events come from",
+                        "{count} event types got the fields that record where shared events come from: {names}")
+EVENTS_SHARED = say("1 event shared: {name}", "{count} events shared: {names}", with_counts=True)
+CAUGHT_UP = say("1 event that waited for its event type was shared: {name}",
+                "{count} events that waited for their event type were shared: {names}", with_counts=True)
+EVENTS_DELETED = say("Event {name} deleted because it was deleted at the source",
+                     "{count} events deleted because they were deleted at the source: {names}")
+SKIPPED_TYPE = say("1 event not shared because its event type isn't one of the shared event types: {name}",
+                   "{count} events not shared because their event type isn't one of the shared event types: {names}",
+                   with_counts=True)
+SKIPPED_AREA = say("Event {name} not shared because it's outside the area filter",
+                   "{count} events not shared because they're outside the area filter: {names}")
+SKIPPED_ECHO = say("Event {name} not shared because it was copied from this destination",
+                   "{count} events not shared because they were copied from this destination: {names}")
+SKIPPED_DEST_NEWER = say("Event {name} not updated because it was edited at the destination after the source change",
+                         "{count} events not updated because they were edited at the destination after the "
+                         "source change: {names}")
+
+
+def types_created(category: str):
+    return say(f"Event type {{name}} created in {_braces(category)}",
+               f"{{count}} event types created in {_braces(category)}: {{names}}")
+
+
+def _braces(text: str) -> str:
+    return text.replace("{", "{{").replace("}", "}}")
+
+
+def first_run(since: datetime, default: bool):
+    window = f" (the last {BACKFILL.days} days)" if default else ""
+    text = f"First run: sharing events updated since {since:%Y-%m-%d %H:%M} UTC{window}"
+    return lambda count, items: text
+
+
+def note_type_changes(types: "EventTypeSync", report: DestinationReport) -> None:
+    for name in types.categories_created:
+        report.detail("category-created", CATEGORY_CREATED, item=name)
+    for name in types.categories_renamed:
+        report.detail("category-renamed", CATEGORY_RENAMED, item=name)
+    for category, name in types.types_created:
+        report.detail(f"types-created:{category}", types_created(category), item=name)
+    for name in types.types_updated:
+        report.detail("type-updated", TYPE_UPDATED, item=name)
+    for name in types.types_given_fields:
+        report.detail("type-given-fields", TYPE_GIVEN_FIELDS, item=name)
+    # Setup reads first: the run's start, then categories and types, then the events.
+    setup = ("first-run", "category-", "types-created:", "type-")
+    rank = lambda key: next((i for i, p in enumerate(setup) if key.startswith(p)), len(setup))
+    report.details = dict(sorted(report.details.items(), key=lambda kv: rank(kv[0])))
+
+
 FOREIGN_COPY = "Some events weren't copied because the destination already has them from another site."
 REJECTED = "Some events weren't copied because the destination turned them down."
 UNEXPECTED = "Some events weren't copied because something in them couldn't be read."
@@ -299,11 +362,25 @@ async def _set_aside_after_repeated_halts(run, destination, event_id: str, error
     return False
 
 
+def _type_name(types: EventTypeSync, source_value: str) -> str:
+    return (types.ensured(source_value) or {}).get("display") or source_value
+
+
+def _note_left_out(run, event, dest_url: str, report: DestinationReport) -> None:
+    if run.settings.event_types and event.get("event_type") not in run.settings.event_types:
+        report.detail("skipped-type", SKIPPED_TYPE, item=str(event.get("event_type")))
+    elif is_echo(event, dest_url):
+        report.detail("skipped-echo", SKIPPED_ECHO, item=event_label(event))
+    else:
+        report.detail("skipped-area", SKIPPED_AREA, item=event_label(event))
+
+
 async def _copy_event(run, destination, dest, types, event, report):
     if not wanted(event, run.settings, run.area) or is_echo(event, dest.url):
         # An unfinished copy of an event that is no longer shared isn't read again every run.
         run.pending.get(destination.id, set()).discard(str(event["id"]))
         report.skipped += 1
+        _note_left_out(run, event, dest.url, report)
         return
     record = await run.state.get_event_record(destination.id, event["id"])
     if not is_newer(event, record):
@@ -319,9 +396,11 @@ async def _copy_event(run, destination, dest, types, event, report):
         report.error(TYPE_NOT_READY, item=f"{event_label(event)}, event type {types.failures[event['event_type']]}")
         return
     copy = clean_event(event, run.settings, dest_type, run.source.service_root)
-    record = await _write_event(run, dest, event, copy, record, report)
+    record = await _write_event(run, dest, event, copy, record, report,
+                                type_name=dest_type.get("display") or event["event_type"])
     if record is DEST_IS_NEWER:
         report.skipped += 1
+        report.detail("skipped-dest-newer", SKIPPED_DEST_NEWER, item=event_label(event))
         return
     if record is None:
         report.skipped += 1
@@ -332,7 +411,8 @@ async def _copy_event(run, destination, dest, types, event, report):
         await apply_notes(dest, record.dest_event_id, plan_notes(event.get("notes"), record.notes), record)
         await apply_files(run.source, dest, record.dest_event_id, plan_files(event.get("files"), record.files),
                           record, report)
-        await apply_incidents(dest, record.dest_event_id, incident_ids(event), record, report)
+        await apply_incidents(dest, record.dest_event_id, incident_ids(event), record, report,
+                              label=event_label(event))
         complete = True
     finally:
         # Saved on failure too so copied notes aren't re-posted; the old updated_at keeps the event due.
@@ -348,7 +428,7 @@ async def _copy_event(run, destination, dest, types, event, report):
 
 
 async def _write_event(run: EventsRun, dest, event: dict, copy: dict, record: Optional[EventRecord],
-                       report: DestinationReport):
+                       report: DestinationReport, type_name: Optional[str] = None):
     """Create or update the copy. None when the destination's event came from another
     site; DEST_IS_NEWER when the copy changed after this source change."""
     # An unfinished copy is read with its notes and files: one posted just before a timeout
@@ -359,6 +439,7 @@ async def _write_event(run: EventsRun, dest, event: dict, copy: dict, record: Op
         # Never copied, or deleted at the destination: create it.
         created = await dest.post_event(copy)
         report.created += 1
+        report.detail("shared", EVENTS_SHARED, item=type_name or str(event.get("event_type")))
         return EventRecord(dest_event_id=str(created["id"]), updated_at=EPOCH, written_at=parse_dt(event["updated_at"]),
                            dest_written_at=_updated_at(created))
     if record is None and not is_copy_of(existing, event["id"], run.source.url, run.settings.source.value):
@@ -378,6 +459,7 @@ async def _write_event(run: EventsRun, dest, event: dict, copy: dict, record: Op
     changes.setdefault("title", "")
     patched = await dest.patch_event(existing["id"], changes)
     report.updated += 1
+    report.detail("shared", EVENTS_SHARED, item=type_name or str(event.get("event_type")))
     record = record or adopt_record(event, existing)
     record.written_at = parse_dt(event["updated_at"])
     record.dest_written_at = _updated_at(patched)
@@ -477,6 +559,8 @@ async def _reconcile_copy(run: EventsRun, destination: Destination, dest, copy: 
             return
     await run.state.delete_event_record(destination.id, src_id)
     report.deleted += 1
+    serial = copy.get("serial_number")
+    report.detail("deleted", EVENTS_DELETED, item=f"#{serial}" if serial is not None else str(copy["id"]))
 
 
 async def _maybe_reconcile(run: EventsRun, destination: Destination, dest, report: DestinationReport):

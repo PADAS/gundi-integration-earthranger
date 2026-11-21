@@ -3,14 +3,14 @@ import hashlib
 from contextlib import AsyncExitStack
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 
 from gundi_core.events import LogLevel
 
 from app.services.errors import IntegrationError
 from .clients import halts_site, refused_by_destination
 from .events import incident_ids
-from .reporting import DestinationReport
+from .reporting import DestinationReport, say
 from .state import EventRecord, NoteRecord
 from .timeutil import parse_dt
 
@@ -165,12 +165,18 @@ async def apply_files(source, dest, dest_event_id: str, plan: FilesPlan, record:
         record.files.pop(src_id, None)
 
 
+INCIDENT_LINKED = say("Event {name} linked to its incident", "{count} events linked to their incidents: {names}")
+INCIDENT_UNLINKED = say("Event {name} unlinked from an incident it left at the source",
+                        "{count} events unlinked from incidents they left at the source: {names}")
+
+
 async def apply_incidents(dest, dest_event_id: str, wanted_ids: List[str], record: EventRecord,
-                          report: DestinationReport):
+                          report: DestinationReport, label: Optional[str] = None):
     for incident_id in [i for i in wanted_ids if i not in record.incidents]:
         try:
             await dest.add_to_incident(dest_event_id, incident_id)
             record.incidents.append(incident_id)
+            report.detail("incident-linked", INCIDENT_LINKED, item=label or dest_event_id)
         except IntegrationError as e:
             if halts_site(e) and not refused_by_destination(e):
                 raise
@@ -190,4 +196,6 @@ async def apply_incidents(dest, dest_event_id: str, wanted_ids: List[str], recor
                 report.error("Couldn't unlink a copied event from an incident", item=incident_id,
                              level=LogLevel.WARNING)
                 continue
+        else:
+            report.detail("incident-unlinked", INCIDENT_UNLINKED, item=label or dest_event_id)
         record.incidents.remove(incident_id)

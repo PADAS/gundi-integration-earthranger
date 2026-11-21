@@ -47,6 +47,8 @@ class GundiSources:
         self.state = state
         self._stack = stack
         self._client = client
+        # Devices added to Gundi's sources in this run: "<subject> (<external id>)" -> 1.
+        self.added: Dict[str, int] = {}
 
     async def _gundi(self):
         if self._client is None:
@@ -90,5 +92,7 @@ class GundiSources:
                 continue
             try:
                 await self.state.set_value(OBSERVATIONS_ACTION, registered_key(device_id), payload["external_id"])
+                if response.status_code != 409:  # 409: Gundi already listed it
+                    self.added[f"{label} ({payload['external_id']})"] = 1
             except RedisError as e:
                 logger.warning("Couldn't record that device %s is in Gundi's sources: %s", device_id, e)

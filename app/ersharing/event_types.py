@@ -3,7 +3,7 @@ import copy
 import json
 import logging
 from datetime import datetime
-from typing import Dict, Optional, Set
+from typing import Dict, List, Optional, Set, Tuple
 
 from app.services.errors import IntegrationConfigurationError, IntegrationError
 from .clients import halts_site
@@ -153,6 +153,17 @@ class EventTypeSync:
         self._categories_done: Set[str] = set()
         # Source type -> oldest skipped event's updated_at, while the type can't be set up.
         self.waiting: Dict[str, datetime] = {}
+        # What this run changed at the destination, for the activity log (display names).
+        self.categories_created: List[str] = []
+        self.categories_renamed: List[str] = []
+        self.types_created: List[Tuple[str, str]] = []  # (category, event type)
+        self.types_updated: List[str] = []
+        self.types_given_fields: List[str] = []
+        self._category_display: Dict[str, str] = {}
+
+    def ensured(self, source_value: str) -> Optional[dict]:
+        """The destination type already set up for this source type in this run."""
+        return self._ready.get(source_value)
 
     async def ensure(self, source_value: str) -> Optional[dict]:
         if source_value in self._ready:
@@ -191,11 +202,13 @@ class EventTypeSync:
                     "and updating destination event types is turned off"
                 )
             return existing
-        await self._ensure_category(category_value(src))
+        category = await self._ensure_category(category_value(src))
         if existing is None:
             await self._dest.post_event_type_v2(wanted)
+            self.types_created.append((category, wanted["display"]))
         elif not same_event_type(wanted, existing):
             await self._dest.patch_event_type_v2(wanted)
+            self.types_updated.append(wanted["display"])
         return wanted
 
     async def _ensure_for_v1_source(self, source_value: str) -> dict:
@@ -214,6 +227,7 @@ class EventTypeSync:
                 )
             schema = add_provenance_fields_to_v2_schema(copy.deepcopy(_as_schema(existing.get("schema")) or {}))
             await self._dest.patch_event_type_v2({"value": dest_value, "schema": json.dumps(schema, indent=4)})
+            self.types_given_fields.append(existing.get("display") or dest_value)
             return {**existing, "schema": schema}
         v1_type = await self._dest_v1_type(dest_value)
         if v1_type is not None:
@@ -249,14 +263,16 @@ class EventTypeSync:
             detail = f" (EarthRanger couldn't convert it to v2: {reasons})" if reasons else ""
             raise IntegrationConfigurationError(f"{missing}{detail}, so create it at the destination first")
         wanted = clean_event_type({**src, "schema": converted["v2_schema"]}, self._s)
-        await self._ensure_category(category_value(src))
+        category = await self._ensure_category(category_value(src))
         await self._dest.post_event_type_v2(wanted)
+        self.types_created.append((category, wanted["display"]))
         return wanted
 
-    async def _ensure_category(self, src_value: str):
+    async def _ensure_category(self, src_value: str) -> str:
+        """Creates or renames the destination category; returns its display name."""
         dest_value = dest_category_value(src_value, self._s)
         if dest_value in self._categories_done:
-            return
+            return self._category_display.get(dest_value, dest_value)
         if self._source_categories is None:
             self._source_categories = {c["value"]: c for c in await self._source.get_event_categories()}
         if self._dest_categories is None:
@@ -267,6 +283,10 @@ class EventTypeSync:
         existing = self._dest_categories.get(dest_value)
         if existing is None:
             await self._dest.post_event_category(wanted)
+            self.categories_created.append(wanted["display"])
         elif existing.get("display") != wanted["display"]:
             await self._dest.patch_event_category({**existing, **wanted})
+            self.categories_renamed.append(wanted["display"])
         self._categories_done.add(dest_value)
+        self._category_display[dest_value] = wanted["display"]
+        return wanted["display"]

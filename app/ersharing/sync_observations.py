@@ -23,7 +23,7 @@ from .observations import (
     add_lineage, advance, build_payload, has_valid_location, in_assignment, is_new, note_read, parse_assignments,
     passed_through, point_batches, read_start, OVERLAP, SHORT_OVERLAP,
 )
-from .reporting import DestinationReport, is_stalled, log_skipped_destinations, publish_report
+from .reporting import DestinationReport, is_stalled, log_skipped_destinations, names, publish_report, say
 from .state import OBSERVATIONS_ACTION, Marker, ShareState
 from .timeutil import parse_dt, utcnow
 
@@ -42,6 +42,46 @@ REJECTED = "Some track points weren't shared because the destination turned them
 NOT_ACCEPTED = "Some track points weren't shared because the destination couldn't take them."
 ALL_REJECTED = "Some track points weren't shared because the destination turned down every point in the batch."
 DETAILS_NOT_UPDATED = "Some subjects' details weren't updated because the destination didn't accept the change."
+# Detail lines: what a run shared with a destination, or left out and why (INFO).
+POINTS_SHARED = say("{name} points shared", "{count} points shared: {names}", with_counts=True)
+NO_DEVICE = say("Subject {name} not shared because it has no device assigned",
+                "{count} subjects not shared because they have no device assigned: {names}")
+NO_NEW_POINTS = say("Subject {name} had no new points to share", "{count} subjects had no new points to share: {names}")
+NO_LOCATION = say("1 point not shared because it has no valid location: {name}",
+                  "{count} points not shared because they have no valid location: {names}", with_counts=True)
+OUTSIDE_ASSIGNMENT = say("1 point not shared because it was recorded outside its device's assignment to the subject: {name}",
+                         "{count} points not shared because they were recorded outside their device's assignment "
+                         "to the subject: {names}", with_counts=True)
+OUTSIDE_AREA = say("1 point not shared because it's outside the area filter: {name}",
+                   "{count} points not shared because they're outside the area filter: {names}", with_counts=True)
+CAME_FROM_DEST = say("1 point not shared because it came from this destination: {name}",
+                     "{count} points not shared because they came from this destination: {names}", with_counts=True)
+DETAILS_UPDATED = say("Details for subject {name} and its devices updated to match the source",
+                      "Details for {count} subjects and their devices updated to match the source: {names}")
+
+
+def subjects_shared(source_groups: str, dest_group: str):
+    where = f"to subject group {dest_group}" if dest_group else "to the destination"
+    return say(f"Subject {{name}} from {_braces(source_groups)} shared {_braces(where)}",
+               f"{{count}} subjects from {_braces(source_groups)} shared {_braces(where)}: {{names}}")
+
+
+def first_share(window: str):
+    return say(f"First share for subject {{name}}: tracks {_braces(window)}",
+               f"First share for {{count}} subjects: tracks {_braces(window)}: {{names}}")
+
+
+def _braces(text: str) -> str:
+    return text.replace("{", "{{").replace("}", "}}")
+
+
+def gundi_sources_title(added: Dict[str, int]) -> str:
+    count = len(added)
+    if count == 1:
+        return f"Device {next(iter(added))} added to this route's Sources tab"
+    return f"{count} devices added to this route's Sources tab: {names(added, count)}"
+
+
 # How often subject and device details are compared with what was last sent to each destination.
 DETAILS_CHECK_EVERY_SECONDS = 24 * 60 * 60
 # A subject is re-read from 12 hours before its marker once an hour, for points that arrive
@@ -57,11 +97,13 @@ def waiting_key(destination_id: str) -> str:
     return f"{destination_id}:waiting"
 
 
-async def select_subjects(source, group_ids: FrozenSet[str]) -> List[dict]:
+async def select_subjects(source, group_ids: FrozenSet[str], group_names: Optional[List[str]] = None) -> List[dict]:
     subjects: Dict[str, dict] = {}
     for group in await source.list_subject_groups():
         if group_ids and str(group.get("id")) not in group_ids:
             continue
+        if group_names is not None and group_ids:
+            group_names.append(group.get("name") or str(group.get("id")))
         for subject in group.get("subjects") or []:
             subjects.setdefault(str(subject["id"]), subject)
     # A stable order lets a follow-up run resume after the saved cursor.
@@ -117,6 +159,7 @@ async def _run(integration, config, state: ShareState):
         return {"destinations": []}, False
 
     reports = {d.id: DestinationReport(destination=d.name, kind="Tracks") for d in destinations}
+    gundi_sources = None
     provider_keys = {d.id: d.provider_key for d in destinations if d.provider_key}
     freshest: Dict[str, Marker] = {}  # per destination, the subject marker that moved most recently
     try:
@@ -131,7 +174,11 @@ async def _run(integration, config, state: ShareState):
                     reports[d.id].error(e.message)
             area = await load_area(source, share.area_feature_groups, polygons_only=True)
             gundi_sources = GundiSources(integration_id, state, stack)
-            subjects = await select_subjects(source, share.subject_groups)
+            group_names: List[str] = []
+            subjects = await select_subjects(source, share.subject_groups, group_names)
+            source_groups = (f"subject group{'s' if len(group_names) > 1 else ''} {', '.join(group_names)}"
+                             if group_names else "all subject groups")
+            subjects_title = subjects_shared(source_groups, share.destination_subject_group or "")
             assignments, unread = await _load_assignments(source, [str(s["id"]) for s in subjects])
             src_user = share.src_user or (await source.get_me()).get("username", "")
             now = utcnow()
@@ -150,7 +197,7 @@ async def _run(integration, config, state: ShareState):
                     continue
                 finished = time.monotonic() <= deadline and await _share_subject(
                     source, sites, reports, freshest, state, share, area, assignments, subject, prefix, now,
-                    deadline, provider_keys, gundi_sources)
+                    deadline, provider_keys, gundi_sources, subjects_title)
                 if not finished:
                     # Out of time: the next run starts again at this subject; its sent batches
                     # already moved its markers, so nothing is sent twice.
@@ -165,6 +212,13 @@ async def _run(integration, config, state: ShareState):
             else:
                 await state.delete_marker(OBSERVATIONS_ACTION, SUBJECT_CURSOR)
     finally:
+        if gundi_sources is not None and gundi_sources.added:
+            try:
+                await log_action_activity(integration_id=integration_id, action_id=OBSERVATIONS_ACTION,
+                                          title=gundi_sources_title(gundi_sources.added), level=LogLevel.INFO,
+                                          data={"count": len(gundi_sources.added), "items": gundi_sources.added})
+            except Exception:
+                logger.exception("Couldn't log the devices added to Gundi's sources")
         # Published even when a source read stops the run, so points already sent are reported.
         for d in destinations:
             report = reports[d.id]
@@ -200,7 +254,7 @@ async def _progress_marker(state: ShareState, destination_id: str, freshest, rep
 
 async def _share_subject(source, sites, reports, freshest, state, share, area, assignments, subject, prefix, now,
                          deadline: float = float("inf"), provider_keys: Optional[Dict[str, str]] = None,
-                         gundi_sources: Optional[GundiSources] = None) -> bool:
+                         gundi_sources: Optional[GundiSources] = None, subjects_title=None) -> bool:
     """Share one subject's new points with every destination. False when the run ran out
     of time part-way, so the caller resumes at this subject next time."""
     subject_id = str(subject["id"])
@@ -226,6 +280,16 @@ async def _share_subject(source, sites, reports, freshest, state, share, area, a
     )
     to_send = {d_id: [o for o in candidates if is_new(o, markers[d_id], full_reread) and not passed_through(o, site_host(dest.url))]
                for d_id, dest in sites.items()}
+    subject_assignments = assignments.get(subject_id, [])
+    for d_id, dest in sites.items():
+        _note_left_out(reports[d_id], label, observations, markers[d_id], full_reread, subject_assignments, area,
+                       site_host(dest.url))
+        if markers[d_id] is None and to_send[d_id]:
+            first = max(parse_dt(share.start_from), backfill_from) if share.start_from else backfill_from
+            window = f"from {first:%Y-%m-%d %H:%M} UTC"
+            if first == backfill_from:
+                window += f" (the last {int(BACKFILL.total_seconds() // 3600)} hours)"
+            reports[d_id].detail("first-share", first_share(window), item=label)
     details_key = {d_id: f"{d_id}:details-check:{subject_id}" for d_id in sites}
     details_due = {d_id: share.subject_additional and markers[d_id] is not None
                    and await state.is_due(OBSERVATIONS_ACTION, details_key[d_id]) for d_id in sites}
@@ -250,6 +314,7 @@ async def _share_subject(source, sites, reports, freshest, state, share, area, a
                 complete = finished = False
                 break
             payloads = [add_lineage(build_payload(subject, o, share, source_additional), fingerprint) for o in batch]
+            sent_before = reports[d_id].created
             try:
                 # The route's field mapping for this destination wins over the share's own setting.
                 provider_key = (provider_keys or {}).get(d_id) or share.provider_key
@@ -260,6 +325,11 @@ async def _share_subject(source, sites, reports, freshest, state, share, area, a
                 complete = False
             if not complete:
                 break
+            sent = reports[d_id].created - sent_before
+            if sent:
+                reports[d_id].detail("points", POINTS_SHARED, item=label, count=sent)
+                if subjects_title is not None and label not in _items(reports[d_id], "subjects"):
+                    reports[d_id].detail("subjects", subjects_title, item=label)
             shared_devices.update(str(o["source"]) for o in batch if o.get("source"))
             marker = advance(marker, batch, now, keep_created=True)
             await state.set_marker(OBSERVATIONS_ACTION, key, marker)
@@ -288,6 +358,40 @@ async def _share_subject(source, sites, reports, freshest, state, share, area, a
         # Share bypasses Gundi's routing, so Gundi only lists these devices if told.
         await gundi_sources.note_shared(subject, shared_devices, lambda: source.get_subject_sources(subject_id))
     return finished
+
+
+def _note_left_out(report: DestinationReport, label: str, observations: List[dict], marker, full_reread: bool,
+                   subject_assignments, area, dest_host: str) -> None:
+    """Say why this subject's new points (not seen by an earlier run) weren't shared."""
+    if not subject_assignments:
+        report.detail("no-device", NO_DEVICE, item=label)
+        return
+    fresh = [o for o in observations if is_new(o, marker, full_reread)]
+    left_out = {"no-location": 0, "outside-assignment": 0, "outside-area": 0, "came-from-dest": 0}
+    shared = 0
+    for o in fresh:
+        if not has_valid_location(o):
+            left_out["no-location"] += 1
+        elif not in_assignment(o, subject_assignments):
+            left_out["outside-assignment"] += 1
+        elif area is not None and not area.contains_point(o["location"]["longitude"], o["location"]["latitude"]):
+            left_out["outside-area"] += 1
+        elif passed_through(o, dest_host):
+            left_out["came-from-dest"] += 1
+        else:
+            shared += 1
+    titles = {"no-location": NO_LOCATION, "outside-assignment": OUTSIDE_ASSIGNMENT, "outside-area": OUTSIDE_AREA,
+              "came-from-dest": CAME_FROM_DEST}
+    for key, n in left_out.items():
+        if n:
+            report.detail(key, titles[key], item=label, count=n)
+    if not shared and not any(left_out.values()):
+        report.detail("no-new-points", NO_NEW_POINTS, item=label)
+
+
+def _items(report: DestinationReport, key: str) -> Dict[str, int]:
+    group = report.details.get(key)
+    return group.items if group else {}
 
 
 def _source_failed(error: IntegrationError, sites, reports, label: str) -> bool:
@@ -436,6 +540,7 @@ async def _refresh_details(dest, destination_id: str, state, subject: dict, sour
             details = source_additional.get(str(copy.get("manufacturer_id")))
             if details is not None and (copy.get("additional") or {}) != details:
                 await dest.patch_source(str(copy["id"]), {"additional": details})
+        report.detail("details-updated", DETAILS_UPDATED, item=label)
     except IntegrationError as e:
         if e.status_code == 404:
             return False  # not at the destination yet; checked again next run

@@ -2,7 +2,7 @@
 import hashlib
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta
-from typing import Dict, List, Optional
+from typing import Callable, Dict, List, Optional
 
 from gundi_core.events import LogLevel
 
@@ -13,6 +13,34 @@ STALL_AFTER = timedelta(hours=6)
 # How often the same "destination skipped" line is repeated in the activity log.
 SKIP_LOG_EVERY = timedelta(hours=6)
 MAX_EXAMPLES = 5
+# How many names a detail line lists in its title; its data holds up to MAX_DETAIL_ITEMS.
+NAMES_IN_TITLE = 5
+MAX_DETAIL_ITEMS = 100
+
+
+def names(items: Dict[str, int], count: int, with_counts: bool = False) -> str:
+    """'a, b, c and 4 more' (with counts: 'a 3, b 1 and 4 more')."""
+    shown = list(items.items())[:NAMES_IN_TITLE]
+    text = ", ".join(f"{name} {n:,}" if with_counts else name for name, n in shown)
+    rest = (len(items) if with_counts else count) - len(shown)
+    return f"{text} and {rest:,} more" if rest > 0 else text
+
+
+def say(single: str, multi: str, with_counts: bool = False) -> Callable[[int, Dict[str, int]], str]:
+    """A detail line's title: `single` (with {name}) for one item, `multi` (with {count}
+    and {names}) for several."""
+    def title(count: int, items: Dict[str, int]) -> str:
+        if count == 1 and len(items) == 1:
+            return single.format(name=next(iter(items)))
+        return multi.format(count=f"{count:,}", names=names(items, count, with_counts))
+    return title
+
+
+@dataclass
+class DetailGroup:
+    title: Callable[[int, Dict[str, int]], str]
+    count: int = 0
+    items: Dict[str, int] = field(default_factory=dict)  # name -> how many of the count it covers
 
 
 @dataclass
@@ -35,6 +63,15 @@ class DestinationReport:
     marker: Optional[datetime] = None
     timed_out: bool = False
     errors: Dict[str, ErrorGroup] = field(default_factory=dict)
+    # What the run did or left out, one INFO line each, in the order first noted.
+    details: Dict[str, DetailGroup] = field(default_factory=dict)
+
+    def detail(self, key: str, title: Callable[[int, Dict[str, int]], str], item: Optional[str] = None,
+               count: int = 1):
+        group = self.details.setdefault(key, DetailGroup(title=title))
+        group.count += count
+        if item is not None and (item in group.items or len(group.items) < MAX_DETAIL_ITEMS):
+            group.items[item] = group.items.get(item, 0) + count
 
     def error(self, title: str, item: Optional[str] = None, level: LogLevel = LogLevel.ERROR):
         group = self.errors.setdefault(title, ErrorGroup(title=title, level=level))
@@ -56,7 +93,12 @@ class DestinationReport:
         return title
 
     def as_dict(self) -> dict:
-        data = asdict(self)
+        details, self.details = self.details, {}
+        try:
+            data = asdict(self)
+        finally:
+            self.details = details
+        data["details"] = {k: {"count": g.count, "items": g.items} for k, g in details.items()}
         data["marker"] = self.marker.isoformat() if self.marker else None
         data["errors"] = {k: {"count": g.count, "examples": g.examples} for k, g in self.errors.items()}
         return data
@@ -74,6 +116,10 @@ async def publish_report(integration_id: str, action_id: str, report: Destinatio
     level = LogLevel.WARNING if report.failed or report.errors else LogLevel.INFO
     await log_action_activity(integration_id=integration_id, action_id=action_id,
                               title=report.summary_title(), level=level, data=report.as_dict())
+    for group in report.details.values():
+        await log_action_activity(integration_id=integration_id, action_id=action_id,
+                                  title=f"{report.kind} → {report.destination}: {group.title(group.count, group.items)}",
+                                  level=LogLevel.INFO, data={"count": group.count, "items": group.items})
     for group in report.errors.values():
         # The portal shows a line of an error-level log in red only when its text
         # mentions an error, so error groups say so up front.
