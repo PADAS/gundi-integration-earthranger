@@ -77,7 +77,7 @@ class DestinationReport:
     # Added after the counts in the summary (Tracks: which subjects went where).
     summary_extra: str = ""
     # Incident links that failed, by (copy, incident): reported only if still missing at the end.
-    unlinked: Dict[tuple, str] = field(default_factory=dict)
+    unlinked: Dict[tuple, tuple] = field(default_factory=dict)  # -> (event label, reason)
 
     @property
     def heading(self) -> str:
@@ -109,6 +109,8 @@ class DestinationReport:
             return title
         if self.kind == "Tracks":
             counts = f"{self.created:,} points shared{self.summary_extra}, {self.failed} failed"
+            if self.deleted:
+                counts += f", {self.deleted:,} subject{'s' if self.deleted != 1 else ''} removed"
         else:
             counts = (f"{self.created} created, {self.updated} updated, {self.deleted} deleted, "
                       f"{self.skipped} skipped, {self.failed} failed")

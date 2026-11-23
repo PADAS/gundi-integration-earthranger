@@ -25,7 +25,7 @@ from .observations import (
 )
 from .reporting import DestinationReport, is_stalled, log_overlap, log_skipped_destinations, names, publish_report, say
 from .state import OBSERVATIONS_ACTION, Marker, ShareState
-from .subject_cleanup import cleanup_due, mark_cleaned, remove_deleted_subjects
+from .subject_cleanup import SUBJECT_CLEANUP_FAILED, cleanup_due, mark_cleaned, remove_deleted_subjects
 from .timeutil import parse_dt, utcnow
 
 logger = logging.getLogger(__name__)
@@ -230,7 +230,10 @@ async def _run(integration, config, state: ShareState):
             report = reports[d.id]
             try:
                 _fold_subjects(report, dest_group)
-                await _drop_known_subjects(state, d.id, report)
+                try:
+                    await _drop_known_subjects(state, d.id, report)
+                except Exception:
+                    logger.exception("Couldn't check which subjects were already named for %s", d.name)
                 await publish_report(integration_id, OBSERVATIONS_ACTION, report, state=state, destination_id=d.id)
                 marker = await _progress_marker(state, d.id, freshest.get(d.id), report)
                 if report.errors and is_stalled(marker, utcnow()):
@@ -256,11 +259,11 @@ async def _remove_deleted_subjects(state: ShareState, source, sites, reports, de
         try:
             finished = await remove_deleted_subjects(
                 source, dest, dest_group, provider_keys.get(d_id) or default_key, site_stamp, reports[d_id],
-                lambda: time.monotonic() > deadline)
+                lambda: time.monotonic() > deadline, state, d_id)
         except IntegrationError as e:
-            if getattr(e, "site_role", None) == "source":
-                raise
-            reports[d_id].error(e.message)
+            # Tried again tomorrow rather than on every run, so the error is logged once a day.
+            reports[d_id].error(f"{SUBJECT_CLEANUP_FAILED}: {e.message}")
+            await mark_cleaned(state, d_id, now)
             continue
         if finished:
             await mark_cleaned(state, d_id, now)

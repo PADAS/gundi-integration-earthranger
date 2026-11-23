@@ -123,3 +123,78 @@ async def test_source_refusing_to_show_devices_is_a_warning_not_a_removal(world)
     await run_sync_observations(tracks.INTEGRATION, tracks.CONFIG)
     assert dest.deleted_subjects == []
     assert any("weren't checked for removal" in title for title in world.published[0].errors)
+
+
+@pytest.mark.asyncio
+async def test_icon_list_server_error_keeps_the_source_icon():
+    from app.services.errors import IntegrationBadResponseError
+    source, dest = icon_sites(icon_id="custom_icon", dest_icons={"generic_rep"})
+    dest.failures["list_event_type_icons"] = IntegrationBadResponseError("bad gateway", status_code=502)
+    assert await EventTypeSync(source, dest, types_.SETTINGS).ensure("wildlife_sighting") is not None
+    assert dest.calls_to("post_event_type_v2")[0][0]["icon"] == "custom_icon"
+
+
+@pytest.mark.asyncio
+async def test_a_failed_cleanup_is_tried_again_the_next_day_not_every_run(world):
+    from app.services.errors import IntegrationBadResponseError
+    dest = dest_with_group(world)
+    shared_subject(dest, "d-old", "Old", "src-gone")
+    dest.failures["get_subject_sources"] = IntegrationBadResponseError("forbidden", status_code=403)
+    await run_sync_observations(tracks.INTEGRATION, tracks.CONFIG)
+    assert any("didn't finish" in title for title in world.published[0].errors)
+    world.published.clear()
+    await run_sync_observations(tracks.INTEGRATION, tracks.CONFIG)
+    assert not any("didn't finish" in title for title in world.published[0].errors)
+
+
+@pytest.mark.asyncio
+async def test_the_summary_counts_removed_subjects(world):
+    dest = dest_with_group(world)
+    shared_subject(dest, "d-old", "Old", "src-gone")
+    await run_sync_observations(tracks.INTEGRATION, tracks.CONFIG)
+    assert ", 1 subject removed" in world.published[0].summary_title()
+
+
+@pytest.mark.asyncio
+async def test_a_source_error_keeps_the_subject_and_the_run_finishes(world):
+    from app.services.errors import IntegrationBadResponseError
+    dest = dest_with_group(world)
+    shared_subject(dest, "d-old", "Old", "src-gone")
+    world.source.failures["get_source"] = IntegrationBadResponseError("conflict", status_code=409)
+    await run_sync_observations(tracks.INTEGRATION, tracks.CONFIG)
+    assert dest.deleted_subjects == []
+    assert any("couldn't show their devices" in title for title in world.published[0].errors)
+    assert world.published[0].created > 0  # the points were still shared and reported
+
+
+@pytest.mark.asyncio
+async def test_an_unfinished_cleanup_carries_on_after_the_last_subject(world, monkeypatch):
+    from app.ersharing import subject_cleanup
+    dest = dest_with_group(world)
+    for n in range(3):
+        shared_subject(dest, f"d-{n}", f"Old {n}", f"gone-{n}")
+    calls = {"n": 0}
+
+    def out_of_time():
+        calls["n"] += 1
+        return calls["n"] > 1  # time for one subject per run
+
+    from app.ersharing.reporting import DestinationReport
+    from app.ersharing.state import ShareState
+    state = ShareState("i1", manager=world.manager)
+    for _ in range(3):
+        calls["n"] = 0
+        await subject_cleanup.remove_deleted_subjects(
+            world.source, dest, "Sitea", SIMPLE_PROVIDER_KEY, "site:sitea.pamdas.org#",
+            DestinationReport("Site 1", "Tracks"), out_of_time, state, "d1")
+    assert dest.deleted_subjects == ["d-0", "d-1", "d-2"]
+
+
+@pytest.mark.asyncio
+async def test_an_unreadable_icon_list_leaves_an_existing_types_icon_alone():
+    from app.services.errors import IntegrationBadResponseError
+    source, dest = icon_sites(icon_id="custom_icon", dest_icons={"generic_rep"})
+    await EventTypeSync(source, dest, types_.SETTINGS).ensure("wildlife_sighting")
+    dest.failures["list_event_type_icons"] = IntegrationBadResponseError("bad gateway", status_code=502)
+    await EventTypeSync(source, dest, types_.SETTINGS).ensure("wildlife_sighting")
+    assert dest.event_types["sitea_wildlife_sighting"]["icon_id"] == DEFAULT_ICON

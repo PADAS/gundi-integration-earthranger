@@ -5,7 +5,7 @@ import logging
 from datetime import datetime
 from typing import Dict, List, Optional, Set, Tuple
 
-from app.services.errors import IntegrationConfigurationError, IntegrationError
+from app.services.errors import IntegrationAuthError, IntegrationConfigurationError, IntegrationError
 from .clients import halts_site
 from .modes import EventSettings
 
@@ -198,8 +198,9 @@ class EventTypeSync:
         src = self._source_types.get(source_value)
         if src is None:
             return await self._ensure_for_v1_source(source_value)
-        wanted = await self._with_icon(clean_event_type(src, self._s))
+        wanted = clean_event_type(src, self._s)
         existing = await self._dest.get_event_type_v2(wanted["value"])
+        wanted = await self._with_icon(wanted, exists=existing is not None)
         if existing is None:
             # The v2 API can't address a v1 type, so a destination that still has this value
             # as a v1 type is shared into as it is, as v1 sharing did.
@@ -273,14 +274,16 @@ class EventTypeSync:
             reasons = "; ".join(str((m or {}).get("message", m)) for m in (converted or {}).get("errors") or [])
             detail = f" (EarthRanger couldn't convert it to v2: {reasons})" if reasons else ""
             raise IntegrationConfigurationError(f"{missing}{detail}, so create it at the destination first")
-        wanted = await self._with_icon(clean_event_type({**src, "schema": converted["v2_schema"]}, self._s))
+        wanted = await self._with_icon(clean_event_type({**src, "schema": converted["v2_schema"]}, self._s),
+                                       exists=False)
         category = await self._ensure_category(category_value(src))
         await self._dest.post_event_type_v2(wanted)
         self.types_created.append((category, wanted["display"]))
         return wanted
 
-    async def _with_icon(self, wanted: dict) -> dict:
-        """Keeps the source icon when the destination has it, otherwise EarthRanger's default."""
+    async def _with_icon(self, wanted: dict, exists: bool) -> dict:
+        """Keeps the source icon when the destination has it, otherwise EarthRanger's default.
+        When the destination's icons can't be listed, a type it already has keeps its icon."""
         icon = wanted.get("icon")
         if not icon:
             return wanted
@@ -289,10 +292,15 @@ class EventTypeSync:
             try:
                 self._dest_icons = await self._dest.list_event_type_icons()
             except IntegrationError as e:
-                if not refused_for_this_type(e):
+                if isinstance(e, IntegrationAuthError) or e.status_code == 401:
                     raise
-                self._dest_icons = None  # can't tell which icons the destination has: keep the source's
-        if self._dest_icons is not None and icon not in self._dest_icons:
+                # The icon is optional: when the list can't be read, keep the source's icon.
+                logger.warning("Couldn't list the destination's event type icons: %s", e.message)
+                self._dest_icons = None
+        if self._dest_icons is None:
+            if exists:
+                wanted.pop("icon", None)
+        elif icon not in self._dest_icons:
             wanted["icon"] = DEFAULT_ICON
         return wanted
 

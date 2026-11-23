@@ -170,13 +170,13 @@ INCIDENT_UNLINKED = say("Event {name} unlinked from an incident it left at the s
                         "{count} events unlinked from incidents they left at the source: {names}")
 
 
-NOT_LINKED = "Some copied events weren't linked to their incident because the incident isn't at the destination."
+NOT_LINKED = "Some copied events weren't linked to their incident."
 
 
 def report_missing_links(report: DestinationReport) -> None:
     """Incident links that failed and weren't made later in the same run."""
-    for (_, incident_id), label in report.unlinked.items():
-        report.error(NOT_LINKED, item=f"{label} → incident {incident_id}", level=LogLevel.WARNING)
+    for (_, incident_id), (label, reason) in report.unlinked.items():
+        report.error(NOT_LINKED, item=f"{label} → incident {incident_id}: {reason}", level=LogLevel.WARNING)
     report.unlinked.clear()
 
 
@@ -193,7 +193,7 @@ async def apply_incidents(dest, dest_event_id: str, wanted_ids: List[str], recor
                 raise
             # The incident may only be copied later in this run (events go oldest first),
             # which links it then; only links still missing at the end are reported.
-            report.unlinked[(dest_event_id, incident_id)] = label or dest_event_id
+            report.unlinked[(dest_event_id, incident_id)] = (label or dest_event_id, e.message)
     for incident_id in [i for i in record.incidents if i not in wanted_ids]:
         try:
             await dest.remove_from_incident(dest_event_id, incident_id)
