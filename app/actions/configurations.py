@@ -573,6 +573,11 @@ class SyncObservationsConfig(PullActionConfiguration):
         title="Tracks area filter",
         description="Only share points inside these feature groups. Leave empty to share points anywhere.",
     )
+    remove_deleted_subjects: bool = Field(
+        True,
+        title="Remove subjects deleted at the source",
+        description="Once a day, remove destination subjects whose devices were deleted at the source.",
+    )
     start_from: Optional[datetime] = Field(
         None, title="Start from",
         description="For a subject's first sync only: shares points recorded after this time, "
@@ -584,7 +589,7 @@ class SyncObservationsConfig(PullActionConfiguration):
 
     ui_global_options: GlobalUISchemaOptions = GlobalUISchemaOptions(
         order=["run_on_schedule", "subject_groups", "destination_subject_group", "area_feature_groups",
-               "compatibility", "start_from"],
+               "remove_deleted_subjects", "compatibility", "start_from"],
     )
 
     @classmethod

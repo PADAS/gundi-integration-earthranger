@@ -12,7 +12,7 @@ from .modes import EventSettings
 logger = logging.getLogger(__name__)
 
 SYNC_FIELDS_EVENT_TYPES = [
-    "value", "display", "ordernum", "icon_id", "is_active", "schema", "properties",
+    "value", "display", "ordernum", "is_active", "schema", "properties",
     "category", "is_collection", "geometry_type",
 ]
 
@@ -100,6 +100,9 @@ def clean_event_type(src_type: dict, s: EventSettings) -> dict:
     cleaned["display"] = f"{s.source.name}-{display}" if s.prepend_event_types else display
     cleaned["value"] = dest_event_type_value(src_type["value"], s)
     cleaned["category"] = dest_category_value(category_value(src_type), s)
+    # The v2 API reads a type's icon from "icon"; "icon_id" is what it shows back.
+    if src_type.get("icon_id"):
+        cleaned["icon"] = src_type["icon_id"]
     return cleaned
 
 
@@ -133,9 +136,15 @@ def same_event_type(wanted: dict, existing: dict) -> bool:
             value, current = _as_schema(value), _as_schema(current)
         elif key == "category":
             current = category_value(existing)
+        elif key == "icon":
+            current = existing.get("icon_id")
         if current != value:
             return False
     return True
+
+
+# EarthRanger's own icon for event types without one.
+DEFAULT_ICON = "generic_rep"
 
 
 class EventTypeSync:
@@ -160,6 +169,8 @@ class EventTypeSync:
         self.types_updated: List[str] = []
         self.types_given_fields: List[str] = []
         self._category_display: Dict[str, str] = {}
+        self._dest_icons: Optional[Set[str]] = None
+        self._icons_read = False
 
     def ensured(self, source_value: str) -> Optional[dict]:
         """The destination type already set up for this source type in this run."""
@@ -187,7 +198,7 @@ class EventTypeSync:
         src = self._source_types.get(source_value)
         if src is None:
             return await self._ensure_for_v1_source(source_value)
-        wanted = clean_event_type(src, self._s)
+        wanted = await self._with_icon(clean_event_type(src, self._s))
         existing = await self._dest.get_event_type_v2(wanted["value"])
         if existing is None:
             # The v2 API can't address a v1 type, so a destination that still has this value
@@ -262,10 +273,27 @@ class EventTypeSync:
             reasons = "; ".join(str((m or {}).get("message", m)) for m in (converted or {}).get("errors") or [])
             detail = f" (EarthRanger couldn't convert it to v2: {reasons})" if reasons else ""
             raise IntegrationConfigurationError(f"{missing}{detail}, so create it at the destination first")
-        wanted = clean_event_type({**src, "schema": converted["v2_schema"]}, self._s)
+        wanted = await self._with_icon(clean_event_type({**src, "schema": converted["v2_schema"]}, self._s))
         category = await self._ensure_category(category_value(src))
         await self._dest.post_event_type_v2(wanted)
         self.types_created.append((category, wanted["display"]))
+        return wanted
+
+    async def _with_icon(self, wanted: dict) -> dict:
+        """Keeps the source icon when the destination has it, otherwise EarthRanger's default."""
+        icon = wanted.get("icon")
+        if not icon:
+            return wanted
+        if not self._icons_read:
+            self._icons_read = True
+            try:
+                self._dest_icons = await self._dest.list_event_type_icons()
+            except IntegrationError as e:
+                if not refused_for_this_type(e):
+                    raise
+                self._dest_icons = None  # can't tell which icons the destination has: keep the source's
+        if self._dest_icons is not None and icon not in self._dest_icons:
+            wanted["icon"] = DEFAULT_ICON
         return wanted
 
     async def _ensure_category(self, src_value: str) -> str:

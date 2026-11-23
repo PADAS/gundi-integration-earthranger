@@ -56,6 +56,13 @@ def not_found(label: str = "Destination site fake") -> IntegrationBadResponseErr
     return err
 
 
+def _shown_back(event_type: dict) -> dict:
+    """ER's v2 API takes "icon" and shows it back as "icon_id"."""
+    if event_type.get("icon"):
+        event_type["icon_id"] = event_type.pop("icon")
+    return event_type
+
+
 class FakeSite:
     def __init__(self, url: str = "https://siteb.pamdas.org", role: str = "destination"):
         self.url = site_root(url)
@@ -78,6 +85,10 @@ class FakeSite:
         self.sharing_posts: List[tuple] = []
         self.subjects: Dict[str, dict] = {}  # destination subjects by id, for detail updates
         self.v1_conversions: Dict[str, Optional[dict]] = {}  # v1 type value -> EarthRanger's dry-run result
+        self.icons: Optional[set] = None  # icon names the site has; None: the site can't list them
+        self.sources: Dict[str, dict] = {}  # devices by id, as GET source/<id> returns them
+        self.latest_observations: Dict[str, dict] = {}  # by subject id
+        self.deleted_subjects: List[str] = []
         self.calls: List[tuple] = []
         self.failures: Dict[str, Failure] = {}
         self.unreadable: set = set()
@@ -246,11 +257,30 @@ class FakeSite:
 
     async def post_event_type_v2(self, data):
         self._hit("post_event_type_v2", data)
-        self.event_types[data["value"]] = copy.deepcopy(data)
+        self.event_types[data["value"]] = _shown_back(copy.deepcopy(data))
 
     async def patch_event_type_v2(self, data):
         self._hit("patch_event_type_v2", data)
-        self.event_types[data["value"]] = {**self.event_types.get(data["value"], {}), **copy.deepcopy(data)}
+        self.event_types[data["value"]] = _shown_back(
+            {**self.event_types.get(data["value"], {}), **copy.deepcopy(data)})
+
+    async def list_event_type_icons(self):
+        self._hit("list_event_type_icons")
+        return None if self.icons is None else set(self.icons)
+
+    async def get_source(self, source_id):
+        self._hit("get_source", source_id)
+        return copy.deepcopy(self.sources.get(source_id))
+
+    async def get_latest_observation(self, subject_id):
+        self._hit("get_latest_observation", subject_id)
+        return copy.deepcopy(self.latest_observations.get(subject_id))
+
+    async def delete_subject(self, subject_id):
+        self._hit("delete_subject", subject_id)
+        self.deleted_subjects.append(subject_id)
+        for group in self.subject_groups:
+            group["subjects"] = [x for x in group.get("subjects") or [] if str(x["id"]) != subject_id]
 
     async def list_subject_groups(self):
         self._hit("list_subject_groups")

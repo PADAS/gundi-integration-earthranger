@@ -25,6 +25,7 @@ from .observations import (
 )
 from .reporting import DestinationReport, is_stalled, log_overlap, log_skipped_destinations, names, publish_report, say
 from .state import OBSERVATIONS_ACTION, Marker, ShareState
+from .subject_cleanup import cleanup_due, mark_cleaned, remove_deleted_subjects
 from .timeutil import parse_dt, utcnow
 
 logger = logging.getLogger(__name__)
@@ -213,6 +214,9 @@ async def _run(integration, config, state: ShareState):
                 last = subject_id
             else:
                 await state.delete_marker(OBSERVATIONS_ACTION, SUBJECT_CURSOR)
+            if share.remove_deleted_subjects:
+                await _remove_deleted_subjects(state, source, sites, reports, dest_group,
+                                               provider_keys, share.provider_key, deadline)
     finally:
         if gundi_sources is not None and gundi_sources.added:
             try:
@@ -239,6 +243,27 @@ async def _run(integration, config, state: ShareState):
                 logger.exception("Couldn't publish the tracks report for %s", d.name)
     return ({"destinations": [r.as_dict() for r in reports.values()]},
             any(r.timed_out for r in reports.values()))
+
+
+async def _remove_deleted_subjects(state: ShareState, source, sites, reports, dest_group: str,
+                                   provider_keys: Dict[str, str], default_key: str, deadline: float) -> None:
+    """Once a day per destination, with the time the sharing left over."""
+    now = utcnow()
+    site_stamp = f"site:{site_host(source.url)}#"
+    for d_id, dest in list(sites.items()):
+        if time.monotonic() > deadline or not await cleanup_due(state, d_id, now):
+            continue
+        try:
+            finished = await remove_deleted_subjects(
+                source, dest, dest_group, provider_keys.get(d_id) or default_key, site_stamp, reports[d_id],
+                lambda: time.monotonic() > deadline)
+        except IntegrationError as e:
+            if getattr(e, "site_role", None) == "source":
+                raise
+            reports[d_id].error(e.message)
+            continue
+        if finished:
+            await mark_cleaned(state, d_id, now)
 
 
 async def _progress_marker(state: ShareState, destination_id: str, freshest, report: DestinationReport):

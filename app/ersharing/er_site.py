@@ -8,7 +8,7 @@ import os
 import tempfile
 from contextlib import asynccontextmanager
 from datetime import datetime
-from typing import AsyncIterator, Awaitable, Callable, List, Optional
+from typing import AsyncIterator, Awaitable, Callable, List, Optional, Set
 from urllib.parse import parse_qs, urlparse
 
 import httpx
@@ -301,6 +301,14 @@ class ERSite:
             lambda: self._client.get_event_type(value, version=VERSION_2_0, include_schema=True), none_on_404=True
         )
 
+    async def list_event_type_icons(self) -> Optional[Set[str]]:
+        """The icon names the site has for event types (file names without extension),
+        or None when the site can't list them (older EarthRanger versions)."""
+        data = await self._call(lambda: self._client._get("activity/events/eventtypes/icons"), none_on_404=True)
+        if not isinstance(data, dict):
+            return None
+        return {str(name).rsplit(".", 1)[0] for name in data.get("icon_ids") or []}
+
     async def post_event_type_v2(self, data: dict):
         return await self._call(lambda: self._client.post_event_type(data, version=VERSION_2_0), repeat_safe=False)
 
@@ -369,6 +377,18 @@ class ERSite:
 
     async def get_feature_group(self, feature_group_id: str) -> dict:
         return await self._call(lambda: self._client.get_feature_group(feature_group_id))
+
+    async def get_source(self, source_id: str) -> Optional[dict]:
+        return await self._call(lambda: self._client._get(f"source/{source_id}"), none_on_404=True)
+
+    async def delete_subject(self, subject_id: str):
+        return await self._call(lambda: self._client._delete(f"subject/{subject_id}/"))
+
+    async def get_latest_observation(self, subject_id: str) -> Optional[dict]:
+        params = {"subject_id": subject_id, "include_details": "true", "page_size": 1,
+                  "ordering": "-recorded_at"}
+        rows = _results(await self._call(lambda: self._client._get("observations", params=params)))
+        return rows[0] if rows else None
 
     async def patch_subject(self, subject_id: str, data: dict):
         return await self._call(lambda: self._client._patch(f"subject/{subject_id}", payload=data))

@@ -40,6 +40,7 @@ class ObservationSettings:
     destination_subject_group: Optional[str]
     area_feature_groups: Tuple[str, ...]
     provider_key: str
+    remove_deleted_subjects: bool
     subject_additional: bool
     src_user: Optional[str]
     start_from: Optional[datetime]
@@ -86,6 +87,7 @@ def observation_settings(source_url: str, config: SyncObservationsConfig) -> Obs
         area_feature_groups=_filled(config.area_feature_groups),
         # Per destination, the route's provider_key field mapping wins (see destinations.py).
         provider_key=SIMPLE_PROVIDER_KEY,
+        remove_deleted_subjects=config.remove_deleted_subjects,
         subject_additional=_pick(c.subject_additional, True),
         src_user=c.src_user,
         start_from=_aware(config.start_from),
