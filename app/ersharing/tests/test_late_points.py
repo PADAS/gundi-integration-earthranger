@@ -32,8 +32,20 @@ def test_a_point_a_short_read_did_see_isnt_sent_again_by_the_reread():
     assert not is_new(seen, marker, full_reread=True)
 
 
-def test_the_hourly_reread_forgets_the_short_reads():
+def test_the_hourly_reread_replaces_the_short_reads_with_its_own_read():
     marker = advance(None, [point(T0, T0)], T0)
     marker = note_read(marker, T0, T0, full_reread=False)
     assert marker.short_reads
-    assert note_read(marker, T0, T0, full_reread=True).short_reads == []
+    run_at = T0 + timedelta(hours=1)
+    assert note_read(marker, run_at, T0 - timedelta(hours=12), full_reread=True).short_reads == [
+        [run_at, T0 - timedelta(hours=12)]]
+
+
+def test_a_point_the_hourly_reread_sent_isnt_sent_again_by_the_next_one():
+    # Recorded 16:00, posted 16:50, sent by the 17:00 re-read; the 17:05 short read starts at 16:55.
+    late = point(T0 - timedelta(hours=1), T0 - timedelta(minutes=10))
+    marker = advance(None, [point(T0, T0), late], T0)
+    marker = note_read(marker, T0, T0 - timedelta(hours=12), full_reread=True)
+    run_at = T0 + timedelta(minutes=5)
+    marker = note_read(marker, run_at, marker.since - SHORT_OVERLAP, full_reread=False)
+    assert not is_new(late, marker, full_reread=True)

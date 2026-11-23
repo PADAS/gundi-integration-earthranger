@@ -39,10 +39,11 @@ async def test_all_event_types_when_none_are_picked(site):
     result = await preview_events(site, [])
     assert result["mode"] == "all"
     assert result["source_site"] == SITE
-    # Active types only, grouped by category in category order.
+    # Every type, inactive ones too (Share Events copies their events), grouped by category.
     assert [(g["value"], [i["value"] for i in g["items"]]) for g in result["groups"]] == [
-        ("security", ["poaching"]), ("monitoring", ["fire"])]
-    assert (result["selected_count"], result["total_count"]) == (2, 2)
+        ("security", ["poaching"]), ("monitoring", ["fire", "old"])]
+    assert (result["selected_count"], result["total_count"]) == (3, 3)
+    assert result["groups"][1]["items"][1]["is_active"] is False
     poaching = result["groups"][0]["items"][0]
     assert poaching == {
         "value": "poaching", "label": "Poaching",
@@ -77,9 +78,9 @@ async def test_v1_event_types_are_listed_too(site):
                     "is_active": False},
     }
     result = await preview_events(site, [])
-    assert [i["value"] for g in result["groups"] for i in g["items"]] == ["cluster"]
+    assert [i["value"] for g in result["groups"] for i in g["items"]] == ["cluster", "retired"]
     assert result["groups"][0]["items"][0]["icon_url"] == f"{SITE}/static/sprite-src/cluster_rep.svg"
-    assert (result["selected_count"], result["total_count"]) == (1, 1)
+    assert (result["selected_count"], result["total_count"]) == (2, 2)
     picked = await preview_events(site, ["retired"])
     assert picked["missing_values"] == []
     assert [i["is_active"] for g in picked["groups"] for i in g["items"]] == [False]
@@ -198,6 +199,6 @@ async def test_types_without_a_category_get_their_own_group_last(site):
     site.event_types["blank"] = {"value": "blank", "display": "Blank report", "category": "", "is_active": True}
     result = await preview_events(site, [])
     assert [(g["label"], [i["value"] for i in g["items"]]) for g in result["groups"]] == [
-        ("Security", ["poaching"]), ("Monitoring", ["fire"]), ("Uncategorized", ["blank", "loose"])]
-    assert (result["selected_count"], result["total_count"]) == (4, 4)
+        ("Security", ["poaching"]), ("Monitoring", ["fire", "old"]), ("Uncategorized", ["blank", "loose"])]
+    assert (result["selected_count"], result["total_count"]) == (5, 5)
     assert result["groups"][-1]["total_count"] == 2

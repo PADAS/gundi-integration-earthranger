@@ -87,3 +87,15 @@ def test_payload_options():
 
 def test_batches():
     assert [len(b) for b in batches(list(range(450)))] == [200, 200, 50]
+
+
+def test_a_point_at_the_moment_a_device_moves_belongs_to_the_next_subject():
+    from app.ersharing.observations import in_assignment, parse_assignments
+    raw = [{"subject": "old", "source": "dev", "assigned_range": {
+                "lower": "2026-01-01T00:00:00Z", "upper": "2026-02-01T00:00:00Z", "bounds": "[)"}},
+           {"subject": "new", "source": "dev", "assigned_range": {
+                "lower": "2026-02-01T00:00:00Z", "upper": None, "bounds": "[)"}}]
+    parsed = parse_assignments(raw)
+    at_move = {"recorded_at": "2026-02-01T00:00:00Z", "source": "dev"}
+    assert not in_assignment(at_move, parsed["old"])
+    assert in_assignment(at_move, parsed["new"])

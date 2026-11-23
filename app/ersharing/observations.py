@@ -31,6 +31,19 @@ class Assignment:
     source_id: str
     lower: datetime
     upper: Optional[datetime]
+    # EarthRanger sends the range's bounds, normally "[)": the end is the moment the
+    # device moved on, so a point recorded then belongs to the next assignment.
+    lower_inclusive: bool = True
+    upper_inclusive: bool = True
+
+    def covers(self, recorded: datetime) -> bool:
+        lower_inclusive = getattr(self, "lower_inclusive", True)
+        upper_inclusive = getattr(self, "upper_inclusive", True)
+        after_start = self.lower <= recorded if lower_inclusive else self.lower < recorded
+        if self.upper is None:
+            return after_start
+        before_end = recorded <= self.upper if upper_inclusive else recorded < self.upper
+        return after_start and before_end
 
 
 def _id(value) -> str:
@@ -43,18 +56,20 @@ def parse_assignments(raw: List[dict]) -> Dict[str, List[Assignment]]:
         rng = item.get("assigned_range") or {}
         if not rng.get("lower"):
             continue
+        bounds = rng.get("bounds") or "[]"
         out.setdefault(_id(item["subject"]), []).append(Assignment(
             source_id=_id(item["source"]),
             lower=parse_dt(rng["lower"]),
             upper=parse_dt(rng["upper"]) if rng.get("upper") else None,
+            lower_inclusive=bounds[:1] != "(",
+            upper_inclusive=bounds[-1:] != ")",
         ))
     return out
 
 
 def in_assignment(obs: dict, assignments: List[Assignment]) -> bool:
     recorded, source = parse_dt(obs["recorded_at"]), str(obs.get("source"))
-    return any(a.source_id == source and a.lower <= recorded and (a.upper is None or recorded <= a.upper)
-               for a in assignments)
+    return any(a.source_id == source and Assignment.covers(a, recorded) for a in assignments)
 
 
 def is_new(obs: dict, marker: Optional[Marker], full_reread: bool = False) -> bool:
@@ -79,8 +94,10 @@ def missed_by_short_read(recorded: datetime, created: datetime, marker: Marker) 
 
 
 def note_read(marker: Marker, now: datetime, read_from: datetime, full_reread: bool) -> Marker:
-    """Remember a short read's start until the next full re-read, which checks it."""
-    short_reads = [] if full_reread else (marker.short_reads + [[now, read_from]])[-MAX_SHORT_READS:]
+    """Remember a short read's start until the next full re-read, which checks it. A full
+    re-read starts the list with its own read, so a point it already saw (posted before
+    it ran) isn't counted as missed by the short reads after it."""
+    short_reads = [[now, read_from]] if full_reread else (marker.short_reads + [[now, read_from]])[-MAX_SHORT_READS:]
     return marker.copy(update={"short_reads": short_reads})
 
 

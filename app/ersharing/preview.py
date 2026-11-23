@@ -101,8 +101,9 @@ async def preview_events(site, event_types: Optional[Iterable], area_feature_gro
     types = types + [t for t in v1_types if t.get("value") not in v2_values]
 
     known = {t.get("value") for t in types}
-    active = [t for t in types if t.get("is_active") is not False]
-    picked = active if mode == "all" else [t for t in types if t.get("value") in selected]
+    # With nothing picked, Share Events copies events of every type, inactive ones too
+    # (they stay labelled inactive).
+    picked = types if mode == "all" else [t for t in types if t.get("value") in selected]
 
     def item(t: dict) -> dict:
         return {
@@ -144,7 +145,7 @@ async def preview_events(site, event_types: Optional[Iterable], area_feature_gro
     return _response(
         site_url, mode,
         selected_count=sum(len(g["items"]) for g in groups),
-        total_count=len(active),
+        total_count=len(types),
         groups=groups,
         missing=[v for v in selected if v not in known],
         warning=AREA_NOTE_EVENTS if _wanted(area_feature_groups) else None,

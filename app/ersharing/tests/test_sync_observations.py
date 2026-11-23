@@ -417,6 +417,19 @@ async def test_a_failed_gundi_source_update_never_stops_the_share_and_is_retried
 
 
 @pytest.mark.asyncio
+async def test_a_failed_gundi_source_update_is_retried_without_new_points(world, gundi):
+    gundi.status_code = 500
+    await run_sync_observations(INTEGRATION, CONFIG)
+    gundi.status_code = 201
+    gundi.posts.clear()
+    await run_sync_observations(INTEGRATION, CONFIG)  # no new points this time
+    assert sorted(data["external_id"] for _, data in gundi.posts) == ["er-src-src-s1", "er-src-src-s2"]
+    gundi.posts.clear()
+    await run_sync_observations(INTEGRATION, CONFIG)
+    assert gundi.posts == []  # added now: nothing left to retry
+
+
+@pytest.mark.asyncio
 async def test_a_subject_with_nothing_shared_is_not_added(world, gundi):
     world.source.observations = {"s1": [], "s2": []}
     await run_sync_observations(INTEGRATION, CONFIG)

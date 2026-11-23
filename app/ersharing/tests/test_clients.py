@@ -448,3 +448,14 @@ async def test_a_404_on_the_first_page_still_fails_the_listing():
     with pytest.raises(IntegrationBadResponseError):
         async for _ in site(client).iter_events_updated_since(datetime(2026, 1, 2, tzinfo=timezone.utc)):
             pass
+
+
+def test_the_token_goes_only_to_the_sites_own_origin():
+    from app.ersharing.er_site import ERSite
+    site = ERSite.__new__(ERSite)
+    site.url = "https://siteb.pamdas.org"
+    assert site._is_own_url("https://siteb.pamdas.org/api/v1.0/files/1")
+    assert site._is_own_url("https://siteb.pamdas.org:443/f")
+    assert not site._is_own_url("https://siteb.pamdas.org:8443/f")
+    assert not site._is_own_url("http://siteb.pamdas.org/f")
+    assert not site._is_own_url("https://other.pamdas.org/f")

@@ -226,9 +226,14 @@ class ERSite:
         return AttachmentUnavailable(message, status)
 
     def _is_own_url(self, url: str) -> bool:
+        """Same origin as the site: HTTPS, same host and same port, so the token never
+        goes to another service on the same host."""
+        def origin(u: str):
+            parsed = urlparse(u if "://" in u else f"https://{u}")
+            return parsed.scheme, (parsed.hostname or "").lower(), parsed.port or 443
         try:
-            https = urlparse(url if "://" in url else f"https://{url}").scheme == "https"
-            return https and site_host(url) == site_host(self.url)
+            scheme, host, port = origin(url)
+            return scheme == "https" and (scheme, host, port) == origin(self.url)
         except ValueError:
             return False
 

@@ -386,9 +386,12 @@ async def _share_subject(source, sites, reports, freshest, state, share, area, a
             reports[d_id].marker = marker.since if current is None else max(current, marker.since)
             if d_id not in freshest or marker.advanced_at > freshest[d_id].advanced_at:
                 freshest[d_id] = marker
-    if gundi_sources is not None and shared_devices:
-        # Share bypasses Gundi's routing, so Gundi only lists these devices if told.
-        await gundi_sources.note_shared(subject, shared_devices, lambda: source.get_subject_sources(subject_id))
+    if gundi_sources is not None:
+        # Share bypasses Gundi's routing, so Gundi only lists these devices if told. Devices
+        # an earlier run couldn't add are tried again even when this run shared no new points.
+        devices = shared_devices | set(await gundi_sources.pending(subject_id))
+        if devices:
+            await gundi_sources.note_shared(subject, devices, lambda: source.get_subject_sources(subject_id))
     return finished
 
 

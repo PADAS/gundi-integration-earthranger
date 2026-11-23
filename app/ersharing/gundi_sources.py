@@ -34,6 +34,11 @@ def registered_key(device_id: str) -> str:
     return f"gundi-source:{device_id}"
 
 
+def pending_key(subject_id: str) -> str:
+    """Devices of this subject whose points were shared but which aren't in Gundi's sources yet."""
+    return f"gundi-source-pending:{subject_id}"
+
+
 def external_source_id(device_id: str, device: Optional[dict]) -> str:
     """The id Pull Observations gives a device (app/actions/source_profiles.py)."""
     return (device or {}).get("manufacturer_id") or f"er-src-{device_id}"
@@ -55,6 +60,25 @@ class GundiSources:
             self._client = await self._stack.enter_async_context(GundiClient())
         return self._client
 
+    async def pending(self, subject_id: str) -> List[str]:
+        """Devices whose registration failed earlier: tried again on every run, with or
+        without new points, until Gundi lists them."""
+        try:
+            data = await self.state.get_value(OBSERVATIONS_ACTION, pending_key(subject_id))
+        except RedisError as e:
+            logger.warning("Couldn't read the devices still to add to Gundi's sources: %s", e)
+            return []
+        return [d for d in (data or "").split(",") if d]
+
+    async def _set_pending(self, subject_id: str, device_ids: List[str]) -> None:
+        try:
+            if device_ids:
+                await self.state.set_value(OBSERVATIONS_ACTION, pending_key(subject_id), ",".join(sorted(device_ids)))
+            else:
+                await self.state.delete_marker(OBSERVATIONS_ACTION, pending_key(subject_id))
+        except RedisError as e:
+            logger.warning("Couldn't record the devices still to add to Gundi's sources: %s", e)
+
     async def note_shared(self, subject: dict, device_ids: Iterable[str],
                           read_devices: Callable[[], Awaitable[List[dict]]]) -> None:
         try:
@@ -63,19 +87,30 @@ class GundiSources:
         except RedisError as e:
             logger.warning("Couldn't check which shared devices are in Gundi's sources: %s", e)
             return
+        subject_id = str(subject.get("id"))
+        # Recorded before trying, so a device whose points were shared is still added after
+        # a failure here, on a later run that has no new points for it.
+        await self._set_pending(subject_id, new)
         if not new:
             return
+        left = await self._register(subject, new, read_devices)
+        await self._set_pending(subject_id, left)
+
+    async def _register(self, subject: dict, new: List[str],
+                        read_devices: Callable[[], Awaitable[List[dict]]]) -> List[str]:
+        """Adds the devices to Gundi's sources; returns those still to add."""
         label = subject.get("name") or str(subject.get("id"))
         try:
             devices: Dict[str, dict] = {str(s.get("id")): s for s in await read_devices()}
         except IntegrationError as e:
             logger.warning("Couldn't read %s's devices to add them to Gundi's sources: %s", label, e.message)
-            return
+            return new
         try:
             client = await self._gundi()
         except (httpx.HTTPError, *GundiClientError) as e:  # the share itself goes on
             logger.warning("Couldn't reach Gundi to add shared devices to its sources: %s", type(e).__name__)
-            return
+            return new
+        left = []
         for device_id in new:
             payload = {"provider": self.integration_id,
                        "external_id": external_source_id(device_id, devices.get(device_id)),
@@ -85,10 +120,12 @@ class GundiSources:
             except (httpx.HTTPError, *GundiClientError) as e:
                 logger.warning("Couldn't add device %s to Gundi's sources: %s", payload["external_id"],
                                type(e).__name__)
+                left.append(device_id)
                 continue
             if response.status_code not in REGISTERED_STATUSES:
                 logger.warning("Gundi didn't add device %s to its sources (HTTP %s)", payload["external_id"],
                                response.status_code)
+                left.append(device_id)
                 continue
             try:
                 await self.state.set_value(OBSERVATIONS_ACTION, registered_key(device_id), payload["external_id"])
@@ -96,3 +133,4 @@ class GundiSources:
                     self.added[f"{label} ({payload['external_id']})"] = 1
             except RedisError as e:
                 logger.warning("Couldn't record that device %s is in Gundi's sources: %s", device_id, e)
+        return left
