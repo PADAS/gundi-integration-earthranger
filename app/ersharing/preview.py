@@ -13,9 +13,10 @@ import asyncio
 from datetime import timedelta
 from typing import Dict, Iterable, List, Optional
 
-from app.services.errors import IntegrationAuthError
+from app.services.errors import IntegrationAuthError, IntegrationError
 
 from .event_types import category_value
+from .geo import load_area
 from .naming import site_host
 from .timeutil import parse_dt, utcnow
 
@@ -26,6 +27,11 @@ ITEM_CAP = 200
 FIRST_SHARE_WINDOW = timedelta(hours=12)
 OLD_TRACK_NOTE = ("Its last point is more than 12 hours old, so only points recorded "
                   "from now on will be shared.")
+
+# Where a subject's last point is against the tracks area filter. It says where the
+# subject is now; the points it records later are filtered one by one.
+INSIDE_AREA_NOTE = "Its last point is inside the area."
+OUTSIDE_AREA_NOTE = "Its last point is outside the area. Only points inside the area are shared."
 
 # The list can't tell which events or points fall inside an area filter, so it
 # says the filter narrows what is shared.
@@ -171,6 +177,22 @@ def _track_note(last_position: Optional[str], now) -> Optional[str]:
     return OLD_TRACK_NOTE if now - last > FIRST_SHARE_WINDOW else None
 
 
+def _area_note(subject: dict, area) -> Optional[str]:
+    """Whether the subject's last point is inside the tracks area filter, or None without
+    an area or a last point."""
+    if area is None:
+        return None
+    coordinates = ((subject.get("last_position") or {}).get("geometry") or {}).get("coordinates")
+    if not coordinates or len(coordinates) < 2:
+        return None
+    return INSIDE_AREA_NOTE if area.contains_point(coordinates[0], coordinates[1]) else OUTSIDE_AREA_NOTE
+
+
+def _subject_note(subject: dict, now, area) -> Optional[str]:
+    notes = [n for n in (_area_note(subject, area), _track_note(subject.get("last_position_date"), now)) if n]
+    return " ".join(notes) or None
+
+
 async def preview_subjects(site, subject_groups: Optional[Iterable],
                            area_feature_groups: Optional[Iterable] = None) -> dict:
     """Subjects grouped by subject group, each with its icon and last point.
@@ -200,6 +222,12 @@ async def preview_subjects(site, subject_groups: Optional[Iterable],
     def distinct(groups: List[dict]) -> int:
         return len({str(s.get("id")) for g in groups for s in (g.get("subjects") or [])})
 
+    area = None
+    if _wanted(area_feature_groups):
+        try:
+            area = await load_area(site, _wanted(area_feature_groups), polygons_only=True)
+        except IntegrationError:
+            area = None  # the list still shows; the area warning below still applies
     now = utcnow()
     groups = []
     for g in picked:
@@ -215,7 +243,7 @@ async def preview_subjects(site, subject_groups: Optional[Iterable],
                 "icon_url": icon(s.get("image_url")),
                 "is_active": s.get("is_active") is not False,
                 "detail": s.get("last_position_date"),
-                "note": _track_note(s.get("last_position_date"), now),
+                "note": _subject_note(s, now, area),
             } for s in subjects), key=_by_label),
         })
     groups.sort(key=lambda grp: (grp["label"] or "").lower())
