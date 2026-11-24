@@ -23,7 +23,7 @@ from .core import ReferenceDataResponse, ReferenceOption, action_title
 from .er_schema import er_site_root, fetch_prerendered_event_schema, parse_er_event_schema
 from .configurations import AuthenticateConfig, EventFilterDateField, PullObservationsConfig, PullEventsConfig, \
     ERAuthenticationType, ShowPermissionsConfig, ListEventTypesQuery, ListEventTypeFieldsQuery, \
-    ListEventFieldValuesQuery, ListEventCategoriesQuery, ListSubjectTypesQuery
+    ListEventFieldValuesQuery, ListEventCategoriesQuery, ListSubjectTypesQuery, ListSpatialFeatureGroupsQuery
 from .source_profiles import SourceProfileResolver
 from ..services.activity_logger import activity_logger, log_action_activity
 from ..services.errors import (
@@ -1852,6 +1852,39 @@ async def action_list_event_categories(integration: Integration, action_config: 
         for cat in _as_list(categories)
         if isinstance(cat, dict) and cat.get("value")
     ]
+    options.sort(key=lambda o: o.label or o.value)
+    return ReferenceDataResponse(options=options, truncated=False).dict()
+
+
+async def action_list_spatial_feature_groups(
+    integration: Integration, action_config: ListSpatialFeatureGroupsQuery
+):
+    """Reference action: ER spatial feature groups visible to this integration's credentials.
+
+    The option value is the group id. Connectors that filter by an area on this
+    site (FIRMS fire detections) store it and read the group's features at run
+    time. erclient has no public method for the list endpoint, so it is read
+    through the client's generic GET.
+    """
+    async with _translating_er_client(integration) as earth_ranger:
+        groups = await earth_ranger._get("featuregroups", params={})
+
+    options = []
+    for group in _as_list(groups):
+        if not isinstance(group, dict) or not group.get("id"):
+            continue
+        count = group.get("feature_count")
+        options.append(
+            ReferenceOption(
+                value=str(group["id"]),
+                label=group.get("name") or str(group["id"]),
+                description=(
+                    f"{count} feature{'' if count == 1 else 's'}"
+                    if isinstance(count, int) and not isinstance(count, bool)
+                    else None
+                ),
+            )
+        )
     options.sort(key=lambda o: o.label or o.value)
     return ReferenceDataResponse(options=options, truncated=False).dict()
 

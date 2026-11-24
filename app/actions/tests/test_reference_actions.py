@@ -452,6 +452,65 @@ async def test_list_event_categories_upstream_error_propagates(mock_er_client, e
         await action_list_event_categories(er_integration_v2_provider, ListEventCategoriesQuery())
 
 
+# --- action_list_spatial_feature_groups ----------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_list_spatial_feature_groups_returns_sorted_options(mock_er_client, er_integration_v2_provider):
+    from app.actions.handlers import action_list_spatial_feature_groups
+    from app.actions.configurations import ListSpatialFeatureGroupsQuery
+
+    mock_er_client._get = AsyncMock(return_value=[
+        {"id": "g1", "name": "Park boundary", "feature_count": 3},
+        {"id": "g2", "name": "Buffer", "feature_count": 1},
+        {"id": "g3"},
+        {"name": "No id"},
+        "not-a-dict",
+    ])
+    result = await action_list_spatial_feature_groups(er_integration_v2_provider, ListSpatialFeatureGroupsQuery())
+    assert [(o["value"], o["label"], o["description"]) for o in result["options"]] == [
+        ("g2", "Buffer", "1 feature"),
+        ("g1", "Park boundary", "3 features"),
+        ("g3", "g3", None),
+    ]
+    assert result["truncated"] is False
+    mock_er_client._get.assert_awaited_once_with("featuregroups", params={})
+
+
+@pytest.mark.asyncio
+async def test_list_spatial_feature_groups_unwraps_paginated_envelope(mock_er_client, er_integration_v2_provider):
+    from app.actions.handlers import action_list_spatial_feature_groups
+    from app.actions.configurations import ListSpatialFeatureGroupsQuery
+
+    mock_er_client._get = AsyncMock(return_value={
+        "results": [{"id": "g1", "name": "Park boundary", "feature_count": 0}]
+    })
+    result = await action_list_spatial_feature_groups(er_integration_v2_provider, ListSpatialFeatureGroupsQuery())
+    assert [(o["value"], o["label"], o["description"]) for o in result["options"]] == [
+        ("g1", "Park boundary", "0 features"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_list_spatial_feature_groups_upstream_error_propagates(mock_er_client, er_integration_v2_provider):
+    from app.actions.handlers import action_list_spatial_feature_groups
+    from app.actions.configurations import ListSpatialFeatureGroupsQuery
+
+    mock_er_client._get = AsyncMock(side_effect=httpx.HTTPStatusError(
+        "boom", request=MagicMock(), response=MagicMock(status_code=500)
+    ))
+    with pytest.raises(IntegrationBadResponseError):
+        await action_list_spatial_feature_groups(er_integration_v2_provider, ListSpatialFeatureGroupsQuery())
+
+
+def test_list_spatial_feature_groups_registers_as_a_reference_action():
+    from app.actions.core import ReferenceActionConfiguration, get_actions
+    from app.actions.configurations import ListSpatialFeatureGroupsQuery
+
+    assert "list_spatial_feature_groups" in get_actions()
+    assert issubclass(ListSpatialFeatureGroupsQuery, ReferenceActionConfiguration)
+
+
 # --- PullEventsConfig ui_schema annotations ------------------------------------
 
 
