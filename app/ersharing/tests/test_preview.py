@@ -216,7 +216,7 @@ def _point(lon, lat):
 
 
 @pytest.mark.asyncio
-async def test_each_subject_says_whether_its_last_point_is_inside_the_area(site, monkeypatch):
+async def test_a_subject_whose_last_point_is_outside_the_area_gets_a_note(site, monkeypatch):
     from app.ersharing.timeutil import parse_dt
     monkeypatch.setattr(preview, "utcnow", lambda: parse_dt("2026-11-09T12:00:00Z"))
     site.feature_groups["fg1"] = {"id": "fg1", "features": [{"features": [{"type": "Feature", "geometry": {
@@ -233,9 +233,9 @@ async def test_each_subject_says_whether_its_last_point_is_inside_the_area(site,
     result = await preview_subjects(site, [], ["fg1"])
     notes = {item["label"]: item["note"] for item in result["groups"][0]["items"]}
     assert notes == {
-        "Inside": preview.INSIDE_AREA_NOTE,
+        "Inside": None,
         "Outside": preview.OUTSIDE_AREA_NOTE,
-        "Old inside": f"{preview.INSIDE_AREA_NOTE} {preview.OLD_TRACK_NOTE}",
+        "Old inside": preview.OLD_TRACK_NOTE,
         "No track": None,
     }
     assert result["warning"] == preview.AREA_NOTE_TRACKS

@@ -28,10 +28,9 @@ FIRST_SHARE_WINDOW = timedelta(hours=12)
 OLD_TRACK_NOTE = ("Its last point is more than 12 hours old, so only points recorded "
                   "from now on will be shared.")
 
-# Where a subject's last point is against the tracks area filter. It says where the
+# A subject whose last point is outside the tracks area filter. It says where the
 # subject is now; the points it records later are filtered one by one.
-INSIDE_AREA_NOTE = "Its last point is inside the area."
-OUTSIDE_AREA_NOTE = "Its last point is outside the area. Only points inside the area are shared."
+OUTSIDE_AREA_NOTE = "Its last point is outside the shared area."
 
 # The list can't tell which events or points fall inside an area filter, so it
 # says the filter narrows what is shared.
@@ -178,14 +177,14 @@ def _track_note(last_position: Optional[str], now) -> Optional[str]:
 
 
 def _area_note(subject: dict, area) -> Optional[str]:
-    """Whether the subject's last point is inside the tracks area filter, or None without
-    an area or a last point."""
+    """A note when the subject's last point is outside the tracks area filter; None inside
+    it, or without an area or a last point."""
     if area is None:
         return None
     coordinates = ((subject.get("last_position") or {}).get("geometry") or {}).get("coordinates")
     if not coordinates or len(coordinates) < 2:
         return None
-    return INSIDE_AREA_NOTE if area.contains_point(coordinates[0], coordinates[1]) else OUTSIDE_AREA_NOTE
+    return None if area.contains_point(coordinates[0], coordinates[1]) else OUTSIDE_AREA_NOTE
 
 
 def _subject_note(subject: dict, now, area) -> Optional[str]:
