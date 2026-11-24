@@ -3,6 +3,15 @@ import pytest
 from app.actions.configurations import SyncEventsConfig, SyncObservationsConfig
 
 
+def _properties(node: dict) -> dict:
+    """A model's fields, the ones it shows only on a condition (if/else) included."""
+    props = dict(node.get("properties", {}))
+    for branch in ("then", "else"):
+        if branch in node:
+            props.update(_properties(node[branch]))
+    return props
+
+
 def field_at(schema: dict, path: str) -> dict:
     """The schema of the field at a dotted path, following pydantic's allOf/$ref wrapping."""
     node = schema
@@ -10,7 +19,7 @@ def field_at(schema: dict, path: str) -> dict:
         refs = [s["$ref"] for s in node.get("allOf", []) if "$ref" in s] + ([node["$ref"]] if "$ref" in node else [])
         if refs:
             node = schema["definitions"][refs[0].rsplit("/", 1)[-1]]
-        node = node["properties"][part]
+        node = _properties(node)[part]
     return node
 
 
