@@ -210,6 +210,45 @@ async def test_an_area_filter_is_noted(site):
     assert (await preview_subjects(site, [], [""]))["warning"] is None
 
 
+
+def _point(lon, lat):
+    return {"geometry": {"type": "Point", "coordinates": [lon, lat]}}
+
+
+@pytest.mark.asyncio
+async def test_each_subject_says_whether_its_last_point_is_inside_the_area(site, monkeypatch):
+    from app.ersharing.timeutil import parse_dt
+    monkeypatch.setattr(preview, "utcnow", lambda: parse_dt("2026-11-09T12:00:00Z"))
+    site.feature_groups["fg1"] = {"id": "fg1", "features": [{"features": [{"type": "Feature", "geometry": {
+        "type": "Polygon", "coordinates": [[[5, 5], [5, 6], [6, 6], [6, 5], [5, 5]]]}}]}]}
+    site.subject_groups = [{"id": "g1", "name": "Vultures", "subjects": [
+        {"id": "s1", "name": "Inside", "last_position": _point(5.5, 5.5),
+         "last_position_date": "2026-11-09T11:00:00+00:00"},
+        {"id": "s2", "name": "Outside", "last_position": _point(7, 7),
+         "last_position_date": "2026-11-09T11:00:00+00:00"},
+        {"id": "s3", "name": "Old inside", "last_position": _point(5.2, 5.8),
+         "last_position_date": "2026-11-01T11:00:00+00:00"},
+        {"id": "s4", "name": "No track"},
+    ]}]
+    result = await preview_subjects(site, [], ["fg1"])
+    notes = {item["label"]: item["note"] for item in result["groups"][0]["items"]}
+    assert notes == {
+        "Inside": preview.INSIDE_AREA_NOTE,
+        "Outside": preview.OUTSIDE_AREA_NOTE,
+        "Old inside": f"{preview.INSIDE_AREA_NOTE} {preview.OLD_TRACK_NOTE}",
+        "No track": None,
+    }
+    assert result["warning"] == preview.AREA_NOTE_TRACKS
+    assert (await preview_subjects(site, [], []))["groups"][0]["items"][0]["note"] is None
+
+
+@pytest.mark.asyncio
+async def test_an_area_that_cant_be_read_leaves_the_list_without_area_notes(site):
+    site.subject_groups[0]["subjects"][1]["last_position"] = _point(5.5, 5.5)
+    result = await preview_subjects(site, [], ["missing-group"])
+    assert result["groups"][1]["items"][1]["note"] is None
+    assert result["warning"] == preview.AREA_NOTE_TRACKS
+
 @pytest.mark.asyncio
 async def test_types_without_a_category_get_their_own_group_last(site):
     site.event_types["loose"] = {"value": "loose", "display": "Loose report", "category": None, "is_active": True}
