@@ -614,7 +614,8 @@ async def _execute_action_impl(
         )
 
     try:  # Parse the action configuration
-        config_data = action_config.data if action_config else {}
+        # A copy: overrides must not change the stored config later runs reuse.
+        config_data = dict(action_config.data or {}) if action_config else {}
         if config_overrides:
             config_data.update(config_overrides)
         parsed_config = config_model.parse_obj(config_data)
@@ -623,6 +624,17 @@ async def _execute_action_impl(
         # safely pull. Skip rather than raise — surfaced at WARNING in the
         # activity feed (throttled) so a genuinely misconfigured source stays
         # noticeable without spamming a warning on every tick.
+        if skippable_pull and action_config and not action_config.data and not config_overrides:
+            # A pull saved with nothing filled in (for example on a route that only
+            # uses another action) was never set up: skip it like a missing one,
+            # without the "missing or invalid" warning on every tick. An empty
+            # config that parses (every field has a default) still runs.
+            return _skip_quietly(
+                integration_id, action_id,
+                reason="no_configuration",
+                message=f"Skipping '{action_id}': its configuration is empty.",
+                log_level=logging.DEBUG,
+            )
         if skippable_pull:
             return await _skip_invalid_config(integration_id, action_id, error=e)
         # _handle_error drops config_data on the ephemeral path itself.

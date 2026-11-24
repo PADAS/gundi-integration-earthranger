@@ -2854,3 +2854,58 @@ async def test_execute_reference_action_handler_error_does_not_leak_config(
     assert len(failed_events) == 1
     assert auth_token not in failed_events[0].json()
     assert not failed_events[0].payload.config_data.get("configurations")
+
+
+@pytest.mark.asyncio
+async def test_scheduled_pull_action_with_empty_config_is_skipped_quietly(
+        mocker, mock_gundi_client_v2, mock_config_manager, mock_publish_event,
+        mock_action_handlers, pubsub_message_request_headers, run_pull_action_pubsub_payload,
+):
+    # A pull saved with nothing filled in was never set up (for example on a route that
+    # only uses another action): no "missing or invalid" warning on every tick.
+    mocker.patch("app.services.action_runner.action_handlers", mock_action_handlers)
+    mocker.patch("app.services.action_runner._portal", mock_gundi_client_v2)
+    mocker.patch("app.services.action_runner.config_manager", mock_config_manager)
+    mocker.patch("app.services.activity_logger.publish_event", mock_publish_event)
+    mocker.patch("app.services.action_runner.publish_event", mock_publish_event)
+    class NeedsSettings(PullActionConfiguration):
+        site: str
+
+    handler, _, _ = mock_action_handlers["pull_observations"]
+    mock_action_handlers["pull_observations"] = (handler, NeedsSettings, None)
+    empty_config = mocker.MagicMock()
+    empty_config.data = {}
+    mock_config_manager.get_action_configuration.return_value = async_return(empty_config)
+
+    response = api_client.post(
+        "/", headers=pubsub_message_request_headers, json=run_pull_action_pubsub_payload,
+    )
+
+    assert response.status_code == 200
+    assert not handler.called
+    assert not _published_events_of_type(mock_publish_event, IntegrationActionFailed)
+    assert not _published_events_of_type(mock_publish_event, IntegrationActionCustomLog)
+
+
+@pytest.mark.asyncio
+async def test_scheduled_pull_action_with_empty_config_that_parses_still_runs(
+        mocker, mock_gundi_client_v2, mock_config_manager, mock_publish_event,
+        mock_action_handlers, pubsub_message_request_headers, run_pull_action_pubsub_payload,
+):
+    # Every field has a default, so an empty config is a complete one.
+    mocker.patch("app.services.action_runner.action_handlers", mock_action_handlers)
+    mocker.patch("app.services.action_runner._portal", mock_gundi_client_v2)
+    mocker.patch("app.services.action_runner.config_manager", mock_config_manager)
+    mocker.patch("app.services.activity_logger.publish_event", mock_publish_event)
+    mocker.patch("app.services.action_runner.publish_event", mock_publish_event)
+    empty_config = mocker.MagicMock()
+    empty_config.data = {}
+    mock_config_manager.get_action_configuration.return_value = async_return(empty_config)
+
+    response = api_client.post(
+        "/", headers=pubsub_message_request_headers, json=run_pull_action_pubsub_payload,
+    )
+
+    assert response.status_code == 200
+    mock_action_handler, _, _ = mock_action_handlers["pull_observations"]
+    assert mock_action_handler.called
