@@ -486,19 +486,41 @@ def raw_view(v1_keys: dict, drop: Sequence[str] = (), mask: Sequence[str] = (), 
 
 class EventsCompatibility(BaseModel):
     """v1 settings kept for migrated shares. None means "use the simple-mode default"."""
+    # Each switch's default is the value the share uses when it is left alone, so the
+    # form shows it; a stored None (older configs) still means that default.
 
-    prepend_system_to_categories: Optional[bool] = Field(None, title="Prefix categories with the source name")
-    prepend_system_to_event_types: Optional[bool] = Field(None, title="Prefix event types with the source name")
-    prepend_system_to_event_titles: Optional[bool] = Field(None, title="Prefix event titles with the source name")
-    update_schema: Optional[bool] = Field(None, title="Allow updates to destination event types")
+    prepend_system_to_categories: Optional[bool] = Field(
+        True,
+        title="Prefix categories with the source name",
+        description="Shared categories get the source name in front, like 'Serengeti-Wildlife', "
+                    "so they stay apart from the destination's own.",
+    )
+    prepend_system_to_event_types: Optional[bool] = Field(
+        True,
+        title="Prefix event types with the source name",
+        description="Shared event types get the source name in front, like 'Serengeti-Wildlife sighting'.",
+    )
+    prepend_system_to_event_titles: Optional[bool] = Field(
+        True,
+        title="Prefix event titles with the source name",
+        description="Shared event titles get the source name in front, like 'Serengeti-Leopard near camp'.",
+    )
+    update_schema: Optional[bool] = Field(
+        True,
+        title="Allow updates to destination event types",
+        description="Shared event types are created at each destination and kept up to date. "
+                    "When off, events go only into event types the destination already has.",
+    )
     delete_unmatched_events: Optional[bool] = Field(
-        None, title="Remove destination copies when the source event is deleted"
+        True,
+        title="Remove destination copies when the source event is deleted",
+        description="When an event is deleted at the source, its copy at each destination is deleted too.",
     )
     source_system_value: Optional[str] = Field(
         None,
         title="Source system code",
         description=(
-            "Added in front of shared category and event type values, like 'sndbx_wildlife_sighting'. "
+            "Added in front of shared category and event type values, like 'serengeti_wildlife_sighting'. "
             "Changing it on an existing share copies its events again. Leave empty to use the site's name."
         ),
     )
@@ -506,10 +528,29 @@ class EventsCompatibility(BaseModel):
         None,
         title="Source system display name",
         description=(
-            "Added in front of shared event titles and type names, like 'Sndbx-Wildlife sighting'. "
+            "Added in front of shared names and titles, like 'Serengeti-Wildlife sighting'. "
             "Leave empty to use the site's name."
         ),
     )
+
+    class Config:
+        @staticmethod
+        def schema_extra(schema: dict, model) -> None:
+            """The two text boxes show only while a switch that uses them is on: the display
+            name for any of the three prefixes, the code for categories or event types."""
+            props = schema["properties"]
+            name, code = props.pop("source_system_name"), props.pop("source_system_value")
+
+            def all_off(*fields):
+                return {"properties": {f: {"const": False} for f in fields}, "required": list(fields)}
+
+            schema["if"] = all_off("prepend_system_to_categories", "prepend_system_to_event_types",
+                                   "prepend_system_to_event_titles")
+            schema["else"] = {
+                "properties": {"source_system_name": name},
+                "if": all_off("prepend_system_to_categories", "prepend_system_to_event_types"),
+                "else": {"properties": {"source_system_value": code}},
+            }
 
 
 class ObservationsCompatibility(BaseModel):
@@ -542,12 +583,25 @@ class SyncEventsConfig(PullActionConfiguration):
         order=["run_on_schedule", "event_types", "area_feature_groups", "compatibility", "start_from"],
     )
 
+    class Config:
+        @staticmethod
+        def schema_extra(schema: dict, model) -> None:
+            # A plain $ref instead of pydantic's allOf wrapper: the form fills in the
+            # switches' defaults only through a $ref, so an untouched switch shows its value.
+            compatibility = schema["properties"]["compatibility"]
+            compatibility.update(compatibility.pop("allOf")[0])
+
     @classmethod
     def ui_schema(cls, *args, **kwargs):
         base = super().ui_schema(*args, **kwargs)
         base["event_types"] = {"items": {"gundi:reference": _reference("list_share_event_types")}}
         base["area_feature_groups"] = {"items": {"gundi:reference": _reference("list_feature_groups")}}
         base["start_from"] = {"ui:widget": "hidden"}
+        # The prefix switches first, the text boxes they use right below them.
+        base["compatibility"] = {"ui:order": [
+            "prepend_system_to_categories", "prepend_system_to_event_types", "prepend_system_to_event_titles",
+            "*", "delete_unmatched_events", "update_schema",
+        ]}
         base["gundi:raw_view"] = raw_view(EVENTS_V1_KEYS, drop=EVENTS_V1_DROP, mask=V1_MASK)
         base["gundi:share_preview"] = _share_preview("preview_events_share", "events", ["event_types"])
         return base
