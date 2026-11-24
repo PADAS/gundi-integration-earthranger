@@ -113,10 +113,27 @@ async def test_all_subject_groups_when_none_are_picked(site):
     vultures = result["groups"][1]
     assert vultures["items"][0] == {
         "value": "s1", "label": "Kali", "icon_url": f"{SITE}/static/vulture.svg",
-        "is_active": True, "detail": "2026-11-09T09:41:00+00:00",
+        "is_active": True, "detail": "2026-11-09T09:41:00+00:00", "note": preview.OLD_TRACK_NOTE,
     }
     assert vultures["items"][1]["icon_url"] == "https://cdn.example.org/t.svg"
     assert vultures["items"][1]["detail"] is None
+    assert vultures["items"][1]["note"] is None  # no track: the portal already says so
+
+
+@pytest.mark.asyncio
+async def test_a_subject_with_a_recent_point_has_no_note(site, monkeypatch):
+    from app.ersharing.timeutil import parse_dt
+    monkeypatch.setattr(preview, "utcnow", lambda: parse_dt("2026-11-09T20:00:00Z"))
+    result = await preview_subjects(site, ["g1"])
+    assert result["groups"][0]["items"][0]["note"] is None  # 10 hours old: inside the window
+    monkeypatch.setattr(preview, "utcnow", lambda: parse_dt("2026-11-09T22:00:00Z"))
+    result = await preview_subjects(site, ["g1"])
+    assert result["groups"][0]["items"][0]["note"] == preview.OLD_TRACK_NOTE
+
+
+def test_the_note_uses_the_first_share_window():
+    from app.ersharing import sync_observations
+    assert preview.FIRST_SHARE_WINDOW == sync_observations.BACKFILL
 
 
 @pytest.mark.asyncio

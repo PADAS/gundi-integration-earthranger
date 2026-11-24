@@ -10,15 +10,22 @@ categories and event types (v2, and the v1 types ER's v2 list leaves out),
 and subject groups with their subjects.
 """
 import asyncio
+from datetime import timedelta
 from typing import Dict, Iterable, List, Optional
 
 from app.services.errors import IntegrationAuthError
 
 from .event_types import category_value
 from .naming import site_host
+from .timeutil import parse_dt, utcnow
 
 # Items listed per group; a group's total_count stays exact when it is cut.
 ITEM_CAP = 200
+
+# A subject's first share covers this far back (sync_observations.BACKFILL).
+FIRST_SHARE_WINDOW = timedelta(hours=12)
+OLD_TRACK_NOTE = ("Its last point is more than 12 hours old, so only points recorded "
+                  "from now on will be shared.")
 
 # The list can't tell which events or points fall inside an area filter, so it
 # says the filter narrows what is shared.
@@ -152,6 +159,18 @@ async def preview_events(site, event_types: Optional[Iterable], area_feature_gro
     )
 
 
+def _track_note(last_position: Optional[str], now) -> Optional[str]:
+    """Information, not a warning: a subject whose last point is older than the first
+    share's window has nothing to share until it records a new one."""
+    if not last_position:
+        return None
+    try:
+        last = parse_dt(last_position)
+    except (TypeError, ValueError):
+        return None
+    return OLD_TRACK_NOTE if now - last > FIRST_SHARE_WINDOW else None
+
+
 async def preview_subjects(site, subject_groups: Optional[Iterable],
                            area_feature_groups: Optional[Iterable] = None) -> dict:
     """Subjects grouped by subject group, each with its icon and last point.
@@ -181,6 +200,7 @@ async def preview_subjects(site, subject_groups: Optional[Iterable],
     def distinct(groups: List[dict]) -> int:
         return len({str(s.get("id")) for g in groups for s in (g.get("subjects") or [])})
 
+    now = utcnow()
     groups = []
     for g in picked:
         subjects = g.get("subjects") or []
@@ -195,6 +215,7 @@ async def preview_subjects(site, subject_groups: Optional[Iterable],
                 "icon_url": icon(s.get("image_url")),
                 "is_active": s.get("is_active") is not False,
                 "detail": s.get("last_position_date"),
+                "note": _track_note(s.get("last_position_date"), now),
             } for s in subjects), key=_by_label),
         })
     groups.sort(key=lambda grp: (grp["label"] or "").lower())
