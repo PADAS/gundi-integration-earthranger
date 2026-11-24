@@ -242,6 +242,46 @@ async def test_a_subject_whose_last_point_is_outside_the_area_gets_a_note(site, 
     assert (await preview_subjects(site, [], []))["groups"][0]["items"][0]["note"] is None
 
 
+
+@pytest.mark.asyncio
+async def test_a_subject_every_destination_already_has_gets_no_old_point_note(site, monkeypatch):
+    from app.ersharing.timeutil import parse_dt
+    monkeypatch.setattr(preview, "utcnow", lambda: parse_dt("2026-11-10T12:00:00Z"))
+    site.subject_groups[0]["subjects"][1]["last_position_date"] = "2026-11-09T09:41:00+00:00"
+    asked = []
+
+    async def is_shared(subject_id):
+        asked.append(subject_id)
+        return subject_id == "s1"
+
+    result = await preview_subjects(site, ["g1"], is_shared=is_shared)
+    notes = {item["value"]: item["note"] for item in result["groups"][0]["items"]}
+    assert notes == {"s1": None, "s2": preview.OLD_TRACK_NOTE}
+    assert sorted(asked) == ["s1", "s2"]
+
+
+@pytest.mark.asyncio
+async def test_only_subjects_with_an_old_point_are_checked(site, monkeypatch):
+    from app.ersharing.timeutil import parse_dt
+    monkeypatch.setattr(preview, "utcnow", lambda: parse_dt("2026-11-09T12:00:00Z"))
+    asked = []
+
+    async def is_shared(subject_id):
+        asked.append(subject_id)
+        return True
+
+    await preview_subjects(site, [], is_shared=is_shared)
+    assert asked == []  # Kali's point is 2 hours old and Tumbo has none
+
+
+@pytest.mark.asyncio
+async def test_old_point_notes_stay_when_the_shared_check_fails(site):
+    async def is_shared(subject_id):
+        raise RuntimeError("redis is down")
+
+    result = await preview_subjects(site, ["g1"], is_shared=is_shared)
+    assert result["groups"][0]["items"][0]["note"] == preview.OLD_TRACK_NOTE
+
 @pytest.mark.asyncio
 async def test_an_area_that_cant_be_read_leaves_the_list_without_area_notes(site):
     site.subject_groups[0]["subjects"][1]["last_position"] = _point(5.5, 5.5)

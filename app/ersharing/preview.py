@@ -10,8 +10,9 @@ categories and event types (v2, and the v1 types ER's v2 list leaves out),
 and subject groups with their subjects.
 """
 import asyncio
+import logging
 from datetime import timedelta
-from typing import Dict, Iterable, List, Optional
+from typing import Awaitable, Callable, Dict, Iterable, List, Optional, Set
 
 from app.services.errors import IntegrationAuthError, IntegrationError
 
@@ -19,6 +20,8 @@ from .event_types import category_value
 from .geo import load_area
 from .naming import site_host
 from .timeutil import parse_dt, utcnow
+
+logger = logging.getLogger(__name__)
 
 # Items listed per group; a group's total_count stays exact when it is cut.
 ITEM_CAP = 200
@@ -187,17 +190,38 @@ def _area_note(subject: dict, area) -> Optional[str]:
     return None if area.contains_point(coordinates[0], coordinates[1]) else OUTSIDE_AREA_NOTE
 
 
-def _subject_note(subject: dict, now, area) -> Optional[str]:
-    notes = [n for n in (_area_note(subject, area), _track_note(subject.get("last_position_date"), now)) if n]
+def _subject_note(subject: dict, now, area, shared: Set[str]) -> Optional[str]:
+    track_note = None if str(subject.get("id")) in shared else _track_note(subject.get("last_position_date"), now)
+    notes = [n for n in (_area_note(subject, area), track_note) if n]
     return " ".join(notes) or None
 
 
+async def _already_shared(subjects: Iterable[dict], now,
+                          is_shared: Optional[Callable[[str], Awaitable[bool]]]) -> Set[str]:
+    """Subjects with an old last point that every destination has already received once.
+    The 12-hour first share no longer applies to them, so they get no old-point note.
+    Without a check, or when it fails, every old point keeps its note."""
+    if is_shared is None:
+        return set()
+    old = list({str(s.get("id")) for s in subjects if _track_note(s.get("last_position_date"), now)})
+    if not old:
+        return set()
+    try:
+        results = await asyncio.gather(*(is_shared(subject_id) for subject_id in old))
+    except Exception:
+        logger.warning("preview: couldn't read which subjects were already shared", exc_info=True)
+        return set()
+    return {subject_id for subject_id, done in zip(old, results) if done}
+
+
 async def preview_subjects(site, subject_groups: Optional[Iterable],
-                           area_feature_groups: Optional[Iterable] = None) -> dict:
+                           area_feature_groups: Optional[Iterable] = None,
+                           is_shared: Optional[Callable[[str], Awaitable[bool]]] = None) -> dict:
     """Subjects grouped by subject group, each with its icon and last point.
 
     Counts are distinct subjects, as sync_observations shares them: a subject
-    in two picked groups is shared once.
+    in two picked groups is shared once. `is_shared(subject_id)` says whether every
+    destination has received the subject before; such subjects get no old-point note.
     """
     site_url = site.url
     selected = _wanted(subject_groups)
@@ -228,6 +252,7 @@ async def preview_subjects(site, subject_groups: Optional[Iterable],
         except IntegrationError:
             area = None  # the list still shows; the area warning below still applies
     now = utcnow()
+    shared = await _already_shared((s for g in picked for s in (g.get("subjects") or [])), now, is_shared)
     groups = []
     for g in picked:
         subjects = g.get("subjects") or []
@@ -242,7 +267,7 @@ async def preview_subjects(site, subject_groups: Optional[Iterable],
                 "icon_url": icon(s.get("image_url")),
                 "is_active": s.get("is_active") is not False,
                 "detail": s.get("last_position_date"),
-                "note": _subject_note(s, now, area),
+                "note": _subject_note(s, now, area, shared),
             } for s in subjects), key=_by_label),
         })
     groups.sort(key=lambda grp: (grp["label"] or "").lower())

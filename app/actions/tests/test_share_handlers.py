@@ -74,3 +74,57 @@ def test_the_auth_form_has_no_site_url_the_connections_own_is_used():
     from app.ersharing.clients import source_url_of
     assert "base_url" not in AuthenticateConfig.schema()["properties"]
     assert source_url_of(INTEGRATION, AuthenticateConfig(token="t")) == "https://sitea.pamdas.org"
+
+
+class _FakeShareState:
+    markers = {}
+
+    def __init__(self, integration_id):
+        self.integration_id = integration_id
+
+    async def get_marker(self, action_id, key):
+        return self.markers.get((self.integration_id, action_id, key))
+
+
+def _connection(*destinations):
+    from types import SimpleNamespace
+    return SimpleNamespace(destinations=[
+        SimpleNamespace(id=d_id, type=SimpleNamespace(value=type_value)) for d_id, type_value in destinations])
+
+
+def _gundi_returning(mocker, connection=None, error=None):
+    from unittest.mock import AsyncMock, MagicMock
+    from app.actions import handlers
+    client = MagicMock()
+    client.get_connection_details = AsyncMock(return_value=connection, side_effect=error)
+    client.__aenter__ = AsyncMock(return_value=client)
+    client.__aexit__ = AsyncMock(return_value=False)
+    mocker.patch.object(handlers, "GundiClient", return_value=client)
+
+
+@pytest.mark.asyncio
+async def test_a_subject_counts_as_shared_once_every_earthranger_destination_has_it(mocker):
+    from types import SimpleNamespace
+    from app.actions import handlers
+    from app.ersharing import state as state_module
+    mocker.patch.object(state_module, "ShareState", _FakeShareState)
+    _gundi_returning(mocker, _connection(("d1", "earth_ranger"), ("d2", "earth_ranger"), ("s1", "smart_connect")))
+    _FakeShareState.markers = {
+        ("i1", "sync_observations", "d1:subject:both"): {"ok": True},
+        ("i1", "sync_observations", "d2:subject:both"): {"ok": True},
+        ("i1", "sync_observations", "d1:subject:one"): {"ok": True},
+    }
+    is_shared = await handlers._subject_shared_check(SimpleNamespace(id="i1"))
+    assert await is_shared("both") is True
+    assert await is_shared("one") is False  # d2 hasn't had it yet
+    assert await is_shared("none") is False
+
+
+@pytest.mark.asyncio
+async def test_no_shared_check_when_gundi_cant_be_read_or_has_no_earthranger_destination(mocker):
+    from types import SimpleNamespace
+    from app.actions import handlers
+    _gundi_returning(mocker, error=RuntimeError("gundi is down"))
+    assert await handlers._subject_shared_check(SimpleNamespace(id="i1")) is None
+    _gundi_returning(mocker, _connection(("s1", "smart_connect")))
+    assert await handlers._subject_shared_check(SimpleNamespace(id="i1")) is None

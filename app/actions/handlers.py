@@ -2025,7 +2025,8 @@ async def action_preview_subjects_share(integration: Integration, action_config:
         from app.ersharing.preview import preview_subjects as preview_shared_subjects
         async with await _source_site(integration) as site:
             return await preview_shared_subjects(site, action_config.subject_groups,
-                                                 action_config.area_feature_groups)
+                                                 action_config.area_feature_groups,
+                                                 is_shared=await _subject_shared_check(integration))
     async with _translating_er_client(integration) as earth_ranger:
         return await preview_subjects(
             earth_ranger, er_site_root(integration.base_url), action_config.subject_group_ids,
@@ -2327,6 +2328,33 @@ async def action_sync_events(integration: Integration, action_config: SyncEvents
 async def action_sync_observations(integration: Integration, action_config: SyncObservationsConfig):
     from app.ersharing.sync_observations import run_sync_observations
     return await run_sync_observations(integration, action_config)
+
+
+async def _subject_shared_check(integration):
+    """A check for the subjects preview: has every EarthRanger destination on this
+    connection already received the subject once (Share saved its progress)? None when
+    the destinations can't be read, so the preview keeps its old-point notes."""
+    from app.ersharing.destinations import EARTHRANGER_TYPE
+    from app.ersharing.state import OBSERVATIONS_ACTION, ShareState
+    from app.ersharing.sync_observations import subject_marker_key
+    try:
+        async with GundiClient() as gundi:
+            connection = await gundi.get_connection_details(str(integration.id))
+    except Exception:
+        logger.warning("Preview Subjects: couldn't read the destinations from Gundi", exc_info=True)
+        return None
+    destination_ids = [str(d.id) for d in (connection.destinations or [])
+                       if d.type and d.type.value == EARTHRANGER_TYPE]
+    if not destination_ids:
+        return None
+    state = ShareState(str(integration.id))
+
+    async def is_shared(subject_id: str) -> bool:
+        for destination_id in destination_ids:
+            if await state.get_marker(OBSERVATIONS_ACTION, subject_marker_key(destination_id, subject_id)) is None:
+                return False
+        return True
+    return is_shared
 
 
 async def _source_site(integration):
