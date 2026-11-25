@@ -25,6 +25,10 @@ jobs:
       - name: Install compile dependencies
         run: pip-compile --output-file=requirements.txt requirements-base.in requirements-dev.in requirements.in
       - name: Install dependencies
+        # pyjq 2.6.0 builds its bundled C code from source. The ubuntu-26.04 runner image's
+        # newer GCC treats incompatible pointer types as errors, which stops that build.
+        env:
+          CFLAGS: -Wno-error=incompatible-pointer-types
         run: pip install --no-cache-dir -r requirements.txt
       - name: Run unit tests
         run: pytest
