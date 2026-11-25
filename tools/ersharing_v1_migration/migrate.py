@@ -323,6 +323,14 @@ def build_route(plan_route: list, plan_dests: List[list], v1: V1, api: Api) -> R
     planned = {h for h in plan_route[R_DESTS].split(", ") if h}
     if set(dests) != planned:
         raise RouteError(f"destinations changed in v1: plan {sorted(planned)}, now {sorted(dests)}")
+    # Both v2 sync actions send to every destination of the route, so each destination
+    # must get every kind of data this route moves.
+    for d in dests.values():
+        missing = [k for k, ids, on in (("events", event_ids, d.events), ("tracks", track_ids, d.tracks))
+                   if ids and not on]
+        if missing:
+            raise RouteError(f"v1 no longer sends {' and '.join(missing)} to {d.host}, "
+                             "but v2 would send all of this route's data there")
     for r in plan_dests:
         d = dests[r[D_HOST]]
         if d.tracks and (r[D_PROVIDER_KEY] or V1_DEFAULT_PROVIDER_KEY) != d.provider_key:
@@ -434,6 +442,7 @@ def resolve(spec: RouteSpec, v2: V2, mapping: dict, name: str) -> None:
             raise RouteError(f"v2 integration {src['id']} is recorded for route {claimed[0]} in the mapping file")
         if auth_token(src) != spec.source_token:
             raise RouteError(f"v2 integration {src['id']} ({spec.name}) exists with a different source token")
+        check_source_settings(spec, src)
         spec.source_v2_id = src["id"]
         spec.v2_route_id = (src.get("default_route") or {}).get("id")
         spec.source_action = "exists"
@@ -461,6 +470,44 @@ def resolve(spec: RouteSpec, v2: V2, mapping: dict, name: str) -> None:
 
     if spec.source_action == "exists":
         check_existing_route(spec, v2)
+        if spec.source_action == "resume":
+            check_source_paused(existing[0])
+
+
+def saved_sync_settings(integration: dict) -> Dict[str, dict]:
+    """The sync action settings saved on a v2 integration, by action name."""
+    return {(c.get("action") or {}).get("value"): c.get("data") or {}
+            for c in integration.get("configurations") or []
+            if (c.get("action") or {}).get("value") in (SYNC_EVENTS, SYNC_OBSERVATIONS)}
+
+
+# Changed by people at cutover (run_on_schedule) or by the runner as it goes (start_from).
+_NOT_COMPARED = ("run_on_schedule", "start_from")
+
+
+def check_source_settings(spec: RouteSpec, src: dict) -> None:
+    """A source made by an earlier run must hold the sync settings v1 has now."""
+    saved = saved_sync_settings(src)
+    for action, want in ((SYNC_EVENTS, spec.sync_events), (SYNC_OBSERVATIONS, spec.sync_observations)):
+        have = saved.get(action)
+        if want is None and have is not None:
+            raise RouteError(f"v2 integration {src['id']} has {action} settings, but v1 no longer shares that data")
+        if want is not None and have is None:
+            raise RouteError(f"v2 integration {src['id']} has no {action} settings")
+        if want is not None and ({k: v for k, v in have.items() if k not in _NOT_COMPARED}
+                                 != {k: v for k, v in want.items() if k not in _NOT_COMPARED}):
+            raise RouteError(f"v2 integration {src['id']} has {action} settings that differ from v1 now")
+
+
+def check_source_paused(src: dict) -> None:
+    """Before finishing a half-done route, its source must still be off, so adding
+    destinations can't start sharing while v1 still runs."""
+    if src.get("enabled") is not False:
+        raise RouteError(f"v2 integration {src['id']} is turned on; turn it off before finishing this route")
+    running = [a for a, data in saved_sync_settings(src).items() if data.get("run_on_schedule") is not False]
+    if running:
+        raise RouteError(f"v2 integration {src['id']} has {', '.join(sorted(running))} running on a schedule; "
+                         "turn that off before finishing this route")
 
 
 def check_existing_route(spec: RouteSpec, v2: V2) -> None:
@@ -565,6 +612,11 @@ def apply_route(spec: RouteSpec, v2: V2, mapping: dict, mapping_path: str) -> No
         spec.source_v2_id = created["id"]
         spec.v2_route_id = (created.get("default_route") or {}).get("id")
         print(f"  created source integration: {spec.source_v2_id}")
+    else:
+        # Read the source again right before writing: it may have changed since the dry run.
+        src = api.get(f"/v2/integrations/{spec.source_v2_id}/")
+        check_source_paused(src)
+        check_source_settings(spec, src)
     if not spec.v2_route_id:
         spec.v2_route_id = (api.get(f"/v2/integrations/{spec.source_v2_id}/").get("default_route") or {}).get("id")
     if not spec.v2_route_id:
@@ -711,7 +763,7 @@ def main(argv=None) -> int:
             record(spec, mapping, args.mapping)
     if not todo:
         print("Nothing to write.")
-        return 0
+        return 0 if not refused else 2
 
     phrase = f"apply {len(todo)} to {urllib.parse.urlparse(api.base).hostname}"
     print(f"\nThis will write to {api.base}: {len(todo)} route(s), each created disabled with "
@@ -727,8 +779,11 @@ def main(argv=None) -> int:
         except (RouteError, ApiError) as e:
             failures += 1
             print(f"  FAILED: {api.redact(str(e))}")
-    print(f"Done: {len(todo) - failures} written, {failures} failed. Mapping file: {args.mapping}")
-    return 0 if not failures else 1
+    print(f"Done: {len(todo) - failures} written, {failures} failed, {len(refused)} refused. "
+          f"Mapping file: {args.mapping}")
+    if failures:
+        return 1
+    return 0 if not refused else 2
 
 
 if __name__ == "__main__":

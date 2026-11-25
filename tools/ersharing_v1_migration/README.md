@@ -67,7 +67,9 @@ For each route it:
 - **Live v1 data:** tokens and settings come from the v1 API at run time, never
   from the plan. Tokens are never printed.
 - **Plan drift:** a route is refused if its v1 configs are no longer enabled, or
-  if v1 now sends to destinations the plan doesn't list.
+  if v1 now sends to destinations the plan doesn't list. It's also refused if a
+  destination no longer gets every kind of data in the route (events, tracks),
+  because v2 sends all of the route's data to every destination.
 - **Provider keys:** a route is refused if v1 now uses a different provider key,
   or if v2 would send a different key than v1. For example, v2 trims spaces from
   the key.
@@ -81,6 +83,12 @@ For each route it:
   start sending this share's data to that connection's existing destinations.
 - **Safe to re-run:** a route that's already complete is skipped. A route left
   half-done (integration created, no destinations yet) is finished on the next run.
+  Either way, the integration's saved sync settings must still match v1 (apart from
+  `run_on_schedule` and `start_from`). A half-done route is finished only while its
+  integration is off and both sync actions have `run_on_schedule` off. The script
+  reads the integration again right before it writes.
+- **Exit code:** 0 when every route is ready or written, 2 when any route was
+  refused, 1 when a write failed or wasn't confirmed.
 
 ## v1 calls
 

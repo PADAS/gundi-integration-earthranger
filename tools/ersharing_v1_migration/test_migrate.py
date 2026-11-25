@@ -220,3 +220,84 @@ def test_tokens_are_redacted():
     api.secrets.add("dest-secret")
     text = api.redact('{"token": "abc", "x": "dest-secret", "y": "portal-secret"}')
     assert "abc" not in text and "dest-secret" not in text and "portal-secret" not in text
+
+
+# ---- review fixes
+
+def test_destination_missing_one_kind_of_data_is_refused():
+    events = {"id": "e1", "endpoint": f"https://{SRC}/api/v1.0", "owner": OWNER, "token": "src-token",
+              "state": {"dest_endpoint": f"https://{DEST_A}/api/v1.0", "dest_token": "d"}}
+    v1 = fake_v1({"e1": events, "t1": tracks_config("t1", key="kws")},
+                 {"o1": {"id": "o1", "type_slug": "earth_ranger", "endpoint": f"https://{DEST_A}/", "token": "d"},
+                  "o2": {"id": "o2", "type_slug": "earth_ranger", "endpoint": f"https://{DEST_B}/", "token": "b"}},
+                 {"dg1": ["o1", "o2"]})
+    row = route_row("R1", events="yes", dests=f"{DEST_A}, {DEST_B}", event_ids="e1")
+    plan_dests = [dest_row("R1", DEST_A, "kws", "o1"), dest_row("R1", DEST_B, "kws", "o2")]
+    with pytest.raises(m.RouteError, match=f"no longer sends events to {DEST_B}"):
+        m.build_route(row, plan_dests, v1, FakeApi())
+
+
+def saved_source(enabled=False, **obv):
+    data = {"run_on_schedule": False, **obv}
+    return {"id": "src-1", "enabled": enabled,
+            "configurations": [{"action": {"value": m.SYNC_OBSERVATIONS}, "data": data}]}
+
+
+def test_source_settings_must_match_v1_apart_from_schedule():
+    spec = planned_route("R001", FakeV2(FakeApi()))
+    spec.sync_observations = {"run_on_schedule": False, "subject_groups": []}
+    m.check_source_settings(spec, saved_source(run_on_schedule=True, subject_groups=[]))
+    with pytest.raises(m.RouteError, match="differ from v1"):
+        m.check_source_settings(spec, saved_source(subject_groups=["g"]))
+    spec.sync_events = {"run_on_schedule": False}
+    with pytest.raises(m.RouteError, match="no sync_events settings"):
+        m.check_source_settings(spec, saved_source(subject_groups=[]))
+
+
+def test_half_done_route_is_finished_only_while_its_source_is_off(tmp_path):
+    api = FakeApi()
+    v2 = FakeV2(api)
+    spec = planned_route("R001", v2)
+    spec.source_action, spec.source_v2_id, spec.v2_route_id = "resume", "src-1", "route-1"
+    api.get = lambda path, raw=False: saved_source(enabled=True)
+    with pytest.raises(m.RouteError, match="is turned on"):
+        m.apply_route(spec, v2, {}, str(tmp_path / "mapping.json"))
+    assert api.patches == []
+    api.get = lambda path, raw=False: saved_source(run_on_schedule=True)
+    with pytest.raises(m.RouteError, match="running on a schedule"):
+        m.apply_route(spec, v2, {}, str(tmp_path / "mapping.json"))
+    assert api.patches == []
+
+
+def test_apply_exits_nonzero_when_a_route_is_refused(tmp_path, monkeypatch):
+    plan = tmp_path / "plan.json"
+    plan.write_text(m.json.dumps({"routes": [route_row("R001")], "dests": []}))
+    token = tmp_path / "token"
+    token.write_text("t")
+
+    class Api:
+        base = "https://api.example.org"
+
+        def __init__(self, *a):
+            pass
+
+        def redact(self, text):
+            return text
+
+    class V2:
+        def __init__(self, api):
+            pass
+
+        def missing_actions(self):
+            return []
+
+    def refuse(*a):
+        raise m.RouteError("drift")
+
+    monkeypatch.setattr(m, "Api", Api)
+    monkeypatch.setattr(m, "V1", lambda api: None)
+    monkeypatch.setattr(m, "V2", V2)
+    monkeypatch.setattr(m, "build_route", refuse)
+    code = m.main(["--route", "R001", "--apply", "--plan", str(plan), "--token-file", str(token),
+                   "--mapping", str(tmp_path / "mapping.json")])
+    assert code == 2
